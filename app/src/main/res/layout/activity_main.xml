@@ -1,19 +1,115 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/main"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     tools:context=".MainActivity">
 
+    <TextureView
+        android:id="@+id/preview_texture"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Development Mode Banner -->
     <TextView
+        android:id="@+id/dev_banner"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Hello World!"
-        app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent" />
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="8dp"
+        android:background="#AA000000"
+        android:paddingHorizontal="12dp"
+        android:paddingVertical="4dp"
+        android:text="Development Mode: Formed stream. Colors will be incorrect until RAW_SENSOR is available."
+        android:textColor="#FFFFAA00"
+        android:textSize="11sp"
+        android:visibility="gone" />
 
-</androidx.constraintlayout.widget.ConstraintLayout>
+    <!-- Top Controls Bar -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="40dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <!-- Flash Toggle -->
+        <TextView
+            android:id="@+id/flash_button"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="#66000000"
+            android:gravity="center"
+            android:text="⚡"
+            android:textColor="#FFFFFF"
+            android:textSize="18sp"
+            android:clickable="true"
+            android:focusable="true" />
+
+        <!-- WB Button -->
+        <TextView
+            android:id="@+id/wb_button"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="8dp"
+            android:background="#66000000"
+            android:gravity="center"
+            android:text="WB"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            android:clickable="true"
+            android:focusable="true" />
+    </LinearLayout>
+
+    <!-- Bottom Controls -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <!-- Zoom Slider -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:id="@+id/zoom_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="1.0x"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:minWidth="40dp"
+                android:gravity="end" />
+
+            <SeekBar
+                android:id="@+id/zoom_slider"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginHorizontal="8dp"
+                android:min="0"
+                android:max="400"
+                android:progress="0" />
+        </LinearLayout>
+
+        <!-- Lens Selector -->
+        <LinearLayout
+            android:id="@+id/lens_selector"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:orientation="horizontal"
+            android:layout_marginBottom="8dp" />
+
+    </LinearLayout>
+
+</FrameLayout>

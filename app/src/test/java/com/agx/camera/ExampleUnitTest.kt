@@ -1,4 +1,4 @@
-package com.example.agxcam
+package com.agx.camera
 
 import org.junit.Test
 
