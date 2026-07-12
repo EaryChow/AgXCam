@@ -1,4 +1,21 @@
-reference_blender_codes/
-design_spec.txt
+# Build outputs
+build/
+app/build/
+
+# Gradle
+.gradle/
+
+# IDE
+.idea/
+
+# Local configuration (SDK paths, etc.)
+local.properties
+
+# OS files
 .DS_Store
 Thumbs.db
+
+# Project-specific
+reference_blender_codes/
+design_spec.txt
+all_changes.txt
