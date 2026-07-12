@@ -11,7 +11,6 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- Development Mode Banner -->
     <TextView
         android:id="@+id/dev_banner"
         android:layout_width="wrap_content"
@@ -36,7 +35,6 @@
         android:orientation="horizontal"
         android:gravity="center_vertical">
 
-        <!-- Flash Toggle -->
         <TextView
             android:id="@+id/flash_button"
             android:layout_width="40dp"
@@ -49,7 +47,6 @@
             android:clickable="true"
             android:focusable="true" />
 
-        <!-- WB Button -->
         <TextView
             android:id="@+id/wb_button"
             android:layout_width="40dp"
@@ -62,6 +59,19 @@
             android:textSize="12sp"
             android:clickable="true"
             android:focusable="true" />
+
+        <TextView
+            android:id="@+id/settings_button"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="8dp"
+            android:background="#66000000"
+            android:gravity="center"
+            android:text="⚙"
+            android:textColor="#FFFFFF"
+            android:textSize="18sp"
+            android:clickable="true"
+            android:focusable="true" />
     </LinearLayout>
 
     <!-- Bottom Controls -->
@@ -72,7 +82,6 @@
         android:orientation="vertical"
         android:padding="16dp">
 
-        <!-- Zoom Slider -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -101,7 +110,6 @@
                 android:progress="0" />
         </LinearLayout>
 
-        <!-- Lens Selector -->
         <LinearLayout
             android:id="@+id/lens_selector"
             android:layout_width="wrap_content"
@@ -109,7 +117,237 @@
             android:layout_gravity="center_horizontal"
             android:orientation="horizontal"
             android:layout_marginBottom="8dp" />
-
     </LinearLayout>
+
+    <!-- Settings Panel (slides from right) -->
+    <ScrollView
+        android:id="@+id/settings_panel"
+        android:layout_width="320dp"
+        android:layout_height="match_parent"
+        android:layout_gravity="end"
+        android:background="#CC111111"
+        android:padding="12dp"
+        android:visibility="gone"
+        android:fillViewport="true">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <!-- Preset Controls -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Preset"
+                android:textColor="#FFAAAAAA"
+                android:textSize="11sp"
+                android:layout_marginBottom="4dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="4dp">
+
+                <Spinner
+                    android:id="@+id/preset_spinner"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_weight="1"
+                    android:background="#444444"
+                    android:popupBackground="#333333" />
+
+                <TextView
+                    android:id="@+id/preset_save_btn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:layout_marginStart="6dp"
+                    android:background="#444444"
+                    android:gravity="center"
+                    android:text="Save"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="11sp"
+                    android:paddingHorizontal="10dp"
+                    android:clickable="true"
+                    android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/preset_delete_btn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:layout_marginStart="4dp"
+                    android:background="#444444"
+                    android:gravity="center"
+                    android:text="Del"
+                    android:textColor="#FFFF6666"
+                    android:textSize="11sp"
+                    android:paddingHorizontal="10dp"
+                    android:clickable="true"
+                    android:focusable="true" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
+
+                <TextView
+                    android:id="@+id/preset_rename_btn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:background="#444444"
+                    android:gravity="center"
+                    android:text="Rename"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="11sp"
+                    android:paddingHorizontal="10dp"
+                    android:clickable="true"
+                    android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/preset_reset_btn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:layout_marginStart="4dp"
+                    android:background="#444444"
+                    android:gravity="center"
+                    android:text="Reset"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="11sp"
+                    android:paddingHorizontal="10dp"
+                    android:clickable="true"
+                    android:focusable="true" />
+            </LinearLayout>
+
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
+
+            <!-- Curve Parameters -->
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Curve" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
+
+            <TextView android:id="@+id/contrast_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Contrast  2.4" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/contrast_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="26" android:progress="10" android:layout_marginBottom="4dp" />
+
+            <TextView android:id="@+id/toe_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Toe  1.5" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/toe_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="93" android:progress="8" android:layout_marginBottom="4dp" />
+
+            <TextView android:id="@+id/shoulder_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Shoulder  1.5" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/shoulder_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="93" android:progress="8" android:layout_marginBottom="8dp" />
+
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
+
+            <!-- Inset Primaries -->
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical" android:layout_marginBottom="4dp">
+                <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Inset Primaries" android:textColor="#FFAAAAAA" android:textSize="11sp" />
+                <CheckBox android:id="@+id/use_pre_for_post_cb" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Use Pre for Post" android:textColor="#FFFFFFFF" android:textSize="10sp" android:checked="true" />
+            </LinearLayout>
+
+            <TextView android:id="@+id/inset_rot_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="RGB Rot R  0.037" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/inset_rot_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="268" android:layout_marginBottom="2dp" />
+
+            <TextView android:id="@+id/inset_rot_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="RGB Rot G  -0.021" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/inset_rot_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="253" android:layout_marginBottom="2dp" />
+
+            <TextView android:id="@+id/inset_rot_b_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="RGB Rot B  -0.053" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/inset_rot_b_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="236" android:layout_marginBottom="4dp" />
+
+            <TextView android:id="@+id/inset_pur_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Purity R  33.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/inset_pur_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="600" android:progress="330" android:layout_marginBottom="2dp" />
+
+            <TextView android:id="@+id/inset_pur_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Purity G  28.1" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/inset_pur_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="600" android:progress="281" android:layout_marginBottom="2dp" />
+
+            <TextView android:id="@+id/inset_pur_b_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Purity B  12.5" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/inset_pur_b_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="600" android:progress="125" android:layout_marginBottom="8dp" />
+
+            <!-- Outset Primaries (hidden when Use Pre for Post is on) -->
+            <LinearLayout android:id="@+id/outset_section" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
+                <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Outset Primaries" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
+
+                <TextView android:id="@+id/outset_rot_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Rev Rot R  0.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                <SeekBar android:id="@+id/outset_rot_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="262" android:layout_marginBottom="2dp" />
+
+                <TextView android:id="@+id/outset_rot_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Rev Rot G  0.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                <SeekBar android:id="@+id/outset_rot_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="262" android:layout_marginBottom="2dp" />
+
+                <TextView android:id="@+id/outset_rot_b_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Rev Rot B  0.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                <SeekBar android:id="@+id/outset_rot_b_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="262" android:layout_marginBottom="4dp" />
+
+                <TextView android:id="@+id/outset_pur_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Restore R  32.3" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                <SeekBar android:id="@+id/outset_pur_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="600" android:progress="323" android:layout_marginBottom="2dp" />
+
+                <TextView android:id="@+id/outset_pur_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Restore G  28.3" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                <SeekBar android:id="@+id/outset_pur_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="600" android:progress="283" android:layout_marginBottom="2dp" />
+
+                <TextView android:id="@+id/outset_pur_b_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Restore B  3.7" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                <SeekBar android:id="@+id/outset_pur_b_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="600" android:progress="37" android:layout_marginBottom="4dp" />
+
+                <TextView
+                    android:id="@+id/copy_inset_to_outset_btn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:background="#444444"
+                    android:gravity="center"
+                    android:text="Copy Inset to Outset"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="11sp"
+                    android:paddingHorizontal="10dp"
+                    android:layout_marginBottom="8dp"
+                    android:clickable="true"
+                    android:focusable="true" />
+            </LinearLayout>
+
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
+
+            <!-- Global Tinting -->
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Tinting" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
+
+            <TextView android:id="@+id/tinting_scale_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Scale  0.00" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/tinting_scale_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="400" android:progress="200" android:layout_marginBottom="4dp" />
+
+            <TextView android:id="@+id/tinting_hue_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Hue  0.00" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/tinting_hue_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="628" android:progress="314" android:layout_marginBottom="8dp" />
+
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
+
+            <!-- NR -->
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Noise Reduction" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
+
+            <TextView android:id="@+id/nr_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="NR Strength  0.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/nr_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="100" android:progress="0" android:layout_marginBottom="8dp" />
+
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
+
+            <!-- White Balance -->
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="White Balance" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
+
+            <TextView android:id="@+id/kelvin_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Kelvin  5500K" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/kelvin_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="80" android:progress="35" android:layout_marginBottom="4dp" />
+
+            <TextView android:id="@+id/tint_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Tint  0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/tint_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="200" android:progress="100" android:layout_marginBottom="8dp" />
+
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
+
+            <!-- Photo Output -->
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Photo Output" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
+
+            <TextView android:id="@+id/jpeg_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="JPEG Quality  85" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/jpeg_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="1" android:max="100" android:progress="85" android:layout_marginBottom="4dp" />
+
+            <Spinner
+                android:id="@+id/resolution_spinner"
+                android:layout_width="match_parent"
+                android:layout_height="36dp"
+                android:background="#444444"
+                android:popupBackground="#333333"
+                android:layout_marginBottom="16dp" />
+
+        </LinearLayout>
+    </ScrollView>
 
 </FrameLayout>
