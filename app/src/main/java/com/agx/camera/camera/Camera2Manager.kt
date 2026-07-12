@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.ImageFormat
 import android.hardware.camera2.*
+import android.hardware.camera2.params.MeteringRectangle
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
@@ -120,6 +121,89 @@ class Camera2Manager(private val context: Context) {
     fun setFlashMode(mode: FlashMode) {
         currentFlashMode = mode
         startPreview()
+    }
+
+    fun startContinuousAf() {
+        val camera = cameraDevice ?: return
+        val session = captureSession ?: return
+
+        val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+            addTarget(imageReader!!.surface)
+            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            currentFlashMode.applyToRequest(this)
+        }
+        session.setRepeatingRequest(request.build(), null, backgroundHandler)
+    }
+
+    fun startAfAeLock(
+        meteringRect: MeteringRectangle,
+        handler: Handler,
+        onCaptureStarted: () -> Unit,
+        onCaptureCompleted: (TotalCaptureResult) -> Unit
+    ) {
+        val camera = cameraDevice ?: return
+        val session = captureSession ?: return
+
+        val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+            addTarget(imageReader!!.surface)
+            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+            set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRect))
+            set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(meteringRect))
+            set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
+            set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
+            currentFlashMode.applyToRequest(this)
+        }
+
+        session.capture(request.build(), object : CameraCaptureSession.CaptureCallback() {
+            override fun onCaptureStarted(session: CameraCaptureSession, request: CaptureRequest, timestamp: Long, frameNumber: Long) {
+                onCaptureStarted()
+            }
+
+            override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+                val afState = result.get(CaptureResult.CONTROL_AF_STATE)
+                if (afState != null && afState != CaptureResult.CONTROL_AF_STATE_ACTIVE_SCAN) {
+                    session.stopRepeating()
+                    val lockRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                        addTarget(imageReader!!.surface)
+                        set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+                        set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRect))
+                        set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
+                        set(CaptureRequest.CONTROL_AE_LOCK, true)
+                        set(CaptureRequest.CONTROL_AWB_LOCK, true)
+                        currentFlashMode.applyToRequest(this)
+                    }
+                    session.setRepeatingRequest(lockRequest.build(), null, backgroundHandler)
+                    onCaptureCompleted(result)
+                }
+            }
+        }, handler)
+    }
+
+    fun unlockAeAwb() {
+        startPreview()
+    }
+
+    fun captureStill(onCaptureComplete: () -> Unit, onCaptureFailed: () -> Unit) {
+        val camera = cameraDevice ?: run { onCaptureFailed(); return }
+        val session = captureSession ?: run { onCaptureFailed(); return }
+
+        val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+            addTarget(imageReader!!.surface)
+            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            currentFlashMode.applyToRequest(this)
+        }
+
+        session.capture(request.build(), object : CameraCaptureSession.CaptureCallback() {
+            override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+                onCaptureComplete()
+            }
+
+            override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+                Log.e(TAG, "Capture failed: ${failure.reason}")
+                onCaptureFailed()
+            }
+        }, backgroundHandler)
     }
 
     fun close() {

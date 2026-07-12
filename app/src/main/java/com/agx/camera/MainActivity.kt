@@ -3,7 +3,10 @@ package com.agx.camera
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import android.view.MotionEvent
 import android.view.TextureView
 import android.view.View
 import android.widget.*
@@ -17,8 +20,10 @@ import androidx.core.view.WindowInsetsCompat
 import com.agx.camera.camera.*
 import com.agx.camera.color.AgxParams
 import com.agx.camera.color.AgxPrecomputer
+import com.agx.camera.color.ColorMatrix
 import com.agx.camera.color.WhiteBalanceMath
 import com.agx.camera.gpu.PreviewRenderer
+import com.agx.camera.thermal.ThermalManager
 
 class MainActivity : AppCompatActivity() {
 
@@ -26,6 +31,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var lensManager: LensManager
     private lateinit var previewRenderer: PreviewRenderer
     private lateinit var presetManager: PresetManager
+    private lateinit var thermalManager: ThermalManager
+    private lateinit var shutterController: ShutterController
+    private lateinit var autofocusController: AutofocusController
+    private lateinit var grayCardSampler: GrayCardSampler
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private var currentFlashMode = FlashMode.OFF
     private var currentWbMode = WhiteBalanceMode.AUTO
@@ -44,6 +54,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var zoomSlider: SeekBar
     private lateinit var lensSelector: LinearLayout
     private lateinit var settingsPanel: ScrollView
+
+    // Shutter / Thermal
+    private lateinit var shutterButton: TextView
+    private lateinit var cooldownText: TextView
+    private lateinit var shutterStateLabel: TextView
+    private lateinit var thermalIndicator: TextView
 
     // Preset
     private lateinit var presetSpinner: Spinner
@@ -150,8 +166,13 @@ class MainActivity : AppCompatActivity() {
         kelvinLabel = findViewById(R.id.kelvin_label); kelvinSlider = findViewById(R.id.kelvin_slider)
         tintLabel = findViewById(R.id.tint_label); tintSlider = findViewById(R.id.tint_slider)
 
-        jpegLabel = findViewById(R.id.jpeg_label); jpegSlider = findViewById(R.id.jpeg_slider)
+        jpegLabel = findViewById(R.id.jpeg_label);         jpegSlider = findViewById(R.id.jpeg_slider)
         resolutionSpinner = findViewById(R.id.resolution_spinner)
+
+        shutterButton = findViewById(R.id.shutter_button)
+        cooldownText = findViewById(R.id.cooldown_text)
+        shutterStateLabel = findViewById(R.id.shutter_state_label)
+        thermalIndicator = findViewById(R.id.thermal_indicator)
 
         if (BuildConfig.AGX_ENABLE_YUV_FALLBACK) {
             devBanner.visibility = View.VISIBLE
@@ -161,6 +182,39 @@ class MainActivity : AppCompatActivity() {
         camera2Manager = Camera2Manager(this)
         presetManager = PresetManager(this)
         presetManager.ensureDefault()
+
+        thermalManager = ThermalManager(this)
+        shutterController = ShutterController(mainHandler)
+        autofocusController = AutofocusController(camera2Manager, mainHandler)
+        grayCardSampler = GrayCardSampler()
+
+        thermalManager.onStateChanged = { state ->
+            mainHandler.post { updateThermalUI(state) }
+        }
+
+        shutterController.onStateChanged = { state ->
+            mainHandler.post { updateShutterUI(state) }
+        }
+
+        shutterController.onCooldownTick = { remaining ->
+            mainHandler.post {
+                if (remaining > 0) {
+                    cooldownText.text = "${remaining}s"
+                    cooldownText.visibility = View.VISIBLE
+                } else {
+                    cooldownText.visibility = View.GONE
+                }
+            }
+        }
+
+        grayCardSampler.onSampleComplete = { gains ->
+            mainHandler.post {
+                val grayCardMatrix = ColorMatrix.diagonal(gains.gainR, gains.gainG, gains.gainB)
+                val sceneLinearTo709 = WhiteBalanceMath.buildGrayCardSceneLinearTo709(grayCardMatrix)
+                previewRenderer.agxSceneLinearTo709 = sceneLinearTo709.m
+                Toast.makeText(this, "Gray card WB applied", Toast.LENGTH_SHORT).show()
+            }
+        }
 
         previewRenderer = PreviewRenderer(textureView).apply {
             onFirstFrameRendered = { Log.d(TAG, "First frame rendered") }
@@ -194,6 +248,50 @@ class MainActivity : AppCompatActivity() {
         settingsButton.setOnClickListener {
             settingsPanelOpen = !settingsPanelOpen
             settingsPanel.visibility = if (settingsPanelOpen) View.VISIBLE else View.GONE
+        }
+
+        shutterButton.setOnClickListener {
+            if (shutterController.state != ShutterController.State.IDLE) return@setOnClickListener
+            if (thermalManager.isCaptureBlocked) {
+                Toast.makeText(this, "Device too hot — wait for cooldown", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            if (currentWbMode == WhiteBalanceMode.GRAY_CARD && grayCardSampler.isActive) {
+                Toast.makeText(this, "Tap the preview to sample gray card", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            shutterController.onCaptureSubmitted()
+            camera2Manager.captureStill(
+                onCaptureComplete = { mainHandler.post { shutterController.onCaptureComplete() } },
+                onCaptureFailed = { mainHandler.post { shutterController.onCaptureFailed() } }
+            )
+        }
+
+        textureView.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_DOWN && cameraReady) {
+                if (currentWbMode == WhiteBalanceMode.GRAY_CARD && grayCardSampler.isActive) {
+                    grayCardSampler.sample(
+                        previewRenderer.currentYPlane ?: return@setOnTouchListener false,
+                        previewRenderer.currentUPlane ?: return@setOnTouchListener false,
+                        previewRenderer.currentVPlane ?: return@setOnTouchListener false,
+                        previewRenderer.currentYuvWidth, previewRenderer.currentYuvHeight,
+                        event.x, event.y,
+                        textureView.width, textureView.height
+                    )
+                } else {
+                    autofocusController.onTapToFocus(textureView.width, textureView.height, event.x, event.y)
+                }
+                return@setOnTouchListener true
+            }
+            false
+        }
+
+        wbButton.setOnLongClickListener {
+            if (currentWbMode == WhiteBalanceMode.GRAY_CARD) {
+                grayCardSampler.activate()
+                Toast.makeText(this, "Tap the preview to sample gray card", Toast.LENGTH_SHORT).show()
+            }
+            true
         }
 
         zoomSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
@@ -684,6 +782,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        thermalManager.reset()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED && !cameraReady) {
             val lens = lensManager.activeLens ?: lensManager.selectPrimary()
             if (lens != null) {
@@ -702,6 +801,52 @@ class MainActivity : AppCompatActivity() {
         camera2Manager.stopBackgroundThread()
         cameraReady = false
         previewRenderer.stop()
+        shutterController.cancelCooldown()
+    }
+
+    private fun updateThermalUI(state: ThermalManager.State) {
+        when (state) {
+            ThermalManager.State.NORMAL -> {
+                thermalIndicator.visibility = View.GONE
+            }
+            ThermalManager.State.WARM -> {
+                thermalIndicator.text = "WARM"
+                thermalIndicator.setTextColor(0xFFFFAA00.toInt())
+                thermalIndicator.visibility = View.VISIBLE
+            }
+            ThermalManager.State.HOT -> {
+                thermalIndicator.text = "HOT — Cooldown"
+                thermalIndicator.setTextColor(0xFFFF4444.toInt())
+                thermalIndicator.visibility = View.VISIBLE
+            }
+            ThermalManager.State.CRITICAL -> {
+                thermalIndicator.text = "CRITICAL"
+                thermalIndicator.setTextColor(0xFFFF0000.toInt())
+                thermalIndicator.visibility = View.VISIBLE
+            }
+        }
+    }
+
+    private fun updateShutterUI(state: ShutterController.State) {
+        when (state) {
+            ShutterController.State.IDLE -> {
+                shutterButton.isEnabled = true
+                shutterButton.alpha = 1.0f
+                cooldownText.visibility = View.GONE
+                shutterStateLabel.text = ""
+            }
+            ShutterController.State.CAPTURING -> {
+                shutterButton.isEnabled = false
+                shutterButton.alpha = 0.5f
+                shutterStateLabel.text = "Capturing..."
+            }
+            ShutterController.State.COOLDOWN -> {
+                shutterButton.isEnabled = false
+                shutterButton.alpha = 0.3f
+                shutterStateLabel.text = "Cooling..."
+            }
+            else -> {}
+        }
     }
 
     companion object {
