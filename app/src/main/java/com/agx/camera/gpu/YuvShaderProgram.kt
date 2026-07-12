@@ -1,6 +1,5 @@
 package com.agx.camera.gpu
 
-import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.util.Log
 import java.nio.ByteBuffer
@@ -23,6 +22,20 @@ class YuvShaderProgram {
     private var uSensorOrientationLoc = 0
     private var uFlipXLoc = 0
 
+    private var uSceneLinearTo709Loc = 0
+    private var uInsetmatLoc = 0
+    private var uOutsetmatLoc = 0
+    private var u709To2020Loc = 0
+    private var uWhiteLevelLoc = 0
+    private var uBlackLevelLoc = 0
+    private var uLogMinLoc = 0
+    private var uLogMaxLoc = 0
+    private var uLogMidgrayLoc = 0
+    private var uDisplayMidgrayLoc = 0
+    private var uContrastLoc = 0
+    private var uToeLoc = 0
+    private var uShoulderLoc = 0
+
     private val quadVertices: FloatBuffer = ByteBuffer.allocateDirect(QUAD_COORDS.size * 4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer().put(QUAD_COORDS).also { it.position(0) }
     private val quadTexCoords: FloatBuffer = ByteBuffer.allocateDirect(QUAD_TEX_COORDS.size * 4)
@@ -43,6 +56,20 @@ class YuvShaderProgram {
         uOutputResolutionLoc = GLES20.glGetUniformLocation(programId, "u_outputResolution")
         uSensorOrientationLoc = GLES20.glGetUniformLocation(programId, "u_sensorOrientation")
         uFlipXLoc = GLES20.glGetUniformLocation(programId, "u_flipX")
+
+        uSceneLinearTo709Loc = GLES20.glGetUniformLocation(programId, "u_scene_linear_to_709")
+        uInsetmatLoc = GLES20.glGetUniformLocation(programId, "u_insetmat")
+        uOutsetmatLoc = GLES20.glGetUniformLocation(programId, "u_outsetmat")
+        u709To2020Loc = GLES20.glGetUniformLocation(programId, "u_709_to_2020")
+        uWhiteLevelLoc = GLES20.glGetUniformLocation(programId, "u_white_level")
+        uBlackLevelLoc = GLES20.glGetUniformLocation(programId, "u_black_level")
+        uLogMinLoc = GLES20.glGetUniformLocation(programId, "u_log_min")
+        uLogMaxLoc = GLES20.glGetUniformLocation(programId, "u_log_max")
+        uLogMidgrayLoc = GLES20.glGetUniformLocation(programId, "u_log_midgray")
+        uDisplayMidgrayLoc = GLES20.glGetUniformLocation(programId, "u_display_midgray")
+        uContrastLoc = GLES20.glGetUniformLocation(programId, "u_contrast")
+        uToeLoc = GLES20.glGetUniformLocation(programId, "u_toe")
+        uShoulderLoc = GLES20.glGetUniformLocation(programId, "u_shoulder")
 
         val textures = IntArray(3)
         GLES20.glGenTextures(3, textures, 0)
@@ -97,7 +124,15 @@ class YuvShaderProgram {
     fun draw(
         outputWidth: Int, outputHeight: Int,
         zoomFactor: Float, zoomCenterX: Float, zoomCenterY: Float,
-        sensorOrientation: Int, flipX: Boolean
+        sensorOrientation: Int, flipX: Boolean,
+        sceneLinearTo709: FloatArray,
+        insetMat: FloatArray,
+        outsetMat: FloatArray,
+        toRec2020: FloatArray,
+        whiteLevel: Float, blackLevel: Float,
+        logMin: Float, logMax: Float,
+        logMidgray: Float, displayMidgray: Float,
+        contrast: Float, toe: Float, shoulder: Float
     ) {
         GLES20.glUseProgram(programId)
 
@@ -118,6 +153,20 @@ class YuvShaderProgram {
         GLES20.glUniform2f(uOutputResolutionLoc, outputWidth.toFloat(), outputHeight.toFloat())
         GLES20.glUniform1f(uSensorOrientationLoc, sensorOrientation.toFloat())
         GLES20.glUniform1f(uFlipXLoc, if (flipX) 1.0f else 0.0f)
+
+        GLES20.glUniformMatrix3fv(uSceneLinearTo709Loc, 1, true, sceneLinearTo709, 0)
+        GLES20.glUniformMatrix3fv(uInsetmatLoc, 1, true, insetMat, 0)
+        GLES20.glUniformMatrix3fv(uOutsetmatLoc, 1, true, outsetMat, 0)
+        GLES20.glUniformMatrix3fv(u709To2020Loc, 1, true, toRec2020, 0)
+        GLES20.glUniform1f(uWhiteLevelLoc, whiteLevel)
+        GLES20.glUniform1f(uBlackLevelLoc, blackLevel)
+        GLES20.glUniform1f(uLogMinLoc, logMin)
+        GLES20.glUniform1f(uLogMaxLoc, logMax)
+        GLES20.glUniform1f(uLogMidgrayLoc, logMidgray)
+        GLES20.glUniform1f(uDisplayMidgrayLoc, displayMidgray)
+        GLES20.glUniform1f(uContrastLoc, contrast)
+        GLES20.glUniform1f(uToeLoc, toe)
+        GLES20.glUniform1f(uShoulderLoc, shoulder)
 
         val posHandle = GLES20.glGetAttribLocation(programId, "a_position")
         val texHandle = GLES20.glGetAttribLocation(programId, "a_texCoord")
@@ -150,16 +199,10 @@ class YuvShaderProgram {
         private const val TAG = "YuvShaderProgram"
 
         private val QUAD_COORDS = floatArrayOf(
-            -1f, -1f,
-             1f, -1f,
-            -1f,  1f,
-             1f,  1f
+            -1f, -1f,  1f, -1f,  -1f, 1f,  1f, 1f
         )
         private val QUAD_TEX_COORDS = floatArrayOf(
-            0f, 0f,
-            1f, 0f,
-            0f, 1f,
-            1f, 1f
+            0f, 0f,  1f, 0f,  0f, 1f,  1f, 1f
         )
 
         private const val VERTEX_SHADER = """
@@ -184,11 +227,123 @@ uniform vec2 u_outputResolution;
 uniform float u_sensorOrientation;
 uniform float u_flipX;
 
+uniform mat3 u_scene_linear_to_709;
+uniform mat3 u_insetmat;
+uniform mat3 u_outsetmat;
+uniform mat3 u_709_to_2020;
+uniform float u_white_level;
+uniform float u_black_level;
+uniform float u_log_min;
+uniform float u_log_max;
+uniform float u_log_midgray;
+uniform float u_display_midgray;
+uniform float u_contrast;
+uniform float u_toe;
+uniform float u_shoulder;
+
+float spowf(float a, float b) {
+    return sign(a) * pow(abs(a), b);
+}
+
+vec3 spowf3(vec3 x, float p) {
+    return sign(x) * pow(abs(x), vec3(p));
+}
+
+vec3 lin2log(vec3 rgb, float logMin, float logMax) {
+    float logFloor = 0.18 * pow(2.0, logMin);
+    rgb = max(rgb, vec3(logFloor));
+    rgb = log2(rgb / 0.18);
+    rgb = clamp(rgb, logMin, logMax);
+    return (rgb + abs(logMin)) / (abs(logMin) + abs(logMax));
+}
+
+float sigmoid(float x, float sp, float tp, float slope, float px, float py) {
+    float s0 = 1.0;
+    float t0 = 0.0;
+    float ss = spowf(
+        ((spowf((slope * ((s0 - px) / (1.0 - py))), sp) - 1.0) * (spowf(slope * (s0 - px), -sp))),
+        -1.0 / sp);
+    float ms = slope * (x - px) / ss;
+    float fs = ms / spowf(1.0 + spowf(ms, sp), 1.0 / sp);
+    float ts = spowf(
+        ((spowf((slope * ((px - t0) / py)), tp) - 1.0) * (spowf(slope * (px - t0), -tp))),
+        -1.0 / tp);
+    float mr = (slope * (x - px)) / -ts;
+    float ft = mr / spowf(1.0 + spowf(mr, tp), 1.0 / tp);
+    return x >= px ? ss * fs + py : (-ts * ft) + py;
+}
+
+vec3 compensateLowSide(vec3 rgb) {
+    const vec3 lumCoeffs = vec3(0.2589235355689848, 0.6104985346066525, 0.13057792982436284);
+    vec3 rgb2020 = u_709_to_2020 * rgb;
+    float Y = dot(rgb2020, lumCoeffs);
+    float maxRGB = max(rgb.r, max(rgb.g, rgb.b));
+    vec3 inverseRGB = vec3(maxRGB - rgb.r, maxRGB - rgb.g, maxRGB - rgb.b);
+    float maxInvRGB = max(inverseRGB.r, max(inverseRGB.g, inverseRGB.b));
+    vec3 inv2020 = u_709_to_2020 * inverseRGB;
+    float Yinv = dot(inv2020, lumCoeffs);
+    float yCompensate = (maxInvRGB - Yinv + Y);
+    float minRGB = min(rgb.r, min(rgb.g, rgb.b));
+    float offset = max(-minRGB, 0.0);
+    vec3 rgbOffset = rgb + offset;
+    float maxOffset = max(rgbOffset.r, max(rgbOffset.g, rgbOffset.b));
+    vec3 invOffset = vec3(maxOffset - rgbOffset.r, maxOffset - rgbOffset.g, maxOffset - rgbOffset.b);
+    float maxInvOff = max(invOffset.r, max(invOffset.g, invOffset.b));
+    vec3 invOff2020 = u_709_to_2020 * invOffset;
+    float YinvOff = dot(invOff2020, lumCoeffs);
+    vec3 off2020 = u_709_to_2020 * rgbOffset;
+    float Ynew = dot(off2020, lumCoeffs);
+    float yNewCompensate = (maxInvOff - YinvOff + Ynew);
+    float ratio = (yNewCompensate > yCompensate) ? (yCompensate / yNewCompensate) : 1.0;
+    return max(rgbOffset * ratio, vec3(0.0));
+}
+
+vec3 srgbOETF(vec3 linear) {
+    vec3 result;
+    for (int i = 0; i < 3; i++) {
+        float c = linear[i];
+        if (c <= 0.0031308) {
+            result[i] = c * 12.92;
+        } else {
+            result[i] = 1.055 * pow(c, 1.0/2.4) - 0.055;
+        }
+    }
+    return result;
+}
+
+vec3 agxFormation(vec3 sensorLinear) {
+    vec3 rgb = sensorLinear / (u_white_level - u_black_level);
+    rgb = u_scene_linear_to_709 * rgb;
+    rgb = compensateLowSide(rgb);
+    rgb = u_insetmat * rgb;
+    rgb = lin2log(rgb, u_log_min, u_log_max);
+    rgb.r = sigmoid(rgb.r, u_shoulder, u_toe, u_contrast, u_log_midgray, u_display_midgray);
+    rgb.g = sigmoid(rgb.g, u_shoulder, u_toe, u_contrast, u_log_midgray, u_display_midgray);
+    rgb.b = sigmoid(rgb.b, u_shoulder, u_toe, u_contrast, u_log_midgray, u_display_midgray);
+    rgb = spowf3(rgb, 2.4);
+    rgb = u_outsetmat * rgb;
+    rgb = clamp(rgb, 0.0, 1.0);
+    rgb = srgbOETF(rgb);
+    return rgb;
+}
+
+vec3 agxFormationYuv(vec3 rgb) {
+    rgb = compensateLowSide(rgb);
+    rgb = u_insetmat * rgb;
+    rgb = lin2log(rgb, u_log_min, u_log_max);
+    rgb.r = sigmoid(rgb.r, u_shoulder, u_toe, u_contrast, u_log_midgray, u_display_midgray);
+    rgb.g = sigmoid(rgb.g, u_shoulder, u_toe, u_contrast, u_log_midgray, u_display_midgray);
+    rgb.b = sigmoid(rgb.b, u_shoulder, u_toe, u_contrast, u_log_midgray, u_display_midgray);
+    rgb = spowf3(rgb, 2.4);
+    rgb = u_outsetmat * rgb;
+    rgb = clamp(rgb, 0.0, 1.0);
+    rgb = srgbOETF(rgb);
+    return rgb;
+}
+
 void main() {
     vec2 uv = v_texCoord;
-
     uv = (uv - u_zoom_center) / u_zoom_factor + u_zoom_center;
-
     float angle = u_sensorOrientation;
     if (angle == 90.0) {
         uv = vec2(uv.y, 1.0 - uv.x);
@@ -197,7 +352,6 @@ void main() {
     } else if (angle == 270.0) {
         uv = vec2(1.0 - uv.y, uv.x);
     }
-
     if (u_flipX > 0.5) {
         uv.x = 1.0 - uv.x;
     }
@@ -205,17 +359,14 @@ void main() {
     float y = texture2D(u_yTex, uv).r;
     float u = texture2D(u_uTex, uv).r - 0.5;
     float v = texture2D(u_vTex, uv).r - 0.5;
-
     vec3 rgb = vec3(
         y + 1.402 * v,
         y - 0.344136 * u - 0.714136 * v,
         y + 1.772 * u
     );
 
-    // TODO(Week 2): Insert agxFormationYuv(rgb) here — compensateLowSide, insetPrimaries,
-    // lin2log, sigmoid, spowf3(2.4), outsetPrimaries, srgbOETF. See §8.13.
-
-    gl_FragColor = vec4(clamp(rgb, 0.0, 1.0), 1.0);
+    rgb = agxFormationYuv(rgb);
+    gl_FragColor = vec4(rgb, 1.0);
 }
 """
 

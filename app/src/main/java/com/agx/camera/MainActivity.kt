@@ -17,8 +17,10 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.agx.camera.camera.*
+import com.agx.camera.color.AgxPrecomputer
+import com.agx.camera.color.ColorMatrix
+import com.agx.camera.color.WhiteBalanceMath
 import com.agx.camera.gpu.PreviewRenderer
-import java.nio.ByteBuffer
 
 class MainActivity : AppCompatActivity() {
 
@@ -28,6 +30,7 @@ class MainActivity : AppCompatActivity() {
 
     private var currentFlashMode = FlashMode.OFF
     private var currentWbMode = WhiteBalanceMode.AUTO
+    private var kelvinState = KelvinState()
     private var cameraReady = false
 
     private lateinit var textureView: TextureView
@@ -187,6 +190,8 @@ class MainActivity : AppCompatActivity() {
         val sensorOrientation = lensManager.getSensorOrientation(primary)
         previewRenderer.setSensorOrientation(sensorOrientation)
 
+        uploadAgxUniforms()
+
         camera2Manager.onFrameAvailable = frameHandler@{ image ->
             if (!cameraReady) return@frameHandler
             val planes = image.planes
@@ -221,15 +226,42 @@ class MainActivity : AppCompatActivity() {
         camera2Manager.openCamera(primary, previewSize)
     }
 
+    private fun uploadAgxUniforms() {
+        val sceneLinearTo709 = when (currentWbMode) {
+            WhiteBalanceMode.AUTO -> WhiteBalanceMath.buildAutoSceneLinearTo709(null)
+            WhiteBalanceMode.KELVIN -> WhiteBalanceMath.buildSceneLinearTo709(kelvinState.kelvin, kelvinState.tint)
+            WhiteBalanceMode.GRAY_CARD -> WhiteBalanceMath.buildAutoSceneLinearTo709(null)
+        }
+
+        val params = AgxPrecomputer.InsetParams()
+        val agx = AgxPrecomputer.compute(
+            params, sceneLinearTo709,
+            whiteLevel = 1023f, blackLevel = 64f
+        )
+
+        previewRenderer.agxSceneLinearTo709 = agx.sceneLinearTo709
+        previewRenderer.agxInsetMat = agx.insetMat
+        previewRenderer.agxOutsetMat = agx.outsetMat
+        previewRenderer.agxToRec2020 = agx.toRec2020
+        previewRenderer.agxWhiteLevel = agx.whiteLevel
+        previewRenderer.agxBlackLevel = agx.blackLevel
+        previewRenderer.agxLogMin = -10f
+        previewRenderer.agxLogMax = 6.5f
+        previewRenderer.agxLogMidgray = agx.logMidgray
+        previewRenderer.agxDisplayMidgray = agx.displayMidgray
+        previewRenderer.agxContrast = 2.4f
+        previewRenderer.agxToe = 1.5f
+        previewRenderer.agxShoulder = 1.5f
+    }
+
     private fun extractPlane(
-        src: ByteBuffer, width: Int, height: Int,
+        src: java.nio.ByteBuffer, width: Int, height: Int,
         rowStride: Int, pixelStride: Int
-    ): ByteBuffer {
-        val dst = ByteBuffer.allocateDirect(width * height).order(java.nio.ByteOrder.nativeOrder())
+    ): java.nio.ByteBuffer {
+        val dst = java.nio.ByteBuffer.allocateDirect(width * height).order(java.nio.ByteOrder.nativeOrder())
         src.position(0)
 
         if (pixelStride == 1) {
-            // Tightly packed (Y plane or tightly packed UV) — row-by-row bulk copy
             for (row in 0 until height) {
                 val srcOffset = row * rowStride
                 val dstOffset = row * width
@@ -239,7 +271,6 @@ class MainActivity : AppCompatActivity() {
                 dst.put(src)
             }
         } else if (pixelStride == 2) {
-            // Interleaved UV (NV12/NV21) — bulk copy rows, then deinterleave
             for (row in 0 until height) {
                 val srcRowStart = row * rowStride
                 val dstRowStart = row * width
@@ -249,7 +280,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         } else {
-            // Generic stride with non-standard pixel stride
             for (row in 0 until height) {
                 val srcRowStart = row * rowStride
                 val dstRowStart = row * width
@@ -269,7 +299,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildLensSelectorUI() {
-        // Week 1: single lens only. Multi-lens selector deferred to Week 9.
         lensSelector.removeAllViews()
         val primaryLens = lensManager.activeLens ?: return
         val btn = TextView(this).apply {

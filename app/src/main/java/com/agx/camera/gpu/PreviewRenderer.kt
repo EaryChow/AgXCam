@@ -36,6 +36,20 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
     val zoomController = ZoomController()
 
+    var agxSceneLinearTo709 = floatArrayOf(1f,0f,0f, 0f,1f,0f, 0f,0f,1f)
+    var agxInsetMat = floatArrayOf(1f,0f,0f, 0f,1f,0f, 0f,0f,1f)
+    var agxOutsetMat = floatArrayOf(1f,0f,0f, 0f,1f,0f, 0f,0f,1f)
+    var agxToRec2020 = floatArrayOf(1f,0f,0f, 0f,1f,0f, 0f,0f,1f)
+    var agxWhiteLevel = 1023f
+    var agxBlackLevel = 64f
+    var agxLogMin = -10f
+    var agxLogMax = 6.5f
+    var agxLogMidgray = 0.5f
+    var agxDisplayMidgray = 0.48f
+    var agxContrast = 2.4f
+    var agxToe = 1.5f
+    var agxShoulder = 1.5f
+
     fun setPreviewSize(width: Int, height: Int) {
         fboWidth = width
         fboHeight = height
@@ -140,7 +154,15 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 zoomController.zoomCenterX,
                 zoomController.zoomCenterY,
                 sensorOrientation,
-                isFrontCamera
+                isFrontCamera,
+                agxSceneLinearTo709,
+                agxInsetMat,
+                agxOutsetMat,
+                agxToRec2020,
+                agxWhiteLevel, agxBlackLevel,
+                agxLogMin, agxLogMax,
+                agxLogMidgray, agxDisplayMidgray,
+                agxContrast, agxToe, agxShoulder
             )
 
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)

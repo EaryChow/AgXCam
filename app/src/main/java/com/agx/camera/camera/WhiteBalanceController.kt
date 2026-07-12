@@ -5,3 +5,8 @@ enum class WhiteBalanceMode {
     KELVIN,
     GRAY_CARD
 }
+
+data class KelvinState(
+    val kelvin: Float = 5500f,
+    val tint: Float = 0f
+)
