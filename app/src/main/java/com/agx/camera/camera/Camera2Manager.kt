@@ -30,6 +30,10 @@ class Camera2Manager(private val context: Context) {
     var onFrameAvailable: ((Image) -> Unit)? = null
     var onSessionReady: ((Int, Int) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
+    var onDisconnected: (() -> Unit)? = null
+
+    private var sessionRetryCount = 0
+    private val maxSessionRetries = 1
 
     private val previewListener = ImageReader.OnImageAvailableListener { reader ->
         val image = reader.acquireLatestImage() ?: return@OnImageAvailableListener
@@ -84,6 +88,8 @@ class Camera2Manager(private val context: Context) {
             ImageFormat.YUV_420_888, 1
         )
 
+        sessionRetryCount = 0
+
         cameraManager.openCamera(lens.cameraId, object : CameraDevice.StateCallback() {
             override fun onOpened(camera: CameraDevice) {
                 cameraDevice = camera
@@ -94,13 +100,15 @@ class Camera2Manager(private val context: Context) {
                 Log.w(TAG, "Camera disconnected")
                 camera.close()
                 cameraDevice = null
-                onError?.invoke("Camera disconnected by another app")
+                captureSession = null
+                onDisconnected?.invoke()
             }
 
             override fun onError(camera: CameraDevice, error: Int) {
                 Log.e(TAG, "Camera error: $error")
                 camera.close()
                 cameraDevice = null
+                captureSession = null
                 onError?.invoke("Camera error: $error")
             }
         }, backgroundHandler)
@@ -113,13 +121,23 @@ class Camera2Manager(private val context: Context) {
         camera.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(session: CameraCaptureSession) {
                 captureSession = session
+                sessionRetryCount = 0
                 onSessionReady?.invoke(previewSize.width, previewSize.height)
                 startPreview()
             }
 
             override fun onConfigureFailed(session: CameraCaptureSession) {
-                Log.e(TAG, "Session configuration failed")
-                onError?.invoke("Camera session configuration failed")
+                Log.e(TAG, "Session configuration failed (attempt ${sessionRetryCount + 1})")
+                if (sessionRetryCount < maxSessionRetries) {
+                    sessionRetryCount++
+                    val handler = backgroundHandler ?: return
+                    handler.postDelayed({
+                        val cam = cameraDevice ?: return@postDelayed
+                        createSession(cam, previewSize)
+                    }, 500)
+                } else {
+                    onError?.invoke("Camera session configuration failed")
+                }
             }
         }, backgroundHandler)
     }
@@ -230,6 +248,28 @@ class Camera2Manager(private val context: Context) {
                 onCaptureFailed()
             }
         }, backgroundHandler)
+    }
+
+    fun resetHard() {
+        try {
+            captureSession?.close()
+        } catch (_: Exception) {}
+        captureSession = null
+
+        try {
+            cameraDevice?.close()
+        } catch (_: Exception) {}
+        cameraDevice = null
+
+        try {
+            previewReader?.close()
+        } catch (_: Exception) {}
+        previewReader = null
+
+        try {
+            captureReader?.close()
+        } catch (_: Exception) {}
+        captureReader = null
     }
 
     fun close() {

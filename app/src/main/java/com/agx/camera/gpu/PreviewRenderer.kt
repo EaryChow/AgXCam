@@ -89,6 +89,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     val currentYuvHeight: Int get() = yuvHeight
 
     var onFirstFrameRendered: (() -> Unit)? = null
+    var onFrameRendered: ((Long) -> Unit)? = null
     private var firstFrameReported = false
 
     var pendingFboReadback: ((Int, Int, Int) -> Unit)? = null
@@ -203,6 +204,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             if (viewW <= 0 || viewH <= 0) continue
 
             val captureReq = pendingCaptureFrame?.also { pendingCaptureFrame = null }
+            val frameStartNs = if (captureReq == null) System.nanoTime() else 0L
             if (captureReq != null) {
                 ensureCaptureFbo()
                 if (captureFboId != 0) {
@@ -310,6 +312,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             blitShader.draw(fboTextureId)
 
             EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+
+            if (captureReq == null && frameStartNs > 0) {
+                val frameTimeMs = (System.nanoTime() - frameStartNs) / 1_000_000L
+                onFrameRendered?.invoke(frameTimeMs)
+            }
 
             if (!firstFrameReported) {
                 firstFrameReported = true

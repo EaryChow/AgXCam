@@ -6,6 +6,8 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.util.Log
 import android.util.Size
+import org.json.JSONObject
+import java.io.File
 
 data class LensInfo(
     val cameraId: String,
@@ -16,7 +18,17 @@ data class LensInfo(
     val label: String
 )
 
-class LensManager(context: Context) {
+data class LensState(
+    val zoomFactor: Float = 1.0f,
+    val zoomCenterX: Float = 0.5f,
+    val zoomCenterY: Float = 0.5f,
+    val wbModeOrdinal: Int = 0,
+    val kelvin: Float = 5500f,
+    val kelvinTint: Float = 0f,
+    val flashModeOrdinal: Int = 0
+)
+
+class LensManager(private val context: Context) {
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val _lenses = mutableListOf<LensInfo>()
     val lenses: List<LensInfo> get() = _lenses
@@ -24,11 +36,18 @@ class LensManager(context: Context) {
     var activeLens: LensInfo? = null
         private set
 
+    var lastUsedRearLensId: String? = null
+        private set
+
     var listener: ((LensInfo) -> Unit)? = null
+
+    private val lensStates = mutableMapOf<String, LensState>()
 
     fun enumerate(): Boolean {
         _lenses.clear()
         var hasSupportedLens = false
+
+        val logicalMultiCameraId = findLogicalMultiCamera()
 
         for (id in cameraManager.cameraIdList) {
             val chars = cameraManager.getCameraCharacteristics(id)
@@ -45,16 +64,13 @@ class LensManager(context: Context) {
             val focal = focalLengths?.firstOrNull() ?: 0.0f
             val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
             val hasRaw = caps.contains(17) // REQUEST_AVAILABLE_CAPABILITIES_RAW
-            val label = when (facing) {
-                CameraCharacteristics.LENS_FACING_BACK -> "Wide"
-                CameraCharacteristics.LENS_FACING_FRONT -> "Front"
-                else -> "Unknown"
-            }
-            _lenses.add(LensInfo(id, facing, focal, hasRaw, level, label))
+
+            _lenses.add(LensInfo(id, facing, focal, hasRaw, level, ""))
             hasSupportedLens = true
         }
 
-        Log.d(TAG, "Enumerated ${_lenses.size} supported lenses")
+        assignLabels(logicalMultiCameraId)
+
         for (lens in _lenses) {
             Log.d(TAG, "  ${lens.cameraId}: ${lens.label} ${lens.focalLengthMm}mm raw=${lens.hasRawSensor} level=${lens.hardwareLevel}")
         }
@@ -62,21 +78,106 @@ class LensManager(context: Context) {
         return hasSupportedLens
     }
 
+    private fun findLogicalMultiCamera(): String? {
+        for (id in cameraManager.cameraIdList) {
+            val chars = cameraManager.getCameraCharacteristics(id)
+            val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+            if (caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA)) {
+                return id
+            }
+        }
+        return null
+    }
+
+    private fun assignLabels(logicalMultiCameraId: String?) {
+        val rearLenses = _lenses.filter { it.facing == CameraCharacteristics.LENS_FACING_BACK }.sortedBy { it.focalLengthMm }
+        val frontLenses = _lenses.filter { it.facing == CameraCharacteristics.LENS_FACING_FRONT }
+
+        if (rearLenses.size == 1) {
+            rearLenses[0].let { lens ->
+                val idx = _lenses.indexOf(lens)
+                _lenses[idx] = lens.copy(label = "Wide")
+            }
+        } else if (rearLenses.size == 2) {
+            rearLenses[0].let { lens ->
+                val idx = _lenses.indexOf(lens)
+                _lenses[idx] = lens.copy(label = "Wide")
+            }
+            rearLenses[1].let { lens ->
+                val idx = _lenses.indexOf(lens)
+                _lenses[idx] = lens.copy(label = "Tele")
+            }
+        } else if (rearLenses.size >= 3) {
+            rearLenses.forEachIndexed { i, lens ->
+                val label = when (i) {
+                    0 -> "Wide"
+                    rearLenses.lastIndex -> "Super Tele"
+                    else -> "Tele"
+                }
+                val idx = _lenses.indexOf(lens)
+                _lenses[idx] = lens.copy(label = label)
+            }
+        }
+
+        for (lens in frontLenses) {
+            val idx = _lenses.indexOf(lens)
+            _lenses[idx] = lens.copy(label = "Front")
+        }
+    }
+
     fun selectPrimary(): LensInfo? {
         val rear = _lenses.filter { it.facing == CameraCharacteristics.LENS_FACING_BACK }
         val primary = rear.minByOrNull { it.focalLengthMm } ?: rear.firstOrNull()
         if (primary != null) {
             activeLens = primary
+            lastUsedRearLensId = primary.cameraId
             Log.d(TAG, "Selected primary lens: ${primary.cameraId} ${primary.label}")
         }
         return primary
     }
 
-    fun selectLens(lens: LensInfo) {
+    fun saveCurrentState(
+        lensId: String,
+        zoomFactor: Float,
+        zoomCenterX: Float,
+        zoomCenterY: Float,
+        wbModeOrdinal: Int,
+        kelvin: Float,
+        kelvinTint: Float,
+        flashModeOrdinal: Int
+    ) {
+        val state = LensState(zoomFactor, zoomCenterX, zoomCenterY, wbModeOrdinal, kelvin, kelvinTint, flashModeOrdinal)
+        lensStates[lensId] = state
+        persistState(lensId, state)
+    }
+
+    fun getRestoredState(lensId: String): LensState {
+        val cached = lensStates[lensId]
+        if (cached != null) return cached
+        val loaded = loadState(lensId)
+        lensStates[lensId] = loaded
+        return loaded
+    }
+
+    fun switchLens(lens: LensInfo, saveCurrentStateFn: (String) -> Unit) {
+        val prev = activeLens
+        if (prev != null) {
+            saveCurrentStateFn(prev.cameraId)
+        }
         activeLens = lens
-        Log.d(TAG, "Selected lens: ${lens.cameraId} ${lens.label}")
+        if (lens.facing == CameraCharacteristics.LENS_FACING_BACK) {
+            lastUsedRearLensId = lens.cameraId
+        }
+        Log.d(TAG, "Switched to lens: ${lens.cameraId} ${lens.label}")
         listener?.invoke(lens)
     }
+
+    fun getFrontLens(): LensInfo? =
+        _lenses.firstOrNull { it.facing == CameraCharacteristics.LENS_FACING_FRONT }
+
+    fun getRearLenses(): List<LensInfo> =
+        _lenses.filter { it.facing == CameraCharacteristics.LENS_FACING_BACK }
+            .sortedBy { it.focalLengthMm }
 
     fun getSensorActiveArraySize(lens: LensInfo): Rect {
         val chars = cameraManager.getCameraCharacteristics(lens.cameraId)
@@ -116,6 +217,46 @@ class LensManager(context: Context) {
         cameraManager.getCameraCharacteristics(lens.cameraId)
 
     fun getCameraManager(): CameraManager = cameraManager
+
+    private fun persistState(lensId: String, state: LensState) {
+        try {
+            val json = JSONObject().apply {
+                put("zoomFactor", state.zoomFactor.toDouble())
+                put("zoomCenterX", state.zoomCenterX.toDouble())
+                put("zoomCenterY", state.zoomCenterY.toDouble())
+                put("wbModeOrdinal", state.wbModeOrdinal)
+                put("kelvin", state.kelvin.toDouble())
+                put("kelvinTint", state.kelvinTint.toDouble())
+                put("flashModeOrdinal", state.flashModeOrdinal)
+            }
+            getLensStateFile(lensId).writeText(json.toString())
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to persist lens state for $lensId", e)
+        }
+    }
+
+    private fun loadState(lensId: String): LensState {
+        return try {
+            val file = getLensStateFile(lensId)
+            if (!file.exists()) return LensState()
+            val json = JSONObject(file.readText())
+            LensState(
+                zoomFactor = json.optDouble("zoomFactor", 1.0).toFloat(),
+                zoomCenterX = json.optDouble("zoomCenterX", 0.5).toFloat(),
+                zoomCenterY = json.optDouble("zoomCenterY", 0.5).toFloat(),
+                wbModeOrdinal = json.optInt("wbModeOrdinal", 0),
+                kelvin = json.optDouble("kelvin", 5500.0).toFloat(),
+                kelvinTint = json.optDouble("kelvinTint", 0.0).toFloat(),
+                flashModeOrdinal = json.optInt("flashModeOrdinal", 0)
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load lens state for $lensId", e)
+            LensState()
+        }
+    }
+
+    private fun getLensStateFile(lensId: String): File =
+        File(context.filesDir, "lens_state_${lensId}.json")
 
     companion object {
         private const val TAG = "LensManager"

@@ -54,16 +54,23 @@ class MainActivity : AppCompatActivity() {
     private var photoOutput = PhotoOutputSettings()
     private var cameraReady = false
     private var settingsPanelOpen = false
+    private var isCapturing = false
+    private var pendingPauseCleanup = false
+    private var errorDialogShowing = false
 
     private lateinit var textureView: TextureView
     private lateinit var devBanner: TextView
+    private lateinit var disconnectBanner: TextView
     private lateinit var flashButton: TextView
     private lateinit var wbButton: TextView
     private lateinit var settingsButton: TextView
+    private lateinit var frontRearToggle: TextView
     private lateinit var zoomLabel: TextView
     private lateinit var zoomSlider: SeekBar
     private lateinit var lensSelector: LinearLayout
     private lateinit var settingsPanel: ScrollView
+    private lateinit var finishingCaptureOverlay: TextView
+    private lateinit var lensSwitchOverlay: TextView
 
     // Shutter / Thermal
     private lateinit var shutterButton: TextView
@@ -133,13 +140,17 @@ class MainActivity : AppCompatActivity() {
 
         textureView = findViewById(R.id.preview_texture)
         devBanner = findViewById(R.id.dev_banner)
+        disconnectBanner = findViewById(R.id.disconnect_banner)
         flashButton = findViewById(R.id.flash_button)
         wbButton = findViewById(R.id.wb_button)
         settingsButton = findViewById(R.id.settings_button)
+        frontRearToggle = findViewById(R.id.front_rear_toggle)
         zoomLabel = findViewById(R.id.zoom_label)
         zoomSlider = findViewById(R.id.zoom_slider)
         lensSelector = findViewById(R.id.lens_selector)
         settingsPanel = findViewById(R.id.settings_panel)
+        finishingCaptureOverlay = findViewById(R.id.finishing_capture_overlay)
+        lensSwitchOverlay = findViewById(R.id.lens_switch_overlay)
 
         presetSpinner = findViewById(R.id.preset_spinner)
         presetSaveBtn = findViewById(R.id.preset_save_btn)
@@ -229,6 +240,7 @@ class MainActivity : AppCompatActivity() {
 
         previewRenderer = PreviewRenderer(textureView).apply {
             onFirstFrameRendered = { Log.d(TAG, "First frame rendered") }
+            onFrameRendered = { ms -> thermalManager.onFrameRendered(ms.toFloat()) }
         }
 
         textureView.surfaceTextureListener = previewRenderer
@@ -242,6 +254,7 @@ class MainActivity : AppCompatActivity() {
         flashButton.setOnClickListener {
             currentFlashMode = currentFlashMode.cycle()
             updateFlashUI()
+            thermalManager.isTorchActive = (currentFlashMode == FlashMode.TORCH)
             if (cameraReady) camera2Manager.setFlashMode(currentFlashMode)
         }
 
@@ -261,6 +274,20 @@ class MainActivity : AppCompatActivity() {
             settingsPanel.visibility = if (settingsPanelOpen) View.VISIBLE else View.GONE
         }
 
+        frontRearToggle.setOnClickListener {
+            if (!cameraReady) return@setOnClickListener
+            val current = lensManager.activeLens ?: return@setOnClickListener
+            val target = if (current.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_BACK) {
+                lensManager.getFrontLens()
+            } else {
+                val rearId = lensManager.lastUsedRearLensId
+                lensManager.lenses.firstOrNull { it.cameraId == rearId } ?: lensManager.getRearLenses().firstOrNull()
+            }
+            if (target != null && target.cameraId != current.cameraId) {
+                switchToLens(target)
+            }
+        }
+
         shutterButton.setOnClickListener {
             if (shutterController.state != ShutterController.State.IDLE) return@setOnClickListener
             if (thermalManager.isCaptureBlocked) {
@@ -272,6 +299,7 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             shutterController.onCaptureSubmitted()
+            isCapturing = true
 
             val session = CaptureSession(
                 flashMode = camera2Manager.currentFlashModeForExif,
@@ -318,11 +346,29 @@ class MainActivity : AppCompatActivity() {
             camera2Manager.captureStill(
                 onCaptureAvailable = { image, result ->
                     processCapture(image, result, session, thumbnailLatch, thumbnailRef)
-                    mainHandler.post { shutterController.onCaptureComplete() }
+                    mainHandler.post {
+                        isCapturing = false
+                        shutterController.onCaptureComplete()
+                        finishingCaptureOverlay.visibility = View.GONE
+                        autofocusController.revertToContinuous()
+                        if (pendingPauseCleanup) {
+                            pendingPauseCleanup = false
+                            performCleanup()
+                        }
+                    }
                 },
                 onCaptureFailed = {
                     previewRenderer.pendingFboReadback = null
-                    mainHandler.post { shutterController.onCaptureFailed() }
+                    mainHandler.post {
+                        isCapturing = false
+                        shutterController.onCaptureFailed()
+                        finishingCaptureOverlay.visibility = View.GONE
+                        autofocusController.revertToContinuous()
+                        if (pendingPauseCleanup) {
+                            pendingPauseCleanup = false
+                            performCleanup()
+                        }
+                    }
                 }
             )
         }
@@ -372,7 +418,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupSettingsPanel() {
-        // --- Curve ---
         contrastSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(contrast = 1.4f + v * 0.1f)
             contrastLabel.text = String.format("Contrast  %.1f", agxParams.contrast)
@@ -389,14 +434,13 @@ class MainActivity : AppCompatActivity() {
             uploadAgxUniforms()
         })
 
-        // --- Inset ---
         usePreForPostCb.setOnCheckedChangeListener { _, checked ->
             agxParams = agxParams.copy(usePreForPost = checked)
             outsetSection.visibility = if (checked) View.GONE else View.VISIBLE
             uploadAgxUniforms()
         }
 
-        val rotRange = 0.5236f // ±0.2618
+        val rotRange = 0.5236f
         fun rotToProgress(v: Float) = ((v + rotRange) / (rotRange * 2) * 524).toInt().coerceIn(0, 524)
         fun progressToRot(p: Float) = (p / 524f * rotRange * 2) - rotRange
 
@@ -432,7 +476,6 @@ class MainActivity : AppCompatActivity() {
             uploadAgxUniforms()
         })
 
-        // --- Outset ---
         outsetRotRSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(reverseRgbRotation = floatArrayOf(progressToRot(v.toFloat()), agxParams.reverseRgbRotation[1], agxParams.reverseRgbRotation[2]))
             outsetRotRLabel.text = String.format("Rev Rot R  %.3f", agxParams.reverseRgbRotation[0])
@@ -474,7 +517,6 @@ class MainActivity : AppCompatActivity() {
             uploadAgxUniforms()
         }
 
-        // --- Tinting ---
         tintingScaleSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(tintingScale = (v - 200) * 0.001f)
             tintingScaleLabel.text = String.format("Scale  %.3f", agxParams.tintingScale)
@@ -486,14 +528,12 @@ class MainActivity : AppCompatActivity() {
             uploadAgxUniforms()
         })
 
-        // --- NR ---
         nrSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(nrStrength = v / 100f)
             nrLabel.text = String.format("NR Strength  %.1f", agxParams.nrStrength)
             uploadAgxUniforms()
         })
 
-        // --- WB ---
         kelvinSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             kelvinState = kelvinState.copy(kelvin = 2000f + v * 100f)
             kelvinLabel.text = String.format("Kelvin  %.0fK", kelvinState.kelvin)
@@ -505,7 +545,6 @@ class MainActivity : AppCompatActivity() {
             if (currentWbMode == WhiteBalanceMode.KELVIN) uploadAgxUniforms()
         })
 
-        // --- Output ---
         jpegSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             photoOutput = photoOutput.copy(jpegQuality = v)
             jpegLabel.text = String.format("JPEG Quality  %d", v)
@@ -531,7 +570,6 @@ class MainActivity : AppCompatActivity() {
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
 
-        // --- Presets ---
         val presetAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, mutableListOf<String>())
         presetAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         presetSpinner.adapter = presetAdapter
@@ -751,8 +789,9 @@ class MainActivity : AppCompatActivity() {
         buildLensSelectorUI()
 
         previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
-        previewRenderer.start()
+        previewRenderer.setFrontCamera(primary.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT)
         previewRenderer.setSensorOrientation(lensManager.getSensorOrientation(primary))
+        previewRenderer.start()
 
         uploadAgxUniforms()
 
@@ -774,13 +813,133 @@ class MainActivity : AppCompatActivity() {
         camera2Manager.onSessionReady = { width, height ->
             Log.d(TAG, "Camera session ready: ${width}x${height}")
             cameraReady = true
+            mainHandler.post {
+                lensSwitchOverlay.visibility = View.GONE
+            }
         }
 
-        camera2Manager.onError = { Log.e(TAG, it) }
+        camera2Manager.onDisconnected = {
+            mainHandler.post {
+                cameraReady = false
+                disconnectBanner.visibility = View.VISIBLE
+                Log.w(TAG, "Camera disconnected — banner shown")
+            }
+        }
+
+        camera2Manager.onError = { msg ->
+            mainHandler.post {
+                cameraReady = false
+                camera2Manager.resetHard()
+                previewRenderer.stop()
+                if (!errorDialogShowing) {
+                    errorDialogShowing = true
+                    AlertDialog.Builder(this)
+                        .setTitle("Camera Error")
+                        .setMessage("Camera error. Tap to retry.")
+                        .setCancelable(false)
+                        .setPositiveButton("Retry") { _, _ ->
+                            errorDialogShowing = false
+                            restartCamera()
+                        }
+                        .show()
+                }
+            }
+        }
 
         camera2Manager.startBackgroundThread()
         camera2Manager.openCamera(primary, previewSize)
         previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
+    }
+
+    private fun restartCamera() {
+        val lens = lensManager.activeLens ?: lensManager.selectPrimary() ?: return
+        val previewSize = lensManager.getBestPreviewSize(lens)
+        previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
+        previewRenderer.start()
+        camera2Manager.startBackgroundThread()
+        camera2Manager.openCamera(lens, previewSize)
+        previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
+    }
+
+    private fun switchToLens(targetLens: LensInfo) {
+        val currentLens = lensManager.activeLens ?: return
+
+        lensSwitchOverlay.text = "Switching to ${targetLens.label}\u2026"
+        lensSwitchOverlay.visibility = View.VISIBLE
+
+        lensManager.saveCurrentState(
+            currentLens.cameraId,
+            previewRenderer.zoomController.zoomFactor,
+            previewRenderer.zoomController.zoomCenterX,
+            previewRenderer.zoomController.zoomCenterY,
+            currentWbMode.ordinal,
+            kelvinState.kelvin,
+            kelvinState.tint,
+            currentFlashMode.ordinal
+        )
+
+        camera2Manager.close()
+
+        autofocusController.revertToContinuous()
+
+        lensManager.switchLens(targetLens) { /* save handled above */ }
+
+        val restored = lensManager.getRestoredState(targetLens.cameraId)
+        previewRenderer.zoomController.setZoom(restored.zoomFactor)
+        previewRenderer.zoomController.pan(restored.zoomCenterX - previewRenderer.zoomController.zoomCenterX, restored.zoomCenterY - previewRenderer.zoomController.zoomCenterY)
+
+        currentWbMode = WhiteBalanceMode.entries[restored.wbModeOrdinal.coerceIn(0, WhiteBalanceMode.entries.size - 1)]
+        kelvinState = KelvinState(restored.kelvin, restored.kelvinTint)
+        currentFlashMode = FlashMode.entries[restored.flashModeOrdinal.coerceIn(0, FlashMode.entries.size - 1)]
+
+        updateFlashUI()
+        updateWbUI()
+        syncWbSliders()
+        thermalManager.isTorchActive = (currentFlashMode == FlashMode.TORCH)
+        syncAllSliders()
+
+        previewRenderer.setSensorOrientation(lensManager.getSensorOrientation(targetLens))
+        previewRenderer.setFrontCamera(targetLens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT)
+
+        buildLensSelectorUI()
+        frontRearToggle.text = if (targetLens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT) "↻F" else "↻"
+
+        uploadAgxUniforms()
+
+        val previewSize = lensManager.getBestPreviewSize(targetLens)
+        camera2Manager.startBackgroundThread()
+        camera2Manager.openCamera(targetLens, previewSize)
+        previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
+    }
+
+    private fun buildLensSelectorUI() {
+        lensSelector.removeAllViews()
+        val active = lensManager.activeLens ?: return
+        val rearLenses = lensManager.getRearLenses()
+        val primaryFocal = rearLenses.firstOrNull()?.focalLengthMm ?: 1.0f
+
+        val activeLensId = active.cameraId
+
+        for (lens in rearLenses) {
+            val zoomLabel = if (primaryFocal > 0) String.format("%.1f\u00D7", lens.focalLengthMm / primaryFocal) else lens.label
+            val isActive = lens.cameraId == activeLensId
+            val btn = TextView(this).apply {
+                text = zoomLabel
+                setTextColor(0xFFFFFFFF.toInt())
+                textSize = 12f
+                setPadding(24, 12, 24, 12)
+                setBackgroundColor(if (isActive) 0xFF4488FF.toInt() else 0x66444444.toInt())
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginStart = 8 }
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { if (lens.cameraId != activeLensId) switchToLens(lens) }
+                setOnLongClickListener {
+                    Toast.makeText(this@MainActivity, "${lens.label}: ${lens.focalLengthMm}mm, HW level ${lens.hardwareLevel}", Toast.LENGTH_SHORT).show()
+                    true
+                }
+            }
+            lensSelector.addView(btn)
+        }
     }
 
     private fun uploadAgxUniforms() {
@@ -836,28 +995,17 @@ class MainActivity : AppCompatActivity() {
         return dst
     }
 
-    private fun buildLensSelectorUI() {
-        lensSelector.removeAllViews()
-        val primaryLens = lensManager.activeLens ?: return
-        val btn = TextView(this).apply {
-            text = primaryLens.label
-            setTextColor(0xFFFFFFFF.toInt())
-            textSize = 12f
-            setPadding(24, 12, 24, 12)
-            setBackgroundColor(0xFF4488FF.toInt())
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginStart = 8 }
-        }
-        lensSelector.addView(btn)
-    }
-
     override fun onResume() {
         super.onResume()
         thermalManager.reset()
+        disconnectBanner.visibility = View.GONE
+
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED && !cameraReady) {
             val lens = lensManager.activeLens ?: lensManager.selectPrimary()
             if (lens != null) {
                 val previewSize = lensManager.getBestPreviewSize(lens)
                 previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
+                previewRenderer.setFrontCamera(lens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT)
                 previewRenderer.start()
                 camera2Manager.startBackgroundThread()
                 camera2Manager.openCamera(lens, previewSize)
@@ -868,6 +1016,15 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        if (isCapturing) {
+            finishingCaptureOverlay.visibility = View.VISIBLE
+            pendingPauseCleanup = true
+        } else {
+            performCleanup()
+        }
+    }
+
+    private fun performCleanup() {
         camera2Manager.close()
         camera2Manager.stopBackgroundThread()
         cameraReady = false
@@ -875,7 +1032,19 @@ class MainActivity : AppCompatActivity() {
         shutterController.cancelCooldown()
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        performCleanup()
+    }
+
     private fun updateThermalUI(state: ThermalManager.State) {
+        if (!thermalManager.isWarmupComplete) {
+            thermalIndicator.text = "Calibrating\u2026"
+            thermalIndicator.setTextColor(0xFFAAAAAA.toInt())
+            thermalIndicator.visibility = View.VISIBLE
+            return
+        }
+
         when (state) {
             ThermalManager.State.NORMAL -> {
                 thermalIndicator.visibility = View.GONE
@@ -886,7 +1055,7 @@ class MainActivity : AppCompatActivity() {
                 thermalIndicator.visibility = View.VISIBLE
             }
             ThermalManager.State.HOT -> {
-                thermalIndicator.text = "HOT — Cooldown"
+                thermalIndicator.text = "HOT \u2014 Cooldown"
                 thermalIndicator.setTextColor(0xFFFF4444.toInt())
                 thermalIndicator.visibility = View.VISIBLE
             }

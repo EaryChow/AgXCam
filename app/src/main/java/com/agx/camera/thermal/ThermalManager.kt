@@ -25,10 +25,19 @@ class ThermalManager(context: Context) {
     var currentState = State.NORMAL
         private set
 
+    var isTorchActive = false
+
     var onStateChanged: ((State) -> Unit)? = null
 
+    val isWarmupComplete: Boolean get() = warmupComplete
+
     val isCaptureBlocked: Boolean
-        get() = currentState == State.HOT || currentState == State.CRITICAL
+        get() {
+            if (!warmupComplete) {
+                return pollBatteryTemperature() >= 45.0f
+            }
+            return currentState == State.HOT || currentState == State.CRITICAL
+        }
 
     val isPreviewReduced: Boolean
         get() = currentState == State.CRITICAL && consecutiveSlowFrames > 5
@@ -73,16 +82,20 @@ class ThermalManager(context: Context) {
     private fun evaluateState() {
         val batteryC = pollBatteryTemperature()
 
+        val warmThreshold = if (isTorchActive) 37.0f else 40.0f
+        val hotThreshold = if (isTorchActive) 42.0f else 45.0f
+        val criticalThreshold = if (isTorchActive) 47.0f else 50.0f
+
         val newState = when {
-            batteryC >= 50.0f || (consecutiveSlowFrames > 5 && frameTimeHeuristicCritical()) -> State.CRITICAL
-            batteryC >= 45.0f || (consecutiveSlowFrames > 5 && frameTimeHeuristicHot()) -> State.HOT
-            batteryC >= 40.0f -> State.WARM
+            batteryC >= criticalThreshold || (consecutiveSlowFrames > 5 && frameTimeHeuristicCritical()) -> State.CRITICAL
+            batteryC >= hotThreshold || (consecutiveSlowFrames > 5 && frameTimeHeuristicHot()) -> State.HOT
+            batteryC >= warmThreshold -> State.WARM
             else -> State.NORMAL
         }
 
         if (newState != currentState) {
             currentState = newState
-            Log.d(TAG, "Thermal state: $currentState (battery=${batteryC}°C, slowFrames=$consecutiveSlowFrames)")
+            Log.d(TAG, "Thermal state: $currentState (battery=${batteryC}°C, slowFrames=$consecutiveSlowFrames, torch=$isTorchActive)")
             onStateChanged?.invoke(currentState)
         }
     }
