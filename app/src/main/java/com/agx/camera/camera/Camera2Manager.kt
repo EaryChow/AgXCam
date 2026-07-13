@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.ImageFormat
 import android.hardware.camera2.*
 import android.hardware.camera2.params.MeteringRectangle
+import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
@@ -15,19 +16,22 @@ class Camera2Manager(private val context: Context) {
 
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
-    private var imageReader: ImageReader? = null
+    private var previewReader: ImageReader? = null
+    private var captureReader: ImageReader? = null
 
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
 
     private var currentFlashMode: FlashMode = FlashMode.OFF
     private var currentLens: LensInfo? = null
+    var captureSize: Size = Size(640, 480)
+        private set
 
-    var onFrameAvailable: ((android.media.Image) -> Unit)? = null
+    var onFrameAvailable: ((Image) -> Unit)? = null
     var onSessionReady: ((Int, Int) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
 
-    private val imageListener = ImageReader.OnImageAvailableListener { reader ->
+    private val previewListener = ImageReader.OnImageAvailableListener { reader ->
         val image = reader.acquireLatestImage() ?: return@OnImageAvailableListener
         try {
             onFrameAvailable?.invoke(image)
@@ -35,6 +39,8 @@ class Camera2Manager(private val context: Context) {
             image.close()
         }
     }
+
+    val currentFlashModeForExif: FlashMode get() = currentFlashMode
 
     fun startBackgroundThread() {
         backgroundThread = HandlerThread("Camera2Background").also { it.start() }
@@ -57,12 +63,26 @@ class Camera2Manager(private val context: Context) {
 
         Log.d(TAG, "Opening camera ${lens.cameraId}, preview size: ${previewSize.width}x${previewSize.height}")
 
-        imageReader = ImageReader.newInstance(
+        previewReader = ImageReader.newInstance(
             previewSize.width, previewSize.height,
             ImageFormat.YUV_420_888, 3
         ).apply {
-            setOnImageAvailableListener(imageListener, backgroundHandler)
+            setOnImageAvailableListener(previewListener, backgroundHandler)
         }
+
+        val chars = cameraManager.getCameraCharacteristics(lens.cameraId)
+        val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val maxSize = map?.getOutputSizes(ImageFormat.YUV_420_888)
+            ?.maxByOrNull { it.width.toLong() * it.height.toLong() }
+            ?: previewSize
+        captureSize = Size(maxSize.width, maxSize.height)
+
+        Log.d(TAG, "Capture size: ${captureSize.width}x${captureSize.height}")
+
+        captureReader = ImageReader.newInstance(
+            captureSize.width, captureSize.height,
+            ImageFormat.YUV_420_888, 1
+        )
 
         cameraManager.openCamera(lens.cameraId, object : CameraDevice.StateCallback() {
             override fun onOpened(camera: CameraDevice) {
@@ -87,7 +107,7 @@ class Camera2Manager(private val context: Context) {
     }
 
     private fun createSession(camera: CameraDevice, previewSize: Size) {
-        val surfaces = listOf(imageReader!!.surface)
+        val surfaces = listOf(previewReader!!.surface, captureReader!!.surface)
 
         @Suppress("DEPRECATION")
         camera.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
@@ -109,7 +129,7 @@ class Camera2Manager(private val context: Context) {
         val session = captureSession ?: return
 
         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-            addTarget(imageReader!!.surface)
+            addTarget(previewReader!!.surface)
             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
             currentFlashMode.applyToRequest(this)
         }
@@ -128,7 +148,7 @@ class Camera2Manager(private val context: Context) {
         val session = captureSession ?: return
 
         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-            addTarget(imageReader!!.surface)
+            addTarget(previewReader!!.surface)
             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
             currentFlashMode.applyToRequest(this)
         }
@@ -145,7 +165,7 @@ class Camera2Manager(private val context: Context) {
         val session = captureSession ?: return
 
         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-            addTarget(imageReader!!.surface)
+            addTarget(previewReader!!.surface)
             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
             set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRect))
             set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(meteringRect))
@@ -164,7 +184,7 @@ class Camera2Manager(private val context: Context) {
                 if (afState != null && afState != CaptureResult.CONTROL_AF_STATE_ACTIVE_SCAN) {
                     session.stopRepeating()
                     val lockRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                        addTarget(imageReader!!.surface)
+                        addTarget(previewReader!!.surface)
                         set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
                         set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRect))
                         set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
@@ -183,12 +203,12 @@ class Camera2Manager(private val context: Context) {
         startPreview()
     }
 
-    fun captureStill(onCaptureComplete: () -> Unit, onCaptureFailed: () -> Unit) {
+    fun captureStill(onCaptureAvailable: (Image, TotalCaptureResult) -> Unit, onCaptureFailed: () -> Unit) {
         val camera = cameraDevice ?: run { onCaptureFailed(); return }
         val session = captureSession ?: run { onCaptureFailed(); return }
 
         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
-            addTarget(imageReader!!.surface)
+            addTarget(captureReader!!.surface)
             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
             set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             currentFlashMode.applyToRequest(this)
@@ -196,7 +216,13 @@ class Camera2Manager(private val context: Context) {
 
         session.capture(request.build(), object : CameraCaptureSession.CaptureCallback() {
             override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
-                onCaptureComplete()
+                val image = captureReader?.acquireLatestImage()
+                if (image != null) {
+                    onCaptureAvailable(image, result)
+                } else {
+                    Log.e(TAG, "Capture image not available at onCaptureCompleted")
+                    onCaptureFailed()
+                }
             }
 
             override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
@@ -218,9 +244,14 @@ class Camera2Manager(private val context: Context) {
         cameraDevice = null
 
         try {
-            imageReader?.close()
+            previewReader?.close()
         } catch (_: Exception) {}
-        imageReader = null
+        previewReader = null
+
+        try {
+            captureReader?.close()
+        } catch (_: Exception) {}
+        captureReader = null
     }
 
     companion object {

@@ -1,12 +1,16 @@
 package com.agx.camera.gpu
 
+import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
 import android.opengl.*
 import android.util.Log
 import android.view.Surface
 import android.view.TextureView
 import com.agx.camera.camera.ZoomController
+import com.agx.camera.io.JpegEncoder
 import java.nio.ByteBuffer
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -21,6 +25,18 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var fboTextureId = 0
     private var fboWidth = 640
     private var fboHeight = 480
+
+    private var captureFboId = 0
+    private var captureFboTextureId = 0
+    private var captureFboWidth = 0
+    private var captureFboHeight = 0
+    private var captureFboAllocatedWidth = 0
+    private var captureFboAllocatedHeight = 0
+
+    private var downscaleFboId = 0
+    private var downscaleFboTextureId = 0
+    private var downscaleFboWidth = 0
+    private var downscaleFboHeight = 0
 
     private val yuvShader = YuvShaderProgram()
     private val blitShader = BlitShaderProgram()
@@ -55,6 +71,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         fboHeight = height
     }
 
+    fun setCaptureSize(width: Int, height: Int) {
+        captureFboWidth = width
+        captureFboHeight = height
+    }
+
     private var yPlane: ByteBuffer? = null
     private var uPlane: ByteBuffer? = null
     private var vPlane: ByteBuffer? = null
@@ -69,6 +90,49 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
     var onFirstFrameRendered: (() -> Unit)? = null
     private var firstFrameReported = false
+
+    var pendingFboReadback: ((Int, Int, Int) -> Unit)? = null
+
+    private data class CaptureFrame(
+        val y: ByteBuffer, val u: ByteBuffer, val v: ByteBuffer,
+        val w: Int, val h: Int,
+        val targetW: Int, val targetH: Int,
+        val zoomFactor: Float, val zoomCenterX: Float, val zoomCenterY: Float,
+        val agxSceneLinearTo709: FloatArray,
+        val agxInsetMat: FloatArray,
+        val agxOutsetMat: FloatArray,
+        val agxToRec2020: FloatArray,
+        val agxWhiteLevel: Float, val agxBlackLevel: Float,
+        val agxLogMin: Float, val agxLogMax: Float,
+        val agxLogMidgray: Float, val agxDisplayMidgray: Float,
+        val agxContrast: Float, val agxToe: Float, val agxShoulder: Float,
+        val resultRef: AtomicReference<Bitmap?>,
+        val latch: CountDownLatch
+    )
+
+    @Volatile private var pendingCaptureFrame: CaptureFrame? = null
+
+    internal fun submitCaptureFrame(
+        y: ByteBuffer, u: ByteBuffer, v: ByteBuffer,
+        w: Int, h: Int,
+        targetW: Int, targetH: Int,
+        session: com.agx.camera.MainActivity.CaptureSession,
+        resultRef: AtomicReference<Bitmap?>,
+        latch: CountDownLatch
+    ) {
+        pendingCaptureFrame = CaptureFrame(
+            y, u, v, w, h, targetW, targetH,
+            session.zoomFactor, session.zoomCenterX, session.zoomCenterY,
+            session.agxSceneLinearTo709, session.agxInsetMat, session.agxOutsetMat, session.agxToRec2020,
+            session.agxWhiteLevel, session.agxBlackLevel,
+            session.agxLogMin, session.agxLogMax,
+            session.agxLogMidgray, session.agxDisplayMidgray,
+            session.agxContrast, session.agxToe, session.agxShoulder,
+            resultRef, latch
+        )
+        hasNewFrame = true
+        renderLock.withLock { frameCondition.signal() }
+    }
 
     fun setYuvFrame(y: ByteBuffer, u: ByteBuffer, v: ByteBuffer, width: Int, height: Int) {
         yPlane = y
@@ -129,13 +193,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 continue
             }
 
-            val y = yPlane ?: continue
-            val u = uPlane ?: continue
-            val v = vPlane ?: continue
-            val w = yuvWidth
-            val h = yuvHeight
-            if (w <= 0 || h <= 0) continue
-
             if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
                 Log.w(TAG, "eglMakeCurrent failed")
                 continue
@@ -144,6 +201,75 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             val viewW = textureView.width
             val viewH = textureView.height
             if (viewW <= 0 || viewH <= 0) continue
+
+            val captureReq = pendingCaptureFrame?.also { pendingCaptureFrame = null }
+            if (captureReq != null) {
+                ensureCaptureFbo()
+                if (captureFboId != 0) {
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, captureFboId)
+                    GLES20.glViewport(0, 0, captureFboWidth, captureFboHeight)
+                    GLES20.glClearColor(0f, 0f, 0f, 1f)
+                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+                    yuvShader.uploadY(captureReq.y.duplicate(), captureReq.w, captureReq.h)
+                    yuvShader.uploadU(captureReq.u.duplicate(), captureReq.w / 2, captureReq.h / 2)
+                    yuvShader.uploadV(captureReq.v.duplicate(), captureReq.w / 2, captureReq.h / 2)
+
+                    yuvShader.draw(
+                        captureFboWidth, captureFboHeight,
+                        captureReq.zoomFactor,
+                        captureReq.zoomCenterX,
+                        captureReq.zoomCenterY,
+                        0, false,
+                        captureReq.agxSceneLinearTo709, captureReq.agxInsetMat, captureReq.agxOutsetMat, captureReq.agxToRec2020,
+                        captureReq.agxWhiteLevel, captureReq.agxBlackLevel,
+                        captureReq.agxLogMin, captureReq.agxLogMax,
+                        captureReq.agxLogMidgray, captureReq.agxDisplayMidgray,
+                        captureReq.agxContrast, captureReq.agxToe, captureReq.agxShoulder
+                    )
+
+                    val readW: Int
+                    val readH: Int
+                    val readTexId: Int
+
+                    if (captureReq.targetW < captureFboWidth && captureReq.targetH < captureFboHeight &&
+                        captureReq.targetW > 0 && captureReq.targetH > 0) {
+                        ensureDownscaleFbo(captureReq.targetW, captureReq.targetH)
+                        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, downscaleFboId)
+                        GLES20.glViewport(0, 0, downscaleFboWidth, downscaleFboHeight)
+                        blitShader.draw(captureFboTextureId)
+                        readW = downscaleFboWidth
+                        readH = downscaleFboHeight
+                        readTexId = downscaleFboTextureId
+                    } else {
+                        readW = captureFboWidth
+                        readH = captureFboHeight
+                        readTexId = captureFboTextureId
+                    }
+
+                    val bitmap = JpegEncoder.readFboToBitmapFlipped(readTexId, readW, readH)
+                    captureReq.resultRef.set(bitmap)
+                } else {
+                    Log.e(TAG, "Capture FBO not available")
+                }
+                captureReq.latch.countDown()
+            }
+
+            val y = yPlane
+            val u = uPlane
+            val v = vPlane
+            val w = yuvWidth
+            val h = yuvHeight
+            if (y == null || u == null || v == null || w <= 0 || h <= 0) {
+                if (viewW > 0 && viewH > 0) {
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+                    GLES20.glViewport(0, 0, viewW, viewH)
+                    GLES20.glClearColor(0f, 0f, 0f, 1f)
+                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                    EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+                }
+                continue
+            }
 
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
             GLES20.glViewport(0, 0, fboWidth, fboHeight)
@@ -170,6 +296,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 agxLogMidgray, agxDisplayMidgray,
                 agxContrast, agxToe, agxShoulder
             )
+
+            pendingFboReadback?.let { callback ->
+                callback(fboTextureId, fboWidth, fboHeight)
+                pendingFboReadback = null
+            }
 
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
             GLES20.glViewport(0, 0, viewW, viewH)
@@ -278,6 +409,95 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         Log.d(TAG, "FBO created: ${width}x${height}")
     }
 
+    private fun ensureCaptureFbo() {
+        if (captureFboWidth <= 0 || captureFboHeight <= 0) return
+        if (captureFboId != 0 && captureFboAllocatedWidth == captureFboWidth && captureFboAllocatedHeight == captureFboHeight) return
+
+        if (captureFboId != 0) {
+            GLES20.glDeleteFramebuffers(1, intArrayOf(captureFboId), 0)
+            GLES20.glDeleteTextures(1, intArrayOf(captureFboTextureId), 0)
+            captureFboId = 0
+            captureFboTextureId = 0
+        }
+
+        val texBuf = IntArray(1)
+        GLES20.glGenTextures(1, texBuf, 0)
+        captureFboTextureId = texBuf[0]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, captureFboTextureId)
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+            captureFboWidth, captureFboHeight, 0,
+            GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null
+        )
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+
+        val fboBuf = IntArray(1)
+        GLES20.glGenFramebuffers(1, fboBuf, 0)
+        captureFboId = fboBuf[0]
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, captureFboId)
+        GLES20.glFramebufferTexture2D(
+            GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+            GLES20.GL_TEXTURE_2D, captureFboTextureId, 0
+        )
+
+        val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
+        if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+            Log.e(TAG, "Capture FBO incomplete: $status")
+        }
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        captureFboAllocatedWidth = captureFboWidth
+        captureFboAllocatedHeight = captureFboHeight
+        Log.d(TAG, "Capture FBO created: ${captureFboWidth}x${captureFboHeight}")
+    }
+
+    private fun ensureDownscaleFbo(width: Int, height: Int) {
+        if (downscaleFboId != 0 && downscaleFboWidth == width && downscaleFboHeight == height) return
+        if (downscaleFboId != 0) {
+            GLES20.glDeleteFramebuffers(1, intArrayOf(downscaleFboId), 0)
+            GLES20.glDeleteTextures(1, intArrayOf(downscaleFboTextureId), 0)
+            downscaleFboId = 0
+            downscaleFboTextureId = 0
+        }
+
+        downscaleFboWidth = width
+        downscaleFboHeight = height
+
+        val texBuf = IntArray(1)
+        GLES20.glGenTextures(1, texBuf, 0)
+        downscaleFboTextureId = texBuf[0]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, downscaleFboTextureId)
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+            width, height, 0,
+            GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null
+        )
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+
+        val fboBuf = IntArray(1)
+        GLES20.glGenFramebuffers(1, fboBuf, 0)
+        downscaleFboId = fboBuf[0]
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, downscaleFboId)
+        GLES20.glFramebufferTexture2D(
+            GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+            GLES20.GL_TEXTURE_2D, downscaleFboTextureId, 0
+        )
+
+        val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
+        if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+            Log.e(TAG, "Downscale FBO incomplete: $status")
+        }
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        Log.d(TAG, "Downscale FBO created: ${width}x${height}")
+    }
+
     private fun destroyEgl() {
         if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
             EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
@@ -289,6 +509,22 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             if (fboTextureId != 0) {
                 GLES20.glDeleteTextures(1, intArrayOf(fboTextureId), 0)
                 fboTextureId = 0
+            }
+            if (captureFboId != 0) {
+                GLES20.glDeleteFramebuffers(1, intArrayOf(captureFboId), 0)
+                captureFboId = 0
+            }
+            if (captureFboTextureId != 0) {
+                GLES20.glDeleteTextures(1, intArrayOf(captureFboTextureId), 0)
+                captureFboTextureId = 0
+            }
+            if (downscaleFboId != 0) {
+                GLES20.glDeleteFramebuffers(1, intArrayOf(downscaleFboId), 0)
+                downscaleFboId = 0
+            }
+            if (downscaleFboTextureId != 0) {
+                GLES20.glDeleteTextures(1, intArrayOf(downscaleFboTextureId), 0)
+                downscaleFboTextureId = 0
             }
 
             if (eglSurface != EGL14.EGL_NO_SURFACE) {

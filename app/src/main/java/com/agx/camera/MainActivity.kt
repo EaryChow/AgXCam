@@ -2,9 +2,12 @@ package com.agx.camera
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.hardware.camera2.CaptureResult
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.MotionEvent
 import android.view.TextureView
@@ -23,7 +26,13 @@ import com.agx.camera.color.AgxPrecomputer
 import com.agx.camera.color.ColorMatrix
 import com.agx.camera.color.WhiteBalanceMath
 import com.agx.camera.gpu.PreviewRenderer
+import com.agx.camera.io.CaptureMetadata
+import com.agx.camera.io.ExifWriter
+import com.agx.camera.io.JpegEncoder
+import com.agx.camera.io.MediaStoreSaver
 import com.agx.camera.thermal.ThermalManager
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
@@ -35,6 +44,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var shutterController: ShutterController
     private lateinit var autofocusController: AutofocusController
     private lateinit var grayCardSampler: GrayCardSampler
+    private lateinit var mediaStoreSaver: MediaStoreSaver
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var currentFlashMode = FlashMode.OFF
@@ -187,6 +197,7 @@ class MainActivity : AppCompatActivity() {
         shutterController = ShutterController(mainHandler)
         autofocusController = AutofocusController(camera2Manager, mainHandler)
         grayCardSampler = GrayCardSampler()
+        mediaStoreSaver = MediaStoreSaver(this)
 
         thermalManager.onStateChanged = { state ->
             mainHandler.post { updateThermalUI(state) }
@@ -261,9 +272,58 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             shutterController.onCaptureSubmitted()
+
+            val session = CaptureSession(
+                flashMode = camera2Manager.currentFlashModeForExif,
+                jpegQuality = photoOutput.jpegQuality,
+                resolutionWidth = photoOutput.resolutionWidth,
+                resolutionHeight = photoOutput.resolutionHeight,
+                deviceRotationDegrees = when (windowManager.defaultDisplay.rotation) {
+                    android.view.Surface.ROTATION_90 -> 90
+                    android.view.Surface.ROTATION_180 -> 180
+                    android.view.Surface.ROTATION_270 -> 270
+                    else -> 0
+                },
+                sensorOrientation = lensManager.activeLens?.let { lensManager.getSensorOrientation(it) } ?: 0,
+                focalLengthMm = lensManager.activeLens?.let {
+                    lensManager.getCharacteristicsForLens(it)
+                        ?.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                        ?.getOrNull(0)
+                } ?: 4.0f,
+                zoomFactor = previewRenderer.zoomController.zoomFactor,
+                zoomCenterX = previewRenderer.zoomController.zoomCenterX,
+                zoomCenterY = previewRenderer.zoomController.zoomCenterY,
+                agxSceneLinearTo709 = previewRenderer.agxSceneLinearTo709.copyOf(),
+                agxInsetMat = previewRenderer.agxInsetMat.copyOf(),
+                agxOutsetMat = previewRenderer.agxOutsetMat.copyOf(),
+                agxToRec2020 = previewRenderer.agxToRec2020.copyOf(),
+                agxWhiteLevel = previewRenderer.agxWhiteLevel,
+                agxBlackLevel = previewRenderer.agxBlackLevel,
+                agxLogMin = previewRenderer.agxLogMin,
+                agxLogMax = previewRenderer.agxLogMax,
+                agxLogMidgray = previewRenderer.agxLogMidgray,
+                agxDisplayMidgray = previewRenderer.agxDisplayMidgray,
+                agxContrast = previewRenderer.agxContrast,
+                agxToe = previewRenderer.agxToe,
+                agxShoulder = previewRenderer.agxShoulder
+            )
+
+            val thumbnailLatch = CountDownLatch(1)
+            val thumbnailRef = java.util.concurrent.atomic.AtomicReference<Bitmap?>(null)
+            previewRenderer.pendingFboReadback = { fboTexId, w, h ->
+                thumbnailRef.set(JpegEncoder.readFboToBitmapFlipped(fboTexId, w, h))
+                thumbnailLatch.countDown()
+            }
+
             camera2Manager.captureStill(
-                onCaptureComplete = { mainHandler.post { shutterController.onCaptureComplete() } },
-                onCaptureFailed = { mainHandler.post { shutterController.onCaptureFailed() } }
+                onCaptureAvailable = { image, result ->
+                    processCapture(image, result, session, thumbnailLatch, thumbnailRef)
+                    mainHandler.post { shutterController.onCaptureComplete() }
+                },
+                onCaptureFailed = {
+                    previewRenderer.pendingFboReadback = null
+                    mainHandler.post { shutterController.onCaptureFailed() }
+                }
             )
         }
 
@@ -457,7 +517,16 @@ class MainActivity : AppCompatActivity() {
         }
         resolutionSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                // Resolution applied at capture time (Week 5)
+                if (camera2Manager.captureSize.width <= 640) return
+                val scale = when (position) {
+                    1 -> 2
+                    2 -> 4
+                    else -> 1
+                }
+                photoOutput = photoOutput.copy(
+                    resolutionWidth = camera2Manager.captureSize.width / scale,
+                    resolutionHeight = camera2Manager.captureSize.height / scale
+                )
             }
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
@@ -711,6 +780,7 @@ class MainActivity : AppCompatActivity() {
 
         camera2Manager.startBackgroundThread()
         camera2Manager.openCamera(primary, previewSize)
+        previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
     }
 
     private fun uploadAgxUniforms() {
@@ -791,6 +861,7 @@ class MainActivity : AppCompatActivity() {
                 previewRenderer.start()
                 camera2Manager.startBackgroundThread()
                 camera2Manager.openCamera(lens, previewSize)
+                previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
             }
         }
     }
@@ -847,6 +918,149 @@ class MainActivity : AppCompatActivity() {
             }
             else -> {}
         }
+    }
+
+    private fun processCapture(
+        image: android.media.Image,
+        result: android.hardware.camera2.TotalCaptureResult,
+        session: CaptureSession,
+        thumbnailLatch: CountDownLatch,
+        thumbnailRef: java.util.concurrent.atomic.AtomicReference<Bitmap?>
+    ) {
+        Thread {
+            var tempFile: java.io.File? = null
+            try {
+                val planes = image.planes
+                val w = image.width
+                val h = image.height
+                val yBuffer = extractPlane(planes[0].buffer, w, h, planes[0].rowStride, 1)
+                val uBuffer = extractPlane(planes[1].buffer, w / 2, h / 2, planes[1].rowStride, planes[1].pixelStride)
+                val vBuffer = extractPlane(planes[2].buffer, w / 2, h / 2, planes[2].rowStride, planes[2].pixelStride)
+
+                val gpuBitmapRef = java.util.concurrent.atomic.AtomicReference<Bitmap?>(null)
+                val gpuLatch = java.util.concurrent.CountDownLatch(1)
+                val targetW = if (session.resolutionWidth > 0) session.resolutionWidth else w
+                val targetH = if (session.resolutionHeight > 0) session.resolutionHeight else h
+                previewRenderer.submitCaptureFrame(yBuffer, uBuffer, vBuffer, w, h, targetW, targetH, session, gpuBitmapRef, gpuLatch)
+                val gpuReady = gpuLatch.await(5000, TimeUnit.MILLISECONDS)
+                val bitmap = if (gpuReady) gpuBitmapRef.get() else null
+                if (bitmap == null) {
+                    Log.e(TAG, "GPU capture render timed out")
+                    mainHandler.post {
+                        Toast.makeText(this, "Capture failed: GPU render timeout", Toast.LENGTH_SHORT).show()
+                    }
+                    return@Thread
+                }
+
+                val iso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: 100
+                val exposureNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 0L
+                val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
+
+                val activeLens = lensManager.activeLens ?: lensManager.selectPrimary()
+                val chars = activeLens?.let { lensManager.getCharacteristicsForLens(it) }
+
+                val wallClockOffsetMs = System.currentTimeMillis() - (SystemClock.elapsedRealtimeNanos() / 1_000_000)
+
+                val timestampSource = chars?.get(
+                    android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE
+                ) ?: android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN
+
+                val sensorTimestampNs = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: SystemClock.elapsedRealtimeNanos()
+                val captureWallClockMs = if (timestampSource == android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME) {
+                    sensorTimestampNs / 1_000_000 + wallClockOffsetMs
+                } else {
+                    System.currentTimeMillis()
+                }
+
+                val focalLengthMm = session.focalLengthMm
+
+                val sensorOrientation = session.sensorOrientation
+
+                val deviceRotationDegrees = session.deviceRotationDegrees
+                val rotation = (sensorOrientation - deviceRotationDegrees + 360) % 360
+                val exifOrientation = when (rotation) {
+                    90 -> 6
+                    180 -> 3
+                    270 -> 8
+                    else -> 1
+                }
+
+                val metadata = CaptureMetadata(
+                    sensorOrientation = sensorOrientation,
+                    exifOrientation = exifOrientation,
+                    focalLengthMm = focalLengthMm,
+                    iso = iso,
+                    exposureTimeNs = exposureNs,
+                    flashMode = session.flashMode,
+                    aeState = aeState,
+                    captureWallClockMs = captureWallClockMs
+                )
+
+                val jpegData = JpegEncoder.encodeToJpeg(bitmap, session.jpegQuality)
+                bitmap.recycle()
+
+                val thumbnailReady = thumbnailLatch.await(2000, TimeUnit.MILLISECONDS)
+                val thumbnailBitmap = if (thumbnailReady) thumbnailRef.get() else null
+                    val thumbnailJpeg = if (thumbnailBitmap != null) {
+                        ExifWriter.generateThumbnailJpeg(thumbnailBitmap, 0).also {
+                            thumbnailBitmap.recycle()
+                        }
+                    } else null
+
+                tempFile = java.io.File(cacheDir, "capture_${System.nanoTime()}.jpg")
+                tempFile.writeBytes(jpegData)
+
+                ExifWriter.writeExif(tempFile, metadata, thumbnailJpeg)
+
+                val finalJpegData = tempFile.readBytes()
+
+                val savedUri = mediaStoreSaver.saveJpeg(finalJpegData, metadata)
+                mainHandler.post {
+                    if (savedUri != null) {
+                        Toast.makeText(this, "Photo saved", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this, "Failed to save photo", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Capture processing failed", e)
+                mainHandler.post {
+                    Toast.makeText(this, "Capture failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            } finally {
+                image.close()
+                tempFile?.delete()
+            }
+        }.start()
+    }
+
+    internal data class CaptureSession(
+        val flashMode: com.agx.camera.camera.FlashMode,
+        val jpegQuality: Int,
+        val resolutionWidth: Int,
+        val resolutionHeight: Int,
+        val deviceRotationDegrees: Int,
+        val sensorOrientation: Int,
+        val focalLengthMm: Float,
+        val zoomFactor: Float,
+        val zoomCenterX: Float,
+        val zoomCenterY: Float,
+        val agxSceneLinearTo709: FloatArray,
+        val agxInsetMat: FloatArray,
+        val agxOutsetMat: FloatArray,
+        val agxToRec2020: FloatArray,
+        val agxWhiteLevel: Float,
+        val agxBlackLevel: Float,
+        val agxLogMin: Float,
+        val agxLogMax: Float,
+        val agxLogMidgray: Float,
+        val agxDisplayMidgray: Float,
+        val agxContrast: Float,
+        val agxToe: Float,
+        val agxShoulder: Float
+    ) {
+        override fun equals(other: Any?) = this === other
+        override fun hashCode() = System.identityHashCode(this)
     }
 
     companion object {
