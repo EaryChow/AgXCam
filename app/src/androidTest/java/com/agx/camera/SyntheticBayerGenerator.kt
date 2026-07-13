@@ -64,9 +64,20 @@ class SyntheticBayerGenerator(private val width: Int, private val height: Int) {
     fun generateGrayCard(kelvin: Float = 5500f): Bitmap {
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val midGray = 0.18f
-        val ri = (midGray * 255).toInt()
-        val gi = (midGray * 255).toInt()
-        val bi = (midGray * 255).toInt()
+
+        val (rGain, gGain, bGain) = if (kelvin < 5600f && kelvin > 3200f) {
+            val warmFactor = ((5600f - kelvin) / 2400f).coerceIn(0f, 1f)
+            Triple(1.0f + warmFactor * 0.3f, 1.0f, 1.0f - warmFactor * 0.2f)
+        } else if (kelvin >= 5600f) {
+            val coolFactor = ((kelvin - 5600f) / 4400f).coerceIn(0f, 1f)
+            Triple(1.0f - coolFactor * 0.15f, 1.0f, 1.0f + coolFactor * 0.25f)
+        } else {
+            Triple(1.0f, 1.0f, 1.0f)
+        }
+
+        val ri = (midGray * rGain * 255).toInt().coerceIn(0, 255)
+        val gi = (midGray * gGain * 255).toInt().coerceIn(0, 255)
+        val bi = (midGray * bGain * 255).toInt().coerceIn(0, 255)
         val color = Color.rgb(ri, gi, bi)
         val pixels = IntArray(width * height) { color }
         bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
