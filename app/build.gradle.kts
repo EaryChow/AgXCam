@@ -22,10 +22,20 @@ android {
         buildConfigField("boolean", "AGX_ENABLE_YUV_FALLBACK", "true")
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = rootProject.file("release.keystore")
+            storePassword = "agxcam123"
+            keyAlias = "agxcam"
+            keyPassword = "agxcam123"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
             buildConfigField("boolean", "AGX_ENABLE_YUV_FALLBACK", "false")
+            signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {
