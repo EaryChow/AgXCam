@@ -25,6 +25,7 @@ import com.agx.camera.color.AgxParams
 import com.agx.camera.color.AgxPrecomputer
 import com.agx.camera.color.ColorMatrix
 import com.agx.camera.color.WhiteBalanceMath
+import com.agx.camera.gpu.DegradedPreviewManager
 import com.agx.camera.gpu.PreviewRenderer
 import com.agx.camera.io.CaptureMetadata
 import com.agx.camera.io.ExifWriter
@@ -45,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var autofocusController: AutofocusController
     private lateinit var grayCardSampler: GrayCardSampler
     private lateinit var mediaStoreSaver: MediaStoreSaver
+    private lateinit var developerSwitch: DeveloperSwitch
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var currentFlashMode = FlashMode.OFF
@@ -210,6 +212,31 @@ class MainActivity : AppCompatActivity() {
         grayCardSampler = GrayCardSampler()
         mediaStoreSaver = MediaStoreSaver(this)
 
+        developerSwitch = DeveloperSwitch(this) { useRaw ->
+            Log.d(TAG, "Developer switch toggled: useRaw=$useRaw")
+            if (useRaw) {
+                val lens = lensManager.activeLens ?: return@DeveloperSwitch
+                val previewSize = lensManager.getBestPreviewSize(lens)
+                camera2Manager.close()
+                previewRenderer.enableBayerMode(previewSize.width, previewSize.height)
+                camera2Manager.startBackgroundThread()
+                camera2Manager.openCamera(lens, previewSize)
+            } else {
+                val lens = lensManager.activeLens ?: return@DeveloperSwitch
+                val previewSize = lensManager.getBestPreviewSize(lens)
+                camera2Manager.close()
+                previewRenderer.disableBayerMode()
+                camera2Manager.startBackgroundThread()
+                camera2Manager.openCamera(lens, previewSize)
+            }
+            developerSwitch.updateBannerForRawMode(useRaw)
+        }
+        developerSwitch.init(
+            findViewById(R.id.developer_raw_toggle_container),
+            findViewById(R.id.developer_raw_toggle),
+            findViewById(R.id.developer_banner)
+        )
+
         thermalManager.onStateChanged = { state ->
             mainHandler.post { updateThermalUI(state) }
         }
@@ -241,7 +268,18 @@ class MainActivity : AppCompatActivity() {
         previewRenderer = PreviewRenderer(textureView).apply {
             onFirstFrameRendered = { Log.d(TAG, "First frame rendered") }
             onFrameRendered = { ms -> thermalManager.onFrameRendered(ms.toFloat()) }
+            onDegradedModeChanged = { banner ->
+                mainHandler.post {
+                    if (banner != null) {
+                        devBanner.text = banner
+                        devBanner.visibility = View.VISIBLE
+                    } else {
+                        devBanner.visibility = View.GONE
+                    }
+                }
+            }
         }
+        previewRenderer.degradedManager = DegradedPreviewManager(this)
 
         textureView.surfaceTextureListener = previewRenderer
 
@@ -849,6 +887,8 @@ class MainActivity : AppCompatActivity() {
         camera2Manager.startBackgroundThread()
         camera2Manager.openCamera(primary, previewSize)
         previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
+
+        developerSwitch.setRawSensorAvailable(true)
     }
 
     private fun restartCamera() {

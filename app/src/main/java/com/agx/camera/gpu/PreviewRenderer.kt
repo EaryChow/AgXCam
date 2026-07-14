@@ -38,8 +38,31 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var downscaleFboWidth = 0
     private var downscaleFboHeight = 0
 
+    private var demosaicFboId = 0
+    private var demosaicFboTextureId = 0
+    private var demosaicFboWidth = 0
+    private var demosaicFboHeight = 0
+
     private val yuvShader = YuvShaderProgram()
+    private val bayerShader = BayerShaderProgram()
+    private val nrShader = NrShaderProgram()
     private val blitShader = BlitShaderProgram()
+
+    @Volatile var useBayerPath = false
+        private set
+
+    private var bayerBuffer: ByteBuffer? = null
+    private var bayerWidth = 0
+    private var bayerHeight = 0
+    private var bayerStridePixels = 0
+
+    var bayerBlackLevelPattern = intArrayOf(64, 64, 64, 64)
+    var bayerColorMap = intArrayOf(0, 1, 1, 2)
+    var bayerBitDepth = 10
+    var bayerNrStrength = 0f
+    var bayerLensShadingData: ShortArray? = null
+    var bayerLensShadingWidth = 1
+    var bayerLensShadingHeight = 1
 
     private var renderThread: Thread? = null
     private val renderLock = ReentrantLock()
@@ -90,7 +113,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
     var onFirstFrameRendered: (() -> Unit)? = null
     var onFrameRendered: ((Long) -> Unit)? = null
+    var onDegradedModeChanged: ((String?) -> Unit)? = null
     private var firstFrameReported = false
+
+    var degradedManager: DegradedPreviewManager? = null
+    private var frameCount = 0
 
     var pendingFboReadback: ((Int, Int, Int) -> Unit)? = null
 
@@ -155,6 +182,30 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         isFrontCamera = front
     }
 
+    fun enableBayerMode(sensorWidth: Int, sensorHeight: Int) {
+        bayerWidth = sensorWidth
+        bayerHeight = sensorHeight
+        useBayerPath = true
+        Log.d(TAG, "Bayer mode enabled: ${sensorWidth}x${sensorHeight}")
+    }
+
+    fun disableBayerMode() {
+        useBayerPath = false
+        bayerBuffer = null
+        Log.d(TAG, "Bayer mode disabled")
+    }
+
+    fun setBayerFrame(buffer: ByteBuffer, width: Int, height: Int, stridePixels: Int) {
+        bayerBuffer = buffer
+        bayerWidth = width
+        bayerHeight = height
+        bayerStridePixels = stridePixels
+        hasNewFrame = true
+        renderLock.withLock {
+            frameCondition.signal()
+        }
+    }
+
     fun start() {
         running = true
         renderThread = Thread({ renderLoop() }, "PreviewRenderer").also { it.start() }
@@ -177,6 +228,101 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         }
     }
 
+    private fun renderYuvFrame(viewW: Int, viewH: Int) {
+        val y = yPlane
+        val u = uPlane
+        val v = vPlane
+        val w = yuvWidth
+        val h = yuvHeight
+        if (y == null || u == null || v == null || w <= 0 || h <= 0) {
+            clearAndSwap(viewW, viewH)
+            return
+        }
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+        GLES20.glViewport(0, 0, fboWidth, fboHeight)
+        GLES20.glClearColor(0f, 0f, 0f, 1f)
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+        yuvShader.uploadY(y.duplicate(), w, h)
+        yuvShader.uploadU(u.duplicate(), w / 2, h / 2)
+        yuvShader.uploadV(v.duplicate(), w / 2, h / 2)
+
+        yuvShader.draw(
+            fboWidth, fboHeight,
+            zoomController.zoomFactor,
+            zoomController.zoomCenterX,
+            zoomController.zoomCenterY,
+            sensorOrientation,
+            isFrontCamera,
+            agxSceneLinearTo709,
+            agxInsetMat,
+            agxOutsetMat,
+            agxToRec2020,
+            agxWhiteLevel, agxBlackLevel,
+            agxLogMin, agxLogMax,
+            agxLogMidgray, agxDisplayMidgray,
+            agxContrast, agxToe, agxShoulder
+        )
+    }
+
+    private fun renderBayerFrame(viewW: Int, viewH: Int) {
+        val buffer = bayerBuffer
+        if (buffer == null || bayerWidth <= 0 || bayerHeight <= 0) {
+            clearAndSwap(viewW, viewH)
+            return
+        }
+
+        ensureDemosaicFbo(fboWidth, fboHeight)
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, demosaicFboId)
+        GLES20.glViewport(0, 0, demosaicFboWidth, demosaicFboHeight)
+        GLES20.glClearColor(0f, 0f, 0f, 1f)
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+        bayerShader.uploadBayer(buffer.duplicate(), bayerWidth, bayerHeight, bayerStridePixels)
+
+        bayerShader.drawDemosaic(
+            demosaicFboWidth, demosaicFboHeight,
+            zoomController.zoomFactor,
+            zoomController.zoomCenterX,
+            zoomController.zoomCenterY,
+            sensorOrientation,
+            isFrontCamera,
+            bayerBlackLevelPattern,
+            bayerColorMap,
+            bayerBitDepth
+        )
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+        GLES20.glViewport(0, 0, fboWidth, fboHeight)
+        GLES20.glClearColor(0f, 0f, 0f, 1f)
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+        nrShader.draw(
+            demosaicFboTextureId,
+            bayerNrStrength,
+            agxSceneLinearTo709,
+            agxInsetMat,
+            agxOutsetMat,
+            agxToRec2020,
+            agxWhiteLevel, agxBlackLevel,
+            agxLogMin, agxLogMax,
+            agxLogMidgray, agxDisplayMidgray,
+            agxContrast, agxToe, agxShoulder
+        )
+    }
+
+    private fun clearAndSwap(viewW: Int, viewH: Int) {
+        if (viewW > 0 && viewH > 0) {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+            GLES20.glViewport(0, 0, viewW, viewH)
+            GLES20.glClearColor(0f, 0f, 0f, 1f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+        }
+    }
+
     private fun renderLoop() {
         initEgl()
 
@@ -188,6 +334,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             }
             if (!running) break
             hasNewFrame = false
+
+            if (degradedManager?.shouldThrottleFrame() == true) continue
 
             if (eglDisplay == EGL14.EGL_NO_DISPLAY || eglSurface == EGL14.EGL_NO_SURFACE) {
                 Thread.sleep(16)
@@ -257,47 +405,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 captureReq.latch.countDown()
             }
 
-            val y = yPlane
-            val u = uPlane
-            val v = vPlane
-            val w = yuvWidth
-            val h = yuvHeight
-            if (y == null || u == null || v == null || w <= 0 || h <= 0) {
-                if (viewW > 0 && viewH > 0) {
-                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-                    GLES20.glViewport(0, 0, viewW, viewH)
-                    GLES20.glClearColor(0f, 0f, 0f, 1f)
-                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-                    EGL14.eglSwapBuffers(eglDisplay, eglSurface)
-                }
-                continue
+            if (useBayerPath) {
+                renderBayerFrame(viewW, viewH)
+            } else {
+                renderYuvFrame(viewW, viewH)
             }
-
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
-            GLES20.glViewport(0, 0, fboWidth, fboHeight)
-            GLES20.glClearColor(0f, 0f, 0f, 1f)
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-
-            yuvShader.uploadY(y.duplicate(), w, h)
-            yuvShader.uploadU(u.duplicate(), w / 2, h / 2)
-            yuvShader.uploadV(v.duplicate(), w / 2, h / 2)
-
-            yuvShader.draw(
-                fboWidth, fboHeight,
-                zoomController.zoomFactor,
-                zoomController.zoomCenterX,
-                zoomController.zoomCenterY,
-                sensorOrientation,
-                isFrontCamera,
-                agxSceneLinearTo709,
-                agxInsetMat,
-                agxOutsetMat,
-                agxToRec2020,
-                agxWhiteLevel, agxBlackLevel,
-                agxLogMin, agxLogMax,
-                agxLogMidgray, agxDisplayMidgray,
-                agxContrast, agxToe, agxShoulder
-            )
 
             pendingFboReadback?.let { callback ->
                 callback(fboTextureId, fboWidth, fboHeight)
@@ -316,6 +428,19 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             if (captureReq == null && frameStartNs > 0) {
                 val frameTimeMs = (System.nanoTime() - frameStartNs) / 1_000_000L
                 onFrameRendered?.invoke(frameTimeMs)
+
+                degradedManager?.let { dm ->
+                    dm.reportFrameTime(frameTimeMs)
+                    frameCount++
+                    if (frameCount % 30 == 0) {
+                        val prevBanner = dm.degradationBanner
+                        val prevMode = dm.activeMode
+                        dm.evaluateMode(bayerWidth, bayerHeight, fboWidth, fboHeight)
+                        if (dm.activeMode != prevMode) {
+                            onDegradedModeChanged?.invoke(dm.degradationBanner)
+                        }
+                    }
+                }
             }
 
             if (!firstFrameReported) {
@@ -325,6 +450,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         }
 
         yuvShader.destroy()
+        bayerShader.destroy()
+        nrShader.destroy()
         blitShader.destroy()
     }
 
@@ -365,7 +492,13 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         createFbo(fboWidth, fboHeight)
 
         yuvShader.create()
+        bayerShader.create(bayerWidth, bayerHeight)
+        nrShader.create()
         blitShader.create()
+
+        bayerLensShadingData?.let {
+            bayerShader.uploadLensShadingMap(it, bayerLensShadingWidth, bayerLensShadingHeight)
+        } ?: bayerShader.uploadIdentityLensShading()
 
         Log.d(TAG, "EGL initialized: display=$eglDisplay context=$eglContext")
     }
@@ -505,6 +638,50 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         Log.d(TAG, "Downscale FBO created: ${width}x${height}")
     }
 
+    private fun ensureDemosaicFbo(width: Int, height: Int) {
+        if (demosaicFboId != 0 && demosaicFboWidth == width && demosaicFboHeight == height) return
+        if (demosaicFboId != 0) {
+            GLES20.glDeleteFramebuffers(1, intArrayOf(demosaicFboId), 0)
+            GLES20.glDeleteTextures(1, intArrayOf(demosaicFboTextureId), 0)
+            demosaicFboId = 0
+            demosaicFboTextureId = 0
+        }
+
+        demosaicFboWidth = width
+        demosaicFboHeight = height
+
+        val texBuf = IntArray(1)
+        GLES20.glGenTextures(1, texBuf, 0)
+        demosaicFboTextureId = texBuf[0]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, demosaicFboTextureId)
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+            width, height, 0,
+            GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null
+        )
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+
+        val fboBuf = IntArray(1)
+        GLES20.glGenFramebuffers(1, fboBuf, 0)
+        demosaicFboId = fboBuf[0]
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, demosaicFboId)
+        GLES20.glFramebufferTexture2D(
+            GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+            GLES20.GL_TEXTURE_2D, demosaicFboTextureId, 0
+        )
+
+        val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
+        if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+            Log.e(TAG, "Demosaic FBO incomplete: $status")
+        }
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        Log.d(TAG, "Demosaic FBO created: ${width}x${height}")
+    }
+
     private fun destroyEgl() {
         if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
             EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
@@ -532,6 +709,14 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             if (downscaleFboTextureId != 0) {
                 GLES20.glDeleteTextures(1, intArrayOf(downscaleFboTextureId), 0)
                 downscaleFboTextureId = 0
+            }
+            if (demosaicFboId != 0) {
+                GLES20.glDeleteFramebuffers(1, intArrayOf(demosaicFboId), 0)
+                demosaicFboId = 0
+            }
+            if (demosaicFboTextureId != 0) {
+                GLES20.glDeleteTextures(1, intArrayOf(demosaicFboTextureId), 0)
+                demosaicFboTextureId = 0
             }
 
             if (eglSurface != EGL14.EGL_NO_SURFACE) {

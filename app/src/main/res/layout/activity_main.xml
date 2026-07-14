@@ -431,6 +431,45 @@
                 android:popupBackground="#333333"
                 android:layout_marginBottom="16dp" />
 
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
+
+            <!-- Developer Settings (debug builds only) -->
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Developer Settings" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
+
+            <LinearLayout
+                android:id="@+id/developer_raw_toggle_container"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Use RAW_SENSOR Stream"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="11sp" />
+
+                <Switch
+                    android:id="@+id/developer_raw_toggle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:enabled="false" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/developer_banner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="YUV fallback mode"
+                android:textColor="#FFFFAA00"
+                android:textSize="10sp"
+                android:layout_marginBottom="8dp"
+                android:visibility="gone" />
+
         </LinearLayout>
     </ScrollView>
 

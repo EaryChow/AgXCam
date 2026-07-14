@@ -2,10 +2,51 @@ package com.agx.camera
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 class SyntheticBayerGenerator(private val width: Int, private val height: Int) {
 
+    var bitDepth: Int = 10
+        set(value) { field = value.coerceIn(8, 16) }
+
+    private val maxVal get() = (1 shl bitDepth) - 1
+
     private var frameIndex = 0
+
+    fun generateRawBuffer(): ByteBuffer {
+        val buf = ByteBuffer.allocateDirect(width * height * 2).order(ByteOrder.nativeOrder())
+        val midGray = (maxVal * 0.18f).toInt().coerceIn(0, maxVal)
+
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val phase = (x % 2) + (y % 2) * 2
+                val value = when (phase) {
+                    0 -> (midGray * 1.0f).toInt()
+                    1 -> (midGray * 0.85f).toInt()
+                    2 -> (midGray * 0.85f).toInt()
+                    3 -> (midGray * 0.7f).toInt()
+                    else -> midGray
+                }
+                buf.putShort((value.coerceIn(0, maxVal)).toShort())
+            }
+        }
+        buf.position(0)
+        return buf
+    }
+
+    fun generateRawBufferGrayCard(): ByteBuffer {
+        val buf = ByteBuffer.allocateDirect(width * height * 2).order(ByteOrder.nativeOrder())
+        val midGray = (maxVal * 0.18f).toInt().coerceIn(0, maxVal)
+
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                buf.putShort(midGray.toShort())
+            }
+        }
+        buf.position(0)
+        return buf
+    }
 
     fun generateFrame(): Bitmap {
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
