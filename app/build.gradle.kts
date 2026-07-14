@@ -25,6 +25,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            buildConfigField("boolean", "AGX_ENABLE_YUV_FALLBACK", "false")
         }
     }
     compileOptions {
@@ -57,6 +58,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
 
     testImplementation(libs.junit)
+    testImplementation("org.mockito:mockito-core:5.11.0")
+    testImplementation("com.google.code.gson:gson:2.10.1")
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
 }
