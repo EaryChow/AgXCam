@@ -6,6 +6,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.util.Log
 import android.util.Size
+import com.agx.camera.CrashLogger
 import org.json.JSONObject
 import java.io.File
 
@@ -46,17 +47,31 @@ class LensManager(private val context: Context) {
     fun enumerate(): Boolean {
         _lenses.clear()
         var hasSupportedLens = false
+        CrashLogger.log(TAG, "enumerate: starting")
+
+        val cameraIds = try {
+            cameraManager.cameraIdList
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get camera ID list: ${e.message}", e)
+            return false
+        }
 
         val logicalMultiCameraId = findLogicalMultiCamera()
 
-        for (id in cameraManager.cameraIdList) {
-            val chars = cameraManager.getCameraCharacteristics(id)
+        for (id in cameraIds) {
+            val chars = try {
+                cameraManager.getCameraCharacteristics(id)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to get characteristics for camera $id: ${e.message}")
+                continue
+            }
+
             val facing = chars.get(CameraCharacteristics.LENS_FACING) ?: continue
             val level = chars.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)
                 ?: CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY
 
-            if (level < CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_FULL) {
-                Log.w(TAG, "Camera $id hardware level $level < FULL, skipping")
+            if (level < CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LIMITED) {
+                Log.w(TAG, "Camera $id hardware level $level < LIMITED, skipping")
                 continue
             }
 
@@ -71,6 +86,7 @@ class LensManager(private val context: Context) {
 
         assignLabels(logicalMultiCameraId)
 
+        CrashLogger.log(TAG, "enumerate: found ${_lenses.size} lenses, hasSupported=$hasSupportedLens")
         for (lens in _lenses) {
             Log.d(TAG, "  ${lens.cameraId}: ${lens.label} ${lens.focalLengthMm}mm raw=${lens.hasRawSensor} level=${lens.hardwareLevel}")
         }
@@ -79,8 +95,18 @@ class LensManager(private val context: Context) {
     }
 
     private fun findLogicalMultiCamera(): String? {
-        for (id in cameraManager.cameraIdList) {
-            val chars = cameraManager.getCameraCharacteristics(id)
+        val cameraIds = try {
+            cameraManager.cameraIdList
+        } catch (e: Exception) {
+            return null
+        }
+
+        for (id in cameraIds) {
+            val chars = try {
+                cameraManager.getCameraCharacteristics(id)
+            } catch (e: Exception) {
+                continue
+            }
             val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
             if (caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA)) {
                 return id
@@ -180,20 +206,35 @@ class LensManager(private val context: Context) {
             .sortedBy { it.focalLengthMm }
 
     fun getSensorActiveArraySize(lens: LensInfo): Rect {
-        val chars = cameraManager.getCameraCharacteristics(lens.cameraId)
-        return chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
-            ?: Rect(0, 0, 1, 1)
+        return try {
+            val chars = cameraManager.getCameraCharacteristics(lens.cameraId)
+            chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+                ?: Rect(0, 0, 1, 1)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to get active array size for ${lens.cameraId}: ${e.message}")
+            Rect(0, 0, 1, 1)
+        }
     }
 
     fun getSensorOrientation(lens: LensInfo): Int {
-        val chars = cameraManager.getCameraCharacteristics(lens.cameraId)
-        return chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+        return try {
+            val chars = cameraManager.getCameraCharacteristics(lens.cameraId)
+            chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to get sensor orientation for ${lens.cameraId}: ${e.message}")
+            0
+        }
     }
 
     fun getPreviewSizes(lens: LensInfo): Array<Size> {
-        val chars = cameraManager.getCameraCharacteristics(lens.cameraId)
-        val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return emptyArray()
-        return map.getOutputSizes(android.graphics.ImageFormat.YUV_420_888)
+        return try {
+            val chars = cameraManager.getCameraCharacteristics(lens.cameraId)
+            val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return emptyArray()
+            map.getOutputSizes(android.graphics.ImageFormat.YUV_420_888)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to get preview sizes for ${lens.cameraId}: ${e.message}")
+            emptyArray()
+        }
     }
 
     fun getBestPreviewSize(lens: LensInfo, maxWidth: Int = 1280, maxHeight: Int = 720): Size {
@@ -213,8 +254,14 @@ class LensManager(private val context: Context) {
             ?: Size(640, 480)
     }
 
-    fun getCharacteristicsForLens(lens: LensInfo): CameraCharacteristics =
-        cameraManager.getCameraCharacteristics(lens.cameraId)
+    fun getCharacteristicsForLens(lens: LensInfo): CameraCharacteristics? {
+        return try {
+            cameraManager.getCameraCharacteristics(lens.cameraId)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to get characteristics for ${lens.cameraId}: ${e.message}")
+            null
+        }
+    }
 
     fun getCameraManager(): CameraManager = cameraManager
 

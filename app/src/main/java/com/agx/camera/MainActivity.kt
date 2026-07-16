@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.view.OrientationEventListener
 import android.view.MotionEvent
 import android.view.TextureView
 import android.view.View
@@ -32,6 +33,7 @@ import com.agx.camera.io.ExifWriter
 import com.agx.camera.io.JpegEncoder
 import com.agx.camera.io.MediaStoreSaver
 import com.agx.camera.thermal.ThermalManager
+import com.agx.camera.CrashLogger
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -55,10 +57,14 @@ class MainActivity : AppCompatActivity() {
     private var agxParams = AgxParams()
     private var photoOutput = PhotoOutputSettings()
     private var cameraReady = false
+    private var openingCamera = false
     private var settingsPanelOpen = false
     private var isCapturing = false
     private var pendingPauseCleanup = false
     private var errorDialogShowing = false
+    private var currentDeviceOrientation = 0
+
+    private lateinit var orientationListener: OrientationEventListener
 
     private lateinit var textureView: TextureView
     private lateinit var devBanner: TextView
@@ -131,6 +137,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashLogger.log(TAG, "onCreate: begin")
         enableEdgeToEdge()
         setContentView(R.layout.activity_main)
 
@@ -213,11 +220,13 @@ class MainActivity : AppCompatActivity() {
         mediaStoreSaver = MediaStoreSaver(this)
 
         developerSwitch = DeveloperSwitch(this) { useRaw ->
+            CrashLogger.log(TAG, "Developer switch toggled: useRaw=$useRaw")
             Log.d(TAG, "Developer switch toggled: useRaw=$useRaw")
             if (useRaw) {
                 val lens = lensManager.activeLens ?: return@DeveloperSwitch
                 val previewSize = lensManager.getBestPreviewSize(lens)
                 camera2Manager.close()
+                camera2Manager.stopBackgroundThread()
                 previewRenderer.enableBayerMode(previewSize.width, previewSize.height)
                 camera2Manager.startBackgroundThread()
                 camera2Manager.openCamera(lens, previewSize)
@@ -225,6 +234,7 @@ class MainActivity : AppCompatActivity() {
                 val lens = lensManager.activeLens ?: return@DeveloperSwitch
                 val previewSize = lensManager.getBestPreviewSize(lens)
                 camera2Manager.close()
+                camera2Manager.stopBackgroundThread()
                 previewRenderer.disableBayerMode()
                 camera2Manager.startBackgroundThread()
                 camera2Manager.openCamera(lens, previewSize)
@@ -239,6 +249,22 @@ class MainActivity : AppCompatActivity() {
 
         thermalManager.onStateChanged = { state ->
             mainHandler.post { updateThermalUI(state) }
+        }
+
+        orientationListener = object : OrientationEventListener(this) {
+            override fun onOrientationChanged(orientation: Int) {
+                if (orientation != ORIENTATION_UNKNOWN) {
+                    val degrees = when {
+                        orientation in 315..360 || orientation < 45 -> 0
+                        orientation in 45..135 -> 90
+                        orientation in 135..225 -> 180
+                        else -> 270
+                    }
+                    if (degrees != currentDeviceOrientation) {
+                        currentDeviceOrientation = degrees
+                    }
+                }
+            }
         }
 
         shutterController.onStateChanged = { state ->
@@ -344,12 +370,7 @@ class MainActivity : AppCompatActivity() {
                 jpegQuality = photoOutput.jpegQuality,
                 resolutionWidth = photoOutput.resolutionWidth,
                 resolutionHeight = photoOutput.resolutionHeight,
-                deviceRotationDegrees = when (windowManager.defaultDisplay.rotation) {
-                    android.view.Surface.ROTATION_90 -> 90
-                    android.view.Surface.ROTATION_180 -> 180
-                    android.view.Surface.ROTATION_270 -> 270
-                    else -> 0
-                },
+                deviceOrientation = currentDeviceOrientation,
                 sensorOrientation = lensManager.activeLens?.let { lensManager.getSensorOrientation(it) } ?: 0,
                 focalLengthMm = lensManager.activeLens?.let {
                     lensManager.getCharacteristicsForLens(it)
@@ -444,7 +465,7 @@ class MainActivity : AppCompatActivity() {
             zoomLabel.text = String.format("%.1fx", zoom)
         })
 
-        previewRenderer.zoomController.listener = { zoom, _, _ ->
+        previewRenderer.zoomController.listener = { zoom: Float, _: Float, _: Float ->
             val progress = ((zoom - ZoomController.MIN_ZOOM) / (ZoomController.MAX_ZOOM - ZoomController.MIN_ZOOM) * 400).toInt()
             if (zoomSlider.progress != progress) zoomSlider.progress = progress
             zoomLabel.text = String.format("%.1fx", zoom)
@@ -812,29 +833,41 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initCamera() {
+        CrashLogger.log(TAG, "initCamera: start")
+        openingCamera = true
         val hasSupported = lensManager.enumerate()
         if (!hasSupported) {
-            Toast.makeText(this, "No supported camera found (requires hardware level FULL+)", Toast.LENGTH_LONG).show()
+            CrashLogger.log(TAG, "initCamera: no supported camera found")
+            openingCamera = false
+            Toast.makeText(this, "No supported camera found (requires hardware level LIMITED+)", Toast.LENGTH_LONG).show()
             return
         }
 
         val primary = lensManager.selectPrimary() ?: run {
+            CrashLogger.log(TAG, "initCamera: selectPrimary returned null")
+            openingCamera = false
             Log.e(TAG, "No primary lens found")
             return
         }
 
+        CrashLogger.log(TAG, "initCamera: primary=${primary.cameraId} ${primary.label} level=${primary.hardwareLevel}")
         val previewSize = lensManager.getBestPreviewSize(primary)
         buildLensSelectorUI()
 
         previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
-        previewRenderer.setFrontCamera(primary.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT)
-        previewRenderer.setSensorOrientation(lensManager.getSensorOrientation(primary))
         previewRenderer.start()
 
         uploadAgxUniforms()
 
+        var previewFrameCount = 0
         camera2Manager.onFrameAvailable = frameHandler@{ image ->
             if (!cameraReady) return@frameHandler
+            previewFrameCount++
+            if (previewFrameCount == 1) {
+                CrashLogger.log(TAG, "onFrameAvailable: first frame ${image.width}x${image.height}")
+            } else if (previewFrameCount % 30 == 0) {
+                CrashLogger.log(TAG, "onFrameAvailable: frame #$previewFrameCount")
+            }
             val planes = image.planes
             val w = image.width
             val h = image.height
@@ -849,8 +882,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         camera2Manager.onSessionReady = { width, height ->
+            CrashLogger.log(TAG, "onSessionReady: ${width}x${height}")
             Log.d(TAG, "Camera session ready: ${width}x${height}")
             cameraReady = true
+            openingCamera = false
             mainHandler.post {
                 lensSwitchOverlay.visibility = View.GONE
             }
@@ -858,6 +893,7 @@ class MainActivity : AppCompatActivity() {
 
         camera2Manager.onDisconnected = {
             mainHandler.post {
+                CrashLogger.log(TAG, "onDisconnected")
                 cameraReady = false
                 disconnectBanner.visibility = View.VISIBLE
                 Log.w(TAG, "Camera disconnected — banner shown")
@@ -866,7 +902,9 @@ class MainActivity : AppCompatActivity() {
 
         camera2Manager.onError = { msg ->
             mainHandler.post {
+                CrashLogger.log(TAG, "onError: $msg")
                 cameraReady = false
+                openingCamera = false
                 camera2Manager.resetHard()
                 previewRenderer.stop()
                 if (!errorDialogShowing) {
@@ -885,23 +923,45 @@ class MainActivity : AppCompatActivity() {
         }
 
         camera2Manager.startBackgroundThread()
-        camera2Manager.openCamera(primary, previewSize)
-        previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
 
-        developerSwitch.setRawSensorAvailable(true)
+        try {
+            previewRenderer.sensorOrientation = lensManager.getSensorOrientation(primary)
+            previewRenderer.isFrontCamera = primary.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
+            CrashLogger.log(TAG, "initCamera: calling openCamera sensorOrientation=${previewRenderer.sensorOrientation} isFront=${previewRenderer.isFrontCamera}")
+            camera2Manager.openCamera(primary, previewSize)
+            previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
+            CrashLogger.log(TAG, "initCamera: openCamera returned, captureSize=${camera2Manager.captureSize.width}x${camera2Manager.captureSize.height}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to open camera: ${e.message}", e)
+            CrashLogger.logException(TAG, e)
+            openingCamera = false
+            cameraReady = false
+            mainHandler.post {
+                Toast.makeText(this, "Camera open failed: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+            return
+        }
+
+        developerSwitch.setRawSensorAvailable(primary.hasRawSensor)
     }
 
     private fun restartCamera() {
+        CrashLogger.log(TAG, "restartCamera")
         val lens = lensManager.activeLens ?: lensManager.selectPrimary() ?: return
+        camera2Manager.close()
+        camera2Manager.stopBackgroundThread()
         val previewSize = lensManager.getBestPreviewSize(lens)
         previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
         previewRenderer.start()
         camera2Manager.startBackgroundThread()
+        previewRenderer.sensorOrientation = lensManager.getSensorOrientation(lens)
+        previewRenderer.isFrontCamera = lens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
         camera2Manager.openCamera(lens, previewSize)
         previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
     }
 
     private fun switchToLens(targetLens: LensInfo) {
+        CrashLogger.log(TAG, "switchToLens: target=${targetLens.cameraId} ${targetLens.label}")
         val currentLens = lensManager.activeLens ?: return
 
         lensSwitchOverlay.text = "Switching to ${targetLens.label}\u2026"
@@ -938,16 +998,16 @@ class MainActivity : AppCompatActivity() {
         thermalManager.isTorchActive = (currentFlashMode == FlashMode.TORCH)
         syncAllSliders()
 
-        previewRenderer.setSensorOrientation(lensManager.getSensorOrientation(targetLens))
-        previewRenderer.setFrontCamera(targetLens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT)
-
         buildLensSelectorUI()
         frontRearToggle.text = if (targetLens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT) "↻F" else "↻"
 
         uploadAgxUniforms()
 
         val previewSize = lensManager.getBestPreviewSize(targetLens)
+        camera2Manager.stopBackgroundThread()
         camera2Manager.startBackgroundThread()
+        previewRenderer.sensorOrientation = lensManager.getSensorOrientation(targetLens)
+        previewRenderer.isFrontCamera = targetLens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
         camera2Manager.openCamera(targetLens, previewSize)
         previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
     }
@@ -1037,17 +1097,22 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        CrashLogger.log(TAG, "onResume: cameraReady=$cameraReady openingCamera=$openingCamera")
+        orientationListener.enable()
         thermalManager.reset()
         disconnectBanner.visibility = View.GONE
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED && !cameraReady) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED && !cameraReady && !openingCamera) {
             val lens = lensManager.activeLens ?: lensManager.selectPrimary()
             if (lens != null) {
+                camera2Manager.close()
+                camera2Manager.stopBackgroundThread()
                 val previewSize = lensManager.getBestPreviewSize(lens)
                 previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
-                previewRenderer.setFrontCamera(lens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT)
                 previewRenderer.start()
                 camera2Manager.startBackgroundThread()
+                previewRenderer.sensorOrientation = lensManager.getSensorOrientation(lens)
+                previewRenderer.isFrontCamera = lens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
                 camera2Manager.openCamera(lens, previewSize)
                 previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
             }
@@ -1056,6 +1121,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        orientationListener.disable()
+        CrashLogger.log(TAG, "onPause: isCapturing=$isCapturing cameraReady=$cameraReady")
         if (isCapturing) {
             finishingCaptureOverlay.visibility = View.VISIBLE
             pendingPauseCleanup = true
@@ -1185,9 +1252,8 @@ class MainActivity : AppCompatActivity() {
 
                 val sensorOrientation = session.sensorOrientation
 
-                val deviceRotationDegrees = session.deviceRotationDegrees
-                val rotation = (sensorOrientation - deviceRotationDegrees + 360) % 360
-                val exifOrientation = when (rotation) {
+                val exifRotation = (sensorOrientation + session.deviceOrientation) % 360
+                val exifOrientation = when (exifRotation) {
                     90 -> 6
                     180 -> 3
                     270 -> 8
@@ -1248,7 +1314,7 @@ class MainActivity : AppCompatActivity() {
         val jpegQuality: Int,
         val resolutionWidth: Int,
         val resolutionHeight: Int,
-        val deviceRotationDegrees: Int,
+        val deviceOrientation: Int,
         val sensorOrientation: Int,
         val focalLengthMm: Float,
         val zoomFactor: Float,

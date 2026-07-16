@@ -15,18 +15,30 @@ enum class FlashMode {
         TORCH -> OFF
     }
 
-    fun applyToRequest(request: CaptureRequest.Builder) {
+    fun applyToRequest(request: CaptureRequest.Builder, availableAeModes: IntArray = intArrayOf()) {
         when (this) {
             OFF -> {
-                request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                val aeMode = if (CaptureRequest.CONTROL_AE_MODE_ON in availableAeModes)
+                    CaptureRequest.CONTROL_AE_MODE_ON else CaptureRequest.CONTROL_AE_MODE_OFF
+                request.set(CaptureRequest.CONTROL_AE_MODE, aeMode)
                 request.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
             }
             AUTO -> {
-                request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
+                val aeMode = if (CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH in availableAeModes)
+                    CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
+                else if (CaptureRequest.CONTROL_AE_MODE_ON in availableAeModes)
+                    CaptureRequest.CONTROL_AE_MODE_ON
+                else CaptureRequest.CONTROL_AE_MODE_OFF
+                request.set(CaptureRequest.CONTROL_AE_MODE, aeMode)
                 request.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
             }
             ON -> {
-                request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH)
+                val aeMode = if (CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH in availableAeModes)
+                    CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH
+                else if (CaptureRequest.CONTROL_AE_MODE_ON in availableAeModes)
+                    CaptureRequest.CONTROL_AE_MODE_ON
+                else CaptureRequest.CONTROL_AE_MODE_OFF
+                request.set(CaptureRequest.CONTROL_AE_MODE, aeMode)
                 request.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
             }
             TORCH -> {

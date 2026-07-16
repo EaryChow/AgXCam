@@ -87,9 +87,12 @@ class ThermalManager(context: Context) {
         val criticalThreshold = if (isTorchActive) 47.0f else 50.0f
 
         val newState = when {
-            batteryC >= criticalThreshold || (consecutiveSlowFrames > 5 && frameTimeHeuristicCritical()) -> State.CRITICAL
-            batteryC >= hotThreshold || (consecutiveSlowFrames > 5 && frameTimeHeuristicHot()) -> State.HOT
+            batteryC >= criticalThreshold -> State.CRITICAL
+            batteryC >= hotThreshold -> State.HOT
             batteryC >= warmThreshold -> State.WARM
+            consecutiveSlowFrames > 20 -> State.CRITICAL
+            consecutiveSlowFrames > 10 -> State.HOT
+            consecutiveSlowFrames > 5 -> State.WARM
             else -> State.NORMAL
         }
 
@@ -99,9 +102,6 @@ class ThermalManager(context: Context) {
             onStateChanged?.invoke(currentState)
         }
     }
-
-    private fun frameTimeHeuristicHot(): Boolean = baselineFrameTimeMs < Float.MAX_VALUE
-    private fun frameTimeHeuristicCritical(): Boolean = baselineFrameTimeMs < Float.MAX_VALUE
 
     companion object {
         private const val TAG = "ThermalManager"

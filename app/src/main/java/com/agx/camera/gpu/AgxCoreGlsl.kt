@@ -72,6 +72,19 @@ vec3 srgbOETF(vec3 linear) {
     }
     return result;
 }
+
+vec3 srgbEOTF(vec3 srgb) {
+    vec3 result;
+    for (int i = 0; i < 3; i++) {
+        float c = srgb[i];
+        if (c <= 0.04045) {
+            result[i] = c / 12.92;
+        } else {
+            result[i] = pow((c + 0.055) / 1.055, 2.4);
+        }
+    }
+    return result;
+}
 """
 
     const val AGX_FORMATION = """

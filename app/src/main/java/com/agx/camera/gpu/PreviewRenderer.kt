@@ -1,11 +1,11 @@
 package com.agx.camera.gpu
 
-import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
 import android.opengl.*
 import android.util.Log
-import android.view.Surface
 import android.view.TextureView
+import android.graphics.Bitmap
+import com.agx.camera.CrashLogger
 import com.agx.camera.camera.ZoomController
 import com.agx.camera.io.JpegEncoder
 import java.nio.ByteBuffer
@@ -16,10 +16,10 @@ import kotlin.concurrent.withLock
 
 class PreviewRenderer(private val textureView: TextureView) : TextureView.SurfaceTextureListener {
 
-    private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
-    private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
-    private var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
-    private var eglConfig: EGLConfig? = null
+    @Volatile private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
+    @Volatile private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
+    @Volatile private var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
+    @Volatile private var eglConfig: EGLConfig? = null
 
     private var fboId = 0
     private var fboTextureId = 0
@@ -62,16 +62,13 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     var bayerNrStrength = 0f
     var bayerLensShadingData: ShortArray? = null
     var bayerLensShadingWidth = 1
-    var bayerLensShadingHeight = 1
+    private var bayerLensShadingHeight = 1
 
     private var renderThread: Thread? = null
     private val renderLock = ReentrantLock()
     private val frameCondition = renderLock.newCondition()
     @Volatile private var hasNewFrame = false
     @Volatile private var running = false
-
-    private var sensorOrientation = 0
-    private var isFrontCamera = false
 
     val zoomController = ZoomController()
 
@@ -120,6 +117,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var frameCount = 0
 
     var pendingFboReadback: ((Int, Int, Int) -> Unit)? = null
+
+    @Volatile var sensorOrientation: Int = 0
+    @Volatile var isFrontCamera: Boolean = false
 
     private data class CaptureFrame(
         val y: ByteBuffer, val u: ByteBuffer, val v: ByteBuffer,
@@ -174,14 +174,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         }
     }
 
-    fun setSensorOrientation(orientation: Int) {
-        sensorOrientation = orientation
-    }
-
-    fun setFrontCamera(front: Boolean) {
-        isFrontCamera = front
-    }
-
     fun enableBayerMode(sensorWidth: Int, sensorHeight: Int) {
         bayerWidth = sensorWidth
         bayerHeight = sensorHeight
@@ -206,6 +198,26 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         }
     }
 
+    private fun computePreviewTransform(): FloatArray {
+        val matrix = FloatArray(16)
+        android.opengl.Matrix.setIdentityM(matrix, 0)
+
+        android.opengl.Matrix.translateM(matrix, 0, 0.5f, 0.5f, 0f)
+
+        val angle = (90 - sensorOrientation).toFloat()
+
+        if (isFrontCamera) {
+            android.opengl.Matrix.rotateM(matrix, 0, angle, 0f, 0f, 1f)
+            android.opengl.Matrix.scaleM(matrix, 0, -1f, 1f, 1f)
+        } else {
+            android.opengl.Matrix.scaleM(matrix, 0, 1f, -1f, 1f)
+            android.opengl.Matrix.rotateM(matrix, 0, angle, 0f, 0f, 1f)
+        }
+
+        android.opengl.Matrix.translateM(matrix, 0, -0.5f, -0.5f, 0f)
+        return matrix
+    }
+
     fun start() {
         running = true
         renderThread = Thread({ renderLoop() }, "PreviewRenderer").also { it.start() }
@@ -228,6 +240,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         }
     }
 
+    private var renderFrameCount = 0
+
     private fun renderYuvFrame(viewW: Int, viewH: Int) {
         val y = yPlane
         val u = uPlane
@@ -237,6 +251,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         if (y == null || u == null || v == null || w <= 0 || h <= 0) {
             clearAndSwap(viewW, viewH)
             return
+        }
+
+        renderFrameCount++
+        if (renderFrameCount == 1 || renderFrameCount % 30 == 0) {
+            CrashLogger.log(TAG, "renderYuvFrame: #$renderFrameCount ${w}x${h} view=${viewW}x${viewH} fbo=$fboId eglSurface=$eglSurface")
         }
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
@@ -253,8 +272,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             zoomController.zoomFactor,
             zoomController.zoomCenterX,
             zoomController.zoomCenterY,
-            sensorOrientation,
-            isFrontCamera,
+            computePreviewTransform(),
             agxSceneLinearTo709,
             agxInsetMat,
             agxOutsetMat,
@@ -287,8 +305,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             zoomController.zoomFactor,
             zoomController.zoomCenterX,
             zoomController.zoomCenterY,
-            sensorOrientation,
-            isFrontCamera,
+            computePreviewTransform(),
             bayerBlackLevelPattern,
             bayerColorMap,
             bayerBitDepth
@@ -324,6 +341,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     }
 
     private fun renderLoop() {
+        CrashLogger.log(TAG, "renderLoop: starting")
         initEgl()
 
         while (running) {
@@ -338,13 +356,22 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             if (degradedManager?.shouldThrottleFrame() == true) continue
 
             if (eglDisplay == EGL14.EGL_NO_DISPLAY || eglSurface == EGL14.EGL_NO_SURFACE) {
-                Thread.sleep(16)
-                continue
+                CrashLogger.log(TAG, "renderLoop: eglSurface not ready, retrying createEglSurface")
+                createEglSurface()
+                if (eglSurface == EGL14.EGL_NO_SURFACE) {
+                    Thread.sleep(50)
+                    continue
+                }
             }
 
             if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
                 Log.w(TAG, "eglMakeCurrent failed")
+                CrashLogger.log(TAG, "renderLoop: eglMakeCurrent failed")
                 continue
+            }
+
+            if (!glInitialized) {
+                initGlResources()
             }
 
             val viewW = textureView.width
@@ -365,12 +392,18 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     yuvShader.uploadU(captureReq.u.duplicate(), captureReq.w / 2, captureReq.h / 2)
                     yuvShader.uploadV(captureReq.v.duplicate(), captureReq.w / 2, captureReq.h / 2)
 
+                    val captureMatrix = FloatArray(16).also { android.opengl.Matrix.setIdentityM(it, 0) }
+                    if (isFrontCamera) {
+                        android.opengl.Matrix.translateM(captureMatrix, 0, 0.5f, 0.5f, 0f)
+                        android.opengl.Matrix.scaleM(captureMatrix, 0, -1f, 1f, 1f)
+                        android.opengl.Matrix.translateM(captureMatrix, 0, -0.5f, -0.5f, 0f)
+                    }
                     yuvShader.draw(
                         captureFboWidth, captureFboHeight,
                         captureReq.zoomFactor,
                         captureReq.zoomCenterX,
                         captureReq.zoomCenterY,
-                        0, false,
+                        captureMatrix,
                         captureReq.agxSceneLinearTo709, captureReq.agxInsetMat, captureReq.agxOutsetMat, captureReq.agxToRec2020,
                         captureReq.agxWhiteLevel, captureReq.agxBlackLevel,
                         captureReq.agxLogMin, captureReq.agxLogMax,
@@ -417,9 +450,29 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             }
 
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-            GLES20.glViewport(0, 0, viewW, viewH)
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+            val contentW = fboWidth
+            val contentH = fboHeight
+            val contentAspect = contentW.toFloat() / contentH.toFloat()
+            val viewAspect = viewW.toFloat() / viewH.toFloat()
+            val vpW: Int
+            val vpH: Int
+            val vpX: Int
+            val vpY: Int
+            if (contentAspect > viewAspect) {
+                vpW = viewW
+                vpH = (viewW / contentAspect).toInt()
+                vpX = 0
+                vpY = (viewH - vpH) / 2
+            } else {
+                vpH = viewH
+                vpW = (viewH * contentAspect).toInt()
+                vpX = (viewW - vpW) / 2
+                vpY = 0
+            }
+            GLES20.glViewport(vpX, vpY, vpW, vpH)
 
             blitShader.draw(fboTextureId)
 
@@ -445,6 +498,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
             if (!firstFrameReported) {
                 firstFrameReported = true
+                CrashLogger.log(TAG, "renderLoop: first frame rendered")
                 onFirstFrameRendered?.invoke()
             }
         }
@@ -456,6 +510,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     }
 
     fun initEgl() {
+        CrashLogger.log(TAG, "initEgl: start")
         eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         val version = IntArray(2)
         EGL14.eglInitialize(eglDisplay, version, 0, version, 1)
@@ -481,14 +536,23 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         }
 
         val contextAttribs = intArrayOf(
-            EGL14.EGL_CONTEXT_CLIENT_VERSION, 2,
+            EGL14.EGL_CONTEXT_CLIENT_VERSION, 3,
             EGL14.EGL_NONE
         )
         eglContext = EGL14.eglCreateContext(
             eglDisplay, eglConfig, EGL14.EGL_NO_CONTEXT, contextAttribs, 0
         )
 
-        createEglSurface()
+        EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, eglContext)
+        EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+
+        CrashLogger.log(TAG, "initEgl: context created eglDisplay=$eglDisplay eglContext=$eglContext")
+        Log.d(TAG, "EGL initialized: display=$eglDisplay context=$eglContext")
+    }
+
+    @Volatile private var glInitialized = false
+
+    private fun initGlResources() {
         createFbo(fboWidth, fboHeight)
 
         yuvShader.create()
@@ -500,16 +564,24 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             bayerShader.uploadLensShadingMap(it, bayerLensShadingWidth, bayerLensShadingHeight)
         } ?: bayerShader.uploadIdentityLensShading()
 
-        Log.d(TAG, "EGL initialized: display=$eglDisplay context=$eglContext")
+        glInitialized = true
+        CrashLogger.log(TAG, "initGlResources: done fbo=$fboId")
     }
 
     fun createEglSurface() {
-        val st = textureView.surfaceTexture ?: return
+        val st = textureView.surfaceTexture
+        if (st == null) {
+            CrashLogger.log(TAG, "createEglSurface: surfaceTexture is null, skipping")
+            return
+        }
+        if (eglSurface != EGL14.EGL_NO_SURFACE) {
+            EGL14.eglDestroySurface(eglDisplay, eglSurface)
+        }
         val surfaceAttribs = intArrayOf(EGL14.EGL_NONE)
         eglSurface = EGL14.eglCreateWindowSurface(
             eglDisplay, eglConfig, st, surfaceAttribs, 0
         )
-        EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+        CrashLogger.log(TAG, "createEglSurface: eglSurface=$eglSurface")
         Log.d(TAG, "EGL surface created from TextureView")
     }
 
@@ -730,21 +802,21 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             EGL14.eglTerminate(eglDisplay)
             eglDisplay = EGL14.EGL_NO_DISPLAY
         }
+
+        glInitialized = false
     }
 
     override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-        Log.d(TAG, "Surface available: ${width}x${height}")
-        if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
-            createEglSurface()
-        }
+        CrashLogger.log(TAG, "onSurfaceTextureAvailable: ${width}x${height} eglDisplay=$eglDisplay")
+        requestRender()
     }
 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
-        Log.d(TAG, "Surface size changed: ${width}x${height}")
+        CrashLogger.log(TAG, "onSurfaceTextureSizeChanged: ${width}x${height}")
     }
 
     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
-        Log.d(TAG, "Surface destroyed")
+        CrashLogger.log(TAG, "onSurfaceTextureDestroyed")
         return true
     }
 

@@ -19,8 +19,7 @@ class YuvShaderProgram {
     private var uZoomFactorLoc = 0
     private var uZoomCenterLoc = 0
     private var uOutputResolutionLoc = 0
-    private var uSensorOrientationLoc = 0
-    private var uFlipXLoc = 0
+    private var uTransformMatrixLoc = 0
 
     private var uSceneLinearTo709Loc = 0
     private var uInsetmatLoc = 0
@@ -54,8 +53,7 @@ class YuvShaderProgram {
         uZoomFactorLoc = GLES20.glGetUniformLocation(programId, "u_zoom_factor")
         uZoomCenterLoc = GLES20.glGetUniformLocation(programId, "u_zoom_center")
         uOutputResolutionLoc = GLES20.glGetUniformLocation(programId, "u_outputResolution")
-        uSensorOrientationLoc = GLES20.glGetUniformLocation(programId, "u_sensorOrientation")
-        uFlipXLoc = GLES20.glGetUniformLocation(programId, "u_flipX")
+        uTransformMatrixLoc = GLES20.glGetUniformLocation(programId, "u_transformMatrix")
 
         uSceneLinearTo709Loc = GLES20.glGetUniformLocation(programId, "u_scene_linear_to_709")
         uInsetmatLoc = GLES20.glGetUniformLocation(programId, "u_insetmat")
@@ -124,7 +122,7 @@ class YuvShaderProgram {
     fun draw(
         outputWidth: Int, outputHeight: Int,
         zoomFactor: Float, zoomCenterX: Float, zoomCenterY: Float,
-        sensorOrientation: Int, flipX: Boolean,
+        transformMatrix: FloatArray,
         sceneLinearTo709: FloatArray,
         insetMat: FloatArray,
         outsetMat: FloatArray,
@@ -151,8 +149,7 @@ class YuvShaderProgram {
         GLES20.glUniform1f(uZoomFactorLoc, zoomFactor)
         GLES20.glUniform2f(uZoomCenterLoc, zoomCenterX, zoomCenterY)
         GLES20.glUniform2f(uOutputResolutionLoc, outputWidth.toFloat(), outputHeight.toFloat())
-        GLES20.glUniform1f(uSensorOrientationLoc, sensorOrientation.toFloat())
-        GLES20.glUniform1f(uFlipXLoc, if (flipX) 1.0f else 0.0f)
+        GLES20.glUniformMatrix4fv(uTransformMatrixLoc, 1, false, transformMatrix, 0)
 
         GLES20.glUniformMatrix3fv(uSceneLinearTo709Loc, 1, true, sceneLinearTo709, 0)
         GLES20.glUniformMatrix3fv(uInsetmatLoc, 1, true, insetMat, 0)
@@ -209,9 +206,10 @@ class YuvShaderProgram {
 attribute vec2 a_position;
 attribute vec2 a_texCoord;
 varying vec2 v_texCoord;
+uniform mat4 u_transformMatrix;
 void main() {
     gl_Position = vec4(a_position, 0.0, 1.0);
-    v_texCoord = a_texCoord;
+    v_texCoord = (u_transformMatrix * vec4(a_texCoord, 0.0, 1.0)).xy;
 }
 """
 
@@ -224,8 +222,6 @@ uniform sampler2D u_vTex;
 uniform float u_zoom_factor;
 uniform vec2 u_zoom_center;
 uniform vec2 u_outputResolution;
-uniform float u_sensorOrientation;
-uniform float u_flipX;
 
 uniform mat3 u_scene_linear_to_709;
 uniform mat3 u_insetmat;
@@ -260,17 +256,6 @@ vec3 agxFormationYuv(vec3 rgb) {
 void main() {
     vec2 uv = v_texCoord;
     uv = (uv - u_zoom_center) / u_zoom_factor + u_zoom_center;
-    float angle = u_sensorOrientation;
-    if (angle == 90.0) {
-        uv = vec2(uv.y, 1.0 - uv.x);
-    } else if (angle == 180.0) {
-        uv = 1.0 - uv;
-    } else if (angle == 270.0) {
-        uv = vec2(1.0 - uv.y, uv.x);
-    }
-    if (u_flipX > 0.5) {
-        uv.x = 1.0 - uv.x;
-    }
 
     float y = texture2D(u_yTex, uv).r;
     float u = texture2D(u_uTex, uv).r - 0.5;
@@ -281,6 +266,7 @@ void main() {
         y + 1.772 * u
     );
 
+    rgb = srgbEOTF(rgb);
     rgb = agxFormationYuv(rgb);
     gl_FragColor = vec4(rgb, 1.0);
 }

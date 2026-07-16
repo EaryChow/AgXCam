@@ -12,7 +12,7 @@ class CaptureSessionImmutabilityTest {
         jpegQuality = 95,
         resolutionWidth = 4080,
         resolutionHeight = 3060,
-        deviceRotationDegrees = 0,
+        deviceOrientation = 0,
         sensorOrientation = 90,
         focalLengthMm = 6.7f,
         zoomFactor = 1.0f,
@@ -74,7 +74,7 @@ class CaptureSessionImmutabilityTest {
         assertEquals(95, session.jpegQuality)
         assertEquals(4080, session.resolutionWidth)
         assertEquals(3060, session.resolutionHeight)
-        assertEquals(0, session.deviceRotationDegrees)
+        assertEquals(0, session.deviceOrientation)
         assertEquals(90, session.sensorOrientation)
         assertEquals(6.7f, session.focalLengthMm, 0.001f)
         assertEquals(1.0f, session.zoomFactor, 0.001f)
