@@ -1,9 +1,11 @@
 package com.agx.camera.camera
 
 import android.content.Context
+import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
 import android.util.Log
 import android.util.Size
 import com.agx.camera.CrashLogger
@@ -16,8 +18,19 @@ data class LensInfo(
     val focalLengthMm: Float,
     val hasRawSensor: Boolean,
     val hardwareLevel: Int,
-    val label: String
-)
+    val label: String,
+    val jpegOutputSizes: Array<android.util.Size> = emptyArray(),
+    val sensorActiveWidth: Int = 0,
+    val sensorActiveHeight: Int = 0,
+    val maxDigitalZoom: Float = 1.0f
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is LensInfo) return false
+        return cameraId == other.cameraId
+    }
+    override fun hashCode(): Int = cameraId.hashCode()
+}
 
 data class LensState(
     val zoomFactor: Float = 1.0f,
@@ -33,6 +46,12 @@ class LensManager(private val context: Context) {
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val _lenses = mutableListOf<LensInfo>()
     val lenses: List<LensInfo> get() = _lenses
+
+    // Lens classification
+    var lensOrganization: LensOrganization? = null
+        private set
+    var lensLabels: Map<String, String> = emptyMap()
+        private set
 
     var activeLens: LensInfo? = null
         private set
@@ -79,17 +98,63 @@ class LensManager(private val context: Context) {
             val focal = focalLengths?.firstOrNull() ?: 0.0f
             val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
             val hasRaw = caps.contains(17) // REQUEST_AVAILABLE_CAPABILITIES_RAW
+            val activeArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            val streamMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            
+            // New detailed characteristics for lens classification
+            val maxAfRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
+            val maxAeRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0
+            val afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: intArrayOf()
+            val minFocusDist = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
+            val hasFlash = chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
 
-            _lenses.add(LensInfo(id, facing, focal, hasRaw, level, ""))
+            CrashLogger.log(TAG, "enumerate: id=$id facing=$facing level=$level focal=$focal maxAfRegions=$maxAfRegions maxAeRegions=$maxAeRegions afModes=${afModes.toList()} minFocusDist=$minFocusDist hasFlash=$hasFlash")
+
+            _lenses.add(LensInfo(id, facing, focal, hasRaw, level, "",
+                jpegOutputSizes = streamMap?.getOutputSizes(android.graphics.ImageFormat.JPEG) ?: emptyArray(),
+                sensorActiveWidth = activeArray?.width() ?: 0,
+                sensorActiveHeight = activeArray?.height() ?: 0,
+                maxDigitalZoom = (chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1.0f)
+            ))
             hasSupportedLens = true
         }
 
         assignLabels(logicalMultiCameraId)
 
-        CrashLogger.log(TAG, "enumerate: found ${_lenses.size} lenses, hasSupported=$hasSupportedLens")
-        for (lens in _lenses) {
-            Log.d(TAG, "  ${lens.cameraId}: ${lens.label} ${lens.focalLengthMm}mm raw=${lens.hasRawSensor} level=${lens.hardwareLevel}")
+        // Classify lenses using LensClassifier
+        val profiles = _lenses.map { lens ->
+            val chars = cameraManager.getCameraCharacteristics(lens.cameraId)
+            val maxAfRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
+            val maxAeRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0
+            val afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: intArrayOf()
+            val hasContinuousAf = afModes.contains(CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            val hasAutoAf = afModes.contains(CaptureRequest.CONTROL_AF_MODE_AUTO)
+            val minFocusDist = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
+            val hasFlash = chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
+            val maxSize = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                ?.getOutputSizes(ImageFormat.YUV_420_888)
+                ?.maxByOrNull { it.width * it.height } ?: Size(0, 0)
+
+            LensProfile(
+                id = lens.cameraId,
+                facing = lens.facing,
+                hardwareLevel = lens.hardwareLevel,
+                focalLength = lens.focalLengthMm,
+                maxAfRegions = maxAfRegions,
+                hasContinuousAf = hasContinuousAf,
+                hasAutoAf = hasAutoAf,
+                maxResolution = maxSize,
+                hasFlash = hasFlash,
+                minFocusDistance = minFocusDist
+            )
         }
+
+        lensOrganization = LensClassifier.organize(profiles)
+        lensLabels = LensClassifier.computeLabels(lensOrganization!!)
+
+        CrashLogger.log(TAG, "enumerate: found ${_lenses.size} lenses, hasSupported=$hasSupportedLens")
+        CrashLogger.log(TAG, "  primaryBack=${lensOrganization?.primaryBack?.id} usableBack=${lensOrganization?.usableBack?.map { it.id }} front=${lensOrganization?.front?.map { it.id }}")
+        CrashLogger.log(TAG, "  labels=$lensLabels")
 
         return hasSupportedLens
     }
@@ -152,8 +217,12 @@ class LensManager(private val context: Context) {
     }
 
     fun selectPrimary(): LensInfo? {
-        val rear = _lenses.filter { it.facing == CameraCharacteristics.LENS_FACING_BACK }
-        val primary = rear.minByOrNull { it.focalLengthMm } ?: rear.firstOrNull()
+        // Use LensClassifier's primary back camera if available
+        val primary = lensOrganization?.primaryBack?.let { profile ->
+            _lenses.firstOrNull { it.cameraId == profile.id }
+        } ?: _lenses.filter { it.facing == CameraCharacteristics.LENS_FACING_BACK }
+            .minByOrNull { it.focalLengthMm } ?: _lenses.firstOrNull { it.facing == CameraCharacteristics.LENS_FACING_BACK }
+
         if (primary != null) {
             activeLens = primary
             lastUsedRearLensId = primary.cameraId
@@ -201,9 +270,23 @@ class LensManager(private val context: Context) {
     fun getFrontLens(): LensInfo? =
         _lenses.firstOrNull { it.facing == CameraCharacteristics.LENS_FACING_FRONT }
 
-    fun getRearLenses(): List<LensInfo> =
-        _lenses.filter { it.facing == CameraCharacteristics.LENS_FACING_BACK }
+    fun getRearLenses(): List<LensInfo> {
+        return lensOrganization?.usableBack?.mapNotNull { profile ->
+            _lenses.firstOrNull { it.cameraId == profile.id }
+        }?.sortedBy { it.focalLengthMm } 
+        ?: _lenses.filter { it.facing == CameraCharacteristics.LENS_FACING_BACK }
             .sortedBy { it.focalLengthMm }
+    }
+
+    fun getLensesForFacing(facing: Int): List<LensInfo> {
+        return if (facing == CameraCharacteristics.LENS_FACING_FRONT) {
+            lensOrganization?.front?.mapNotNull { profile ->
+                _lenses.firstOrNull { it.cameraId == profile.id }
+            } ?: _lenses.filter { it.facing == CameraCharacteristics.LENS_FACING_FRONT }
+        } else {
+            getRearLenses()
+        }
+    }
 
     fun getSensorActiveArraySize(lens: LensInfo): Rect {
         return try {
@@ -224,6 +307,18 @@ class LensManager(private val context: Context) {
             Log.w(TAG, "Failed to get sensor orientation for ${lens.cameraId}: ${e.message}")
             0
         }
+    }
+
+    fun getLensLabel(lensId: String): String = lensLabels[lensId] ?: "Unknown"
+
+    fun canLensTapToFocus(lensId: String): Boolean {
+        return lensOrganization?.usableBack?.any { it.id == lensId } == true
+            || lensOrganization?.front?.any { it.id == lensId } == true
+    }
+
+    fun getLensProfile(lensId: String): LensProfile? {
+        return lensOrganization?.allBack?.firstOrNull { it.id == lensId }
+            ?: lensOrganization?.front?.firstOrNull { it.id == lensId }
     }
 
     fun getPreviewSizes(lens: LensInfo): Array<Size> {
@@ -253,6 +348,60 @@ class LensManager(private val context: Context) {
             ?: sizes.lastOrNull()
             ?: Size(640, 480)
     }
+
+    fun getPreviewSizeForAspectRatio(lens: LensInfo, targetAspect: Float, maxWidth: Int, maxHeight: Int): Size {
+        val sizes = getPreviewSizes(lens)
+        if (sizes.isEmpty()) return Size(640, 480)
+
+        return sizes
+            .filter { it.width <= maxWidth && it.height <= maxHeight }
+            .minByOrNull { size ->
+                val sizeAspect = size.width.toFloat() / size.height
+                kotlin.math.abs(sizeAspect - targetAspect)
+            }
+            ?: getBestPreviewSize(lens, maxWidth, maxHeight)
+    }
+
+    data class ResolutionOption(
+        val label: String,
+        val aspectW: Int,
+        val aspectH: Int,
+        val width: Int,
+        val height: Int
+    )
+
+    fun getResolutionOptions(lens: LensInfo): List<ResolutionOption> {
+        val jpegSizes = lens.jpegOutputSizes
+        if (jpegSizes.isEmpty()) return listOf(ResolutionOption("Full Sensor", 0, 0, 0, 0))
+
+        val options = mutableListOf<ResolutionOption>()
+        options.add(ResolutionOption("Full Sensor", 0, 0, 0, 0))
+
+        val grouped = mutableMapOf<String, MutableList<android.util.Size>>()
+        for (size in jpegSizes) {
+            val gcd = gcd(size.width, size.height)
+            val key = "${size.width / gcd}:${size.height / gcd}"
+            grouped.getOrPut(key) { mutableListOf() }.add(size)
+        }
+
+        for ((ratio, sizes) in grouped) {
+            val sortedSizes = sizes.sortedByDescending { it.width.toLong() * it.height.toLong() }
+            val parts = ratio.split(":")
+            val aw = parts[0].toIntOrNull() ?: continue
+            val ah = parts[1].toIntOrNull() ?: continue
+            for (size in sortedSizes) {
+                val mp = size.width.toLong() * size.height / 1_000_000.0
+                options.add(ResolutionOption(
+                    "$ratio (${size.width}x${size.height}, ${String.format("%.1f", mp)}MP)",
+                    aw, ah, size.width, size.height
+                ))
+            }
+        }
+
+        return options
+    }
+
+    private fun gcd(a: Int, b: Int): Int = if (b == 0) a else gcd(b, a % b)
 
     fun getCharacteristicsForLens(lens: LensInfo): CameraCharacteristics? {
         return try {

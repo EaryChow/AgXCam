@@ -14,6 +14,9 @@ import java.util.Locale
 
 class MediaStoreSaver(private val context: Context) {
 
+    var lastSavedUri: Uri? = null
+        private set
+
     fun saveJpeg(jpegData: ByteArray, metadata: CaptureMetadata): Uri? {
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date(metadata.captureWallClockMs))
         val displayName = "AgX_${timestamp}.jpg"
@@ -47,6 +50,7 @@ class MediaStoreSaver(private val context: Context) {
             }
 
             Log.d(TAG, "Saved JPEG: $displayName → $uri")
+            lastSavedUri = uri
             return uri
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save JPEG: $displayName", e)

@@ -1,78 +1,63 @@
 package com.agx.camera.camera
 
-import android.hardware.camera2.*
+import android.graphics.Rect
 import android.hardware.camera2.params.MeteringRectangle
 import android.os.Handler
-import android.util.Log
-import android.util.SizeF
 
 class AutofocusController(
     private val cameraManager: Camera2Manager,
     private val handler: Handler
 ) {
-
-    enum class State {
-        CONTINUOUS,
-        FOCUSING,
-        FOCUSED,
-        FAILED
-    }
-
-    var state = State.CONTINUOUS
+    var isLocked = false
         private set
 
-    var onStateChanged: ((State) -> Unit)? = null
+    private var currentRect: MeteringRectangle? = null
 
-    fun onTapToFocus(viewWidth: Int, viewHeight: Int, tapX: Float, tapY: Float) {
-        if (state == State.FOCUSING) return
-
-        val meteringRect = tapToMeteringRect(viewWidth, viewHeight, tapX, tapY)
-        cameraManager.startAfAeLock(meteringRect, handler,
-            onCaptureStarted = {
-                state = State.FOCUSING
-                onStateChanged?.invoke(State.FOCUSING)
-            },
-            onCaptureCompleted = { result ->
-                val afState = result.get(CaptureResult.CONTROL_AF_STATE)
-                when (afState) {
-                    CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED -> {
-                        state = State.FOCUSED
-                        onStateChanged?.invoke(State.FOCUSED)
-                    }
-                    CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED -> {
-                        state = State.FAILED
-                        onStateChanged?.invoke(State.FAILED)
-                    }
-                    else -> {
-                        state = State.FAILED
-                        onStateChanged?.invoke(State.FAILED)
-                    }
-                }
-            }
-        )
+    /**
+     * u, v: normalized coordinates (0..1) in the camera frame, before sensor
+     * rotation — i.e. the output of MainActivity.viewToFrameCoords().
+     */
+    fun setFocusPoint(u: Float, v: Float, activeArray: Rect, sensorOrientation: Int, isFrontCamera: Boolean) {
+        if (activeArray.width() <= 0 || activeArray.height() <= 0) return
+        currentRect = normalizedToMeteringRect(u, v, activeArray, sensorOrientation, isFrontCamera)
+        if (!isLocked) cameraManager.setMeteringRegion(currentRect)
     }
 
-    fun revertToContinuous() {
-        state = State.CONTINUOUS
-        cameraManager.unlockAeAwb()
-        cameraManager.startContinuousAf()
-        onStateChanged?.invoke(State.CONTINUOUS)
+    fun lock() {
+        isLocked = true
+        cameraManager.lockFocusAndExposure()
     }
 
-    private fun tapToMeteringRect(viewWidth: Int, viewHeight: Int, tapX: Float, tapY: Float): MeteringRectangle {
-        val halfW = 150f.coerceAtMost(viewWidth / 4f)
-        val halfH = 150f.coerceAtMost(viewHeight / 4f)
-        val left = (tapX - halfW).toInt().coerceAtLeast(0)
-        val top = (tapY - halfH).toInt().coerceAtLeast(0)
-        val right = (tapX + halfW).toInt().coerceAtMost(viewWidth)
-        val bottom = (tapY + halfH).toInt().coerceAtMost(viewHeight)
+    fun unlock() {
+        isLocked = false
+        cameraManager.setMeteringRegion(currentRect) // resume region AF at same point
+    }
+
+    private fun normalizedToMeteringRect(
+        u: Float, v: Float, activeArray: Rect, sensorOrientation: Int, isFrontCamera: Boolean
+    ): MeteringRectangle {
+        var nx = u
+        var ny = v
+        when (sensorOrientation) {          // frame -> sensor rotation
+            90  -> { nx = v;      ny = 1f - u }
+            180 -> { nx = 1f - u; ny = 1f - v }
+            270 -> { nx = 1f - v; ny = u }
+        }
+        if (isFrontCamera) nx = 1f - nx      // undo preview mirroring
+
+        val cx = activeArray.left + nx * activeArray.width()
+        val cy = activeArray.top + ny * activeArray.height()
+        val halfW = activeArray.width() * 0.05f   // region ~= 10% of frame width
+        val halfH = activeArray.height() * 0.05f
+
         return MeteringRectangle(
-            android.graphics.Rect(left, top, right, bottom),
+            Rect(
+                (cx - halfW).toInt().coerceAtLeast(activeArray.left),
+                (cy - halfH).toInt().coerceAtLeast(activeArray.top),
+                (cx + halfW).toInt().coerceAtMost(activeArray.right),
+                (cy + halfH).toInt().coerceAtMost(activeArray.bottom)
+            ),
             MeteringRectangle.METERING_WEIGHT_MAX
         )
-    }
-
-    companion object {
-        private const val TAG = "AutofocusController"
     }
 }

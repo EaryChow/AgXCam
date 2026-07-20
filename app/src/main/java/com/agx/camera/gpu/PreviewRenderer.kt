@@ -58,7 +58,14 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
     var bayerBlackLevelPattern = intArrayOf(64, 64, 64, 64)
     var bayerColorMap = intArrayOf(0, 1, 1, 2)
-    var bayerBitDepth = 10
+    var bayerBitDepth: Int
+        get() = when {
+            agxWhiteLevel <= 1023f -> 10
+            agxWhiteLevel <= 4095f -> 12
+            agxWhiteLevel <= 16383f -> 14
+            else -> 16
+        }
+        set(value) { /* no-op, computed from agxWhiteLevel */ }
     var bayerNrStrength = 0f
     var bayerLensShadingData: ShortArray? = null
     var bayerLensShadingWidth = 1
@@ -120,6 +127,39 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
     @Volatile var sensorOrientation: Int = 0
     @Volatile var isFrontCamera: Boolean = false
+    @Volatile var targetAspectRatio: Float = 0f // 0 = use FBO aspect, otherwise crop to this aspect
+
+    private fun computeCropScale(): Pair<Float, Float> {
+        if (targetAspectRatio <= 0f) return Pair(1f, 1f)
+        val fboAspect = fboWidth.toFloat() / fboHeight.toFloat()
+        return if (targetAspectRatio > fboAspect) {
+            // Target is wider than FBO → crop vertical (scale Y < 1)
+            Pair(1f, fboAspect / targetAspectRatio)
+        } else {
+            // Target is taller than FBO → crop horizontal (scale X < 1)
+            Pair(targetAspectRatio / fboAspect, 1f)
+        }
+    }
+
+    private fun computePreviewTransform(): FloatArray {
+        val (cropScaleX, cropScaleY) = computeCropScale()
+        val matrix = FloatArray(16)
+        android.opengl.Matrix.setIdentityM(matrix, 0)
+
+        android.opengl.Matrix.translateM(matrix, 0, 0.5f, 0.5f, 0f)
+
+        // Apply crop scale for target aspect ratio (center crop)
+        android.opengl.Matrix.scaleM(matrix, 0, cropScaleX, cropScaleY, 1f)
+
+        if (isFrontCamera) {
+            android.opengl.Matrix.scaleM(matrix, 0, -1f, -1f, 1f)
+        } else {
+            android.opengl.Matrix.scaleM(matrix, 0, 1f, -1f, 1f)
+        }
+
+        android.opengl.Matrix.translateM(matrix, 0, -0.5f, -0.5f, 0f)
+        return matrix
+    }
 
     private data class CaptureFrame(
         val y: ByteBuffer, val u: ByteBuffer, val v: ByteBuffer,
@@ -134,6 +174,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val agxLogMin: Float, val agxLogMax: Float,
         val agxLogMidgray: Float, val agxDisplayMidgray: Float,
         val agxContrast: Float, val agxToe: Float, val agxShoulder: Float,
+        val sensorOrientation: Int,
+        val deviceOrientation: Int,
         val resultRef: AtomicReference<Bitmap?>,
         val latch: CountDownLatch
     )
@@ -156,6 +198,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             session.agxLogMin, session.agxLogMax,
             session.agxLogMidgray, session.agxDisplayMidgray,
             session.agxContrast, session.agxToe, session.agxShoulder,
+            session.sensorOrientation, session.deviceOrientation,
             resultRef, latch
         )
         hasNewFrame = true
@@ -196,26 +239,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         renderLock.withLock {
             frameCondition.signal()
         }
-    }
-
-    private fun computePreviewTransform(): FloatArray {
-        val matrix = FloatArray(16)
-        android.opengl.Matrix.setIdentityM(matrix, 0)
-
-        android.opengl.Matrix.translateM(matrix, 0, 0.5f, 0.5f, 0f)
-
-        val angle = (90 - sensorOrientation).toFloat()
-
-        if (isFrontCamera) {
-            android.opengl.Matrix.rotateM(matrix, 0, angle, 0f, 0f, 1f)
-            android.opengl.Matrix.scaleM(matrix, 0, -1f, 1f, 1f)
-        } else {
-            android.opengl.Matrix.scaleM(matrix, 0, 1f, -1f, 1f)
-            android.opengl.Matrix.rotateM(matrix, 0, angle, 0f, 0f, 1f)
-        }
-
-        android.opengl.Matrix.translateM(matrix, 0, -0.5f, -0.5f, 0f)
-        return matrix
     }
 
     fun start() {
@@ -336,7 +359,14 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             GLES20.glViewport(0, 0, viewW, viewH)
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-            EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+            val swapResult = EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+            if (!swapResult) {
+                val error = EGL14.eglGetError()
+                if (error != EGL14.EGL_SUCCESS) {
+                    CrashLogger.log(TAG, "eglSwapBuffers failed: error=0x${Integer.toHexString(error)}, recreating surface")
+                    createEglSurface()
+                }
+            }
         }
     }
 
@@ -393,11 +423,13 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     yuvShader.uploadV(captureReq.v.duplicate(), captureReq.w / 2, captureReq.h / 2)
 
                     val captureMatrix = FloatArray(16).also { android.opengl.Matrix.setIdentityM(it, 0) }
-                    if (isFrontCamera) {
-                        android.opengl.Matrix.translateM(captureMatrix, 0, 0.5f, 0.5f, 0f)
-                        android.opengl.Matrix.scaleM(captureMatrix, 0, -1f, 1f, 1f)
-                        android.opengl.Matrix.translateM(captureMatrix, 0, -0.5f, -0.5f, 0f)
-                    }
+                    // Capture matrix: match preview's Y-flip (sensor -> OpenGL), but NO X-flip for front camera
+                    // (saved JPG must NOT be mirrored per spec). Rotation handled via EXIF.
+                    // Preview transform: rear=scale(1,-1), front=scale(-1,-1)
+                    // Capture transform: both use scale(1,-1) = Y-flip only
+                    android.opengl.Matrix.translateM(captureMatrix, 0, 0.5f, 0.5f, 0f)
+                    android.opengl.Matrix.scaleM(captureMatrix, 0, 1f, -1f, 1f)
+                    android.opengl.Matrix.translateM(captureMatrix, 0, -0.5f, -0.5f, 0f)
                     yuvShader.draw(
                         captureFboWidth, captureFboHeight,
                         captureReq.zoomFactor,
@@ -455,18 +487,22 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
             val contentW = fboWidth
             val contentH = fboHeight
-            val contentAspect = contentW.toFloat() / contentH.toFloat()
+            // Use target aspect ratio if set (from resolution spinner), otherwise use FBO native aspect
+            val contentAspect = if (targetAspectRatio > 0f) targetAspectRatio else contentW.toFloat() / contentH.toFloat()
             val viewAspect = viewW.toFloat() / viewH.toFloat()
             val vpW: Int
             val vpH: Int
             val vpX: Int
             val vpY: Int
+            // FIT (CENTER_INSIDE) - show full frame with bars for selected aspect ratio
             if (contentAspect > viewAspect) {
+                // Content wider than view → fit width, letterbox top/bottom
                 vpW = viewW
                 vpH = (viewW / contentAspect).toInt()
                 vpX = 0
                 vpY = (viewH - vpH) / 2
             } else {
+                // Content taller than view → fit height, pillarbox left/right
                 vpH = viewH
                 vpW = (viewH * contentAspect).toInt()
                 vpX = (viewW - vpW) / 2
@@ -476,7 +512,14 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
             blitShader.draw(fboTextureId)
 
-            EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+            val swapResult = EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+            if (!swapResult) {
+                val error = EGL14.eglGetError()
+                if (error != EGL14.EGL_SUCCESS) {
+                    CrashLogger.log(TAG, "eglSwapBuffers failed: $error, recreating surface")
+                    createEglSurface()
+                }
+            }
 
             if (captureReq == null && frameStartNs > 0) {
                 val frameTimeMs = (System.nanoTime() - frameStartNs) / 1_000_000L

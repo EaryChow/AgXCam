@@ -29,14 +29,18 @@ class ThermalManager(context: Context) {
 
     var onStateChanged: ((State) -> Unit)? = null
 
+    // Hysteresis: prevent rapid state transitions
+    private var lastStateChangeTime = 0L
+    private val minStateDurationMs = 10_000 // 10 seconds minimum before allowing state change
+
     val isWarmupComplete: Boolean get() = warmupComplete
 
     val isCaptureBlocked: Boolean
         get() {
             if (!warmupComplete) {
-                return pollBatteryTemperature() >= 45.0f
+                return pollBatteryTemperature() >= 50.0f
             }
-            return currentState == State.HOT || currentState == State.CRITICAL
+            return currentState == State.CRITICAL
         }
 
     val isPreviewReduced: Boolean
@@ -82,22 +86,24 @@ class ThermalManager(context: Context) {
     private fun evaluateState() {
         val batteryC = pollBatteryTemperature()
 
-        val warmThreshold = if (isTorchActive) 37.0f else 40.0f
-        val hotThreshold = if (isTorchActive) 42.0f else 45.0f
-        val criticalThreshold = if (isTorchActive) 47.0f else 50.0f
+        val warmThreshold = if (isTorchActive) 42.0f else 48.0f
+        val hotThreshold = if (isTorchActive) 47.0f else 52.0f
+        val criticalThreshold = if (isTorchActive) 50.0f else 55.0f
 
         val newState = when {
             batteryC >= criticalThreshold -> State.CRITICAL
             batteryC >= hotThreshold -> State.HOT
             batteryC >= warmThreshold -> State.WARM
-            consecutiveSlowFrames > 20 -> State.CRITICAL
-            consecutiveSlowFrames > 10 -> State.HOT
-            consecutiveSlowFrames > 5 -> State.WARM
+            consecutiveSlowFrames > 20 -> State.HOT
+            consecutiveSlowFrames > 10 -> State.WARM
             else -> State.NORMAL
         }
 
-        if (newState != currentState) {
+        // Hysteresis: prevent rapid state transitions
+        val now = System.currentTimeMillis()
+        if (newState != currentState && now - lastStateChangeTime >= minStateDurationMs) {
             currentState = newState
+            lastStateChangeTime = now
             Log.d(TAG, "Thermal state: $currentState (battery=${batteryC}°C, slowFrames=$consecutiveSlowFrames, torch=$isTorchActive)")
             onStateChanged?.invoke(currentState)
         }

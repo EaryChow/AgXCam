@@ -113,4 +113,37 @@ object CrashLogger {
             buffer.clear()
         }
     }
+
+    fun saveDebugLogToDownloads(context: Context) {
+        val text = readLog()
+        if (text.isBlank()) return
+
+        try {
+            val filename = "agxcam_debug_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.txt"
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val resolver = context.contentResolver
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, filename)
+                    put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+                }
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                uri?.let {
+                    resolver.openOutputStream(it)?.use { os ->
+                        os.write(text.toByteArray())
+                    }
+                }
+                Log.d("CrashLogger", "Saved debug log to Downloads via MediaStore: $filename")
+            } else {
+                @Suppress("DEPRECATION")
+                val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                if (dir.exists() || dir.mkdirs()) {
+                    File(dir, filename).writeText(text)
+                    Log.d("CrashLogger", "Saved debug log to Downloads: ${dir.absolutePath}/$filename")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("CrashLogger", "Failed to save debug log to Downloads: ${e.message}", e)
+        }
+    }
 }

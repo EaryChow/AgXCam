@@ -1,8 +1,10 @@
 package com.agx.camera
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureResult
 import android.os.Bundle
 import android.os.Handler
@@ -11,9 +13,12 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.OrientationEventListener
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.TextureView
 import android.view.View
 import android.widget.*
+import android.view.ViewGroup
+import android.view.Gravity
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -69,10 +74,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var textureView: TextureView
     private lateinit var devBanner: TextView
     private lateinit var disconnectBanner: TextView
-    private lateinit var flashButton: TextView
+    private lateinit var flashButton: ImageView
     private lateinit var wbButton: TextView
-    private lateinit var settingsButton: TextView
-    private lateinit var frontRearToggle: TextView
+    private lateinit var settingsButton: ImageView
+    private lateinit var frontRearToggle: ImageView
     private lateinit var zoomLabel: TextView
     private lateinit var zoomSlider: SeekBar
     private lateinit var lensSelector: LinearLayout
@@ -81,13 +86,62 @@ class MainActivity : AppCompatActivity() {
     private lateinit var lensSwitchOverlay: TextView
 
     // Shutter / Thermal
-    private lateinit var shutterButton: TextView
+    private lateinit var shutterButton: ImageView
+    private lateinit var thumbnailButton: ImageView
     private lateinit var cooldownText: TextView
     private lateinit var shutterStateLabel: TextView
     private lateinit var thermalIndicator: TextView
 
+    // Focus / WB
+    private lateinit var focusIndicator: ImageView
+    private lateinit var aeAfLockButton: ImageView
+    private lateinit var wbPopup: LinearLayout
+
+    // Manual Exposure
+    private lateinit var amToggleButton: TextView
+    private lateinit var isoOverlay: TextView
+    private lateinit var isoPopup: LinearLayout
+    private lateinit var isoSeekBar: SeekBar
+    private lateinit var shutterOverlay: TextView
+    private lateinit var shutterPopup: LinearLayout
+    private lateinit var shutterSeekBar: SeekBar
+    private lateinit var evPopup: LinearLayout
+    private lateinit var evSeekBar: SeekBar
+    private lateinit var evSliderContainer: FrameLayout
+    private lateinit var evSeekBarVertical: SeekBar
+
+    private var isManualMode = false
+    private var lastAutoIso = 200
+    private var lastAutoShutterNs = 33_333_333L
+    private var lastIsoTapTime = 0L
+    private var lastShutterTapTime = 0L
+    private var isoPopupShowing = false
+    private var shutterPopupShowing = false
+    private var evPopupShowing = false
+
+    // Pinch-to-zoom
+    private var scaleGestureDetector: ScaleGestureDetector? = null
+    private var isScaling = false
+    private var aeLocked = false
+
+    // Tap-to-focus capability for current lens
+    private var currentLensCanTapToFocus = true
+
+    // Warning toast
+    private lateinit var warningContainer: FrameLayout
+    private var warningDismissRunnable: Runnable? = null
+
+    private var presetInitialLoad = true
+    private var lastSelectedResolution = -1
+    private var currentResolutionOptions = emptyList<LensManager.ResolutionOption>()
+    private var currentResolutionIndex = 0
+
+    // Preview size cap
+    private lateinit var maxPreviewDimensions: Pair<Int, Int>
+
     // Preset
     private lateinit var presetSpinner: Spinner
+    private lateinit var presetAddBtn: TextView
     private lateinit var presetSaveBtn: TextView
     private lateinit var presetDeleteBtn: TextView
     private lateinit var presetRenameBtn: TextView
@@ -150,6 +204,7 @@ class MainActivity : AppCompatActivity() {
         textureView = findViewById(R.id.preview_texture)
         devBanner = findViewById(R.id.dev_banner)
         disconnectBanner = findViewById(R.id.disconnect_banner)
+        warningContainer = findViewById(R.id.warningContainer)
         flashButton = findViewById(R.id.flash_button)
         wbButton = findViewById(R.id.wb_button)
         settingsButton = findViewById(R.id.settings_button)
@@ -162,6 +217,7 @@ class MainActivity : AppCompatActivity() {
         lensSwitchOverlay = findViewById(R.id.lens_switch_overlay)
 
         presetSpinner = findViewById(R.id.preset_spinner)
+        presetAddBtn = findViewById(R.id.preset_add_btn)
         presetSaveBtn = findViewById(R.id.preset_save_btn)
         presetDeleteBtn = findViewById(R.id.preset_delete_btn)
         presetRenameBtn = findViewById(R.id.preset_rename_btn)
@@ -200,9 +256,26 @@ class MainActivity : AppCompatActivity() {
         resolutionSpinner = findViewById(R.id.resolution_spinner)
 
         shutterButton = findViewById(R.id.shutter_button)
+        thumbnailButton = findViewById(R.id.thumbnail_button)
         cooldownText = findViewById(R.id.cooldown_text)
         shutterStateLabel = findViewById(R.id.shutter_state_label)
         thermalIndicator = findViewById(R.id.thermal_indicator)
+
+        focusIndicator = findViewById(R.id.focus_indicator)
+        aeAfLockButton = findViewById(R.id.ae_af_lock_button)
+        wbPopup = findViewById(R.id.wb_popup)
+
+        amToggleButton = findViewById(R.id.am_toggle_button)
+        isoOverlay = findViewById(R.id.iso_overlay)
+        isoPopup = findViewById(R.id.iso_popup)
+        isoSeekBar = findViewById(R.id.iso_seekbar)
+        shutterOverlay = findViewById(R.id.shutter_overlay)
+        shutterPopup = findViewById(R.id.shutter_popup)
+        shutterSeekBar = findViewById(R.id.shutter_seekbar)
+        evPopup = findViewById(R.id.ev_popup)
+        evSeekBar = findViewById(R.id.ev_seekbar)
+        evSliderContainer = findViewById(R.id.ev_slider_container)
+        evSeekBarVertical = findViewById(R.id.ev_seekbar_vertical)
 
         if (BuildConfig.AGX_ENABLE_YUV_FALLBACK) {
             devBanner.visibility = View.VISIBLE
@@ -219,25 +292,34 @@ class MainActivity : AppCompatActivity() {
         grayCardSampler = GrayCardSampler()
         mediaStoreSaver = MediaStoreSaver(this)
 
+        // Compute max preview dimensions based on screen resolution
+        maxPreviewDimensions = getMaxPreviewDimensions()
+
         developerSwitch = DeveloperSwitch(this) { useRaw ->
             CrashLogger.log(TAG, "Developer switch toggled: useRaw=$useRaw")
             Log.d(TAG, "Developer switch toggled: useRaw=$useRaw")
             if (useRaw) {
                 val lens = lensManager.activeLens ?: return@DeveloperSwitch
-                val previewSize = lensManager.getBestPreviewSize(lens)
+                val previewSize = lensManager.getBestPreviewSize(lens, maxPreviewDimensions.first, maxPreviewDimensions.second)
                 camera2Manager.close()
                 camera2Manager.stopBackgroundThread()
+                previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
+                previewRenderer.targetAspectRatio = 0f
                 previewRenderer.enableBayerMode(previewSize.width, previewSize.height)
+                previewRenderer.start()
                 camera2Manager.startBackgroundThread()
-                camera2Manager.openCamera(lens, previewSize)
+                camera2Manager.openCamera(lens, previewSize, 0, 0)
             } else {
                 val lens = lensManager.activeLens ?: return@DeveloperSwitch
-                val previewSize = lensManager.getBestPreviewSize(lens)
+                val previewSize = lensManager.getBestPreviewSize(lens, maxPreviewDimensions.first, maxPreviewDimensions.second)
                 camera2Manager.close()
                 camera2Manager.stopBackgroundThread()
+                previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
+                previewRenderer.targetAspectRatio = 0f
                 previewRenderer.disableBayerMode()
+                previewRenderer.start()
                 camera2Manager.startBackgroundThread()
-                camera2Manager.openCamera(lens, previewSize)
+                camera2Manager.openCamera(lens, previewSize, 0, 0)
             }
             developerSwitch.updateBannerForRawMode(useRaw)
         }
@@ -246,6 +328,10 @@ class MainActivity : AppCompatActivity() {
             findViewById(R.id.developer_raw_toggle),
             findViewById(R.id.developer_banner)
         )
+        findViewById<TextView>(R.id.save_debug_log_btn).setOnClickListener {
+            CrashLogger.saveDebugLogToDownloads(this)
+            Toast.makeText(this, "Debug log saved to Downloads", Toast.LENGTH_SHORT).show()
+        }
 
         thermalManager.onStateChanged = { state ->
             mainHandler.post { updateThermalUI(state) }
@@ -323,14 +409,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         wbButton.setOnClickListener {
-            currentWbMode = when (currentWbMode) {
-                WhiteBalanceMode.AUTO -> WhiteBalanceMode.KELVIN
-                WhiteBalanceMode.KELVIN -> WhiteBalanceMode.GRAY_CARD
-                WhiteBalanceMode.GRAY_CARD -> WhiteBalanceMode.AUTO
-            }
-            updateWbUI()
-            syncWbSliders()
-            uploadAgxUniforms()
+            showWbPopup()
         }
 
         settingsButton.setOnClickListener {
@@ -349,6 +428,25 @@ class MainActivity : AppCompatActivity() {
             }
             if (target != null && target.cameraId != current.cameraId) {
                 switchToLens(target)
+            }
+        }
+
+        thumbnailButton.setOnClickListener {
+            val uri = mediaStoreSaver.lastSavedUri
+            if (uri != null) {
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, uri))
+                } catch (e: Exception) {
+                    val galleryIntent = Intent(Intent.ACTION_VIEW).apply {
+                        type = "image/*"
+                    }
+                    startActivity(galleryIntent)
+                }
+            } else {
+                val galleryIntent = Intent(Intent.ACTION_VIEW).apply {
+                    type = "image/*"
+                }
+                startActivity(galleryIntent)
             }
         }
 
@@ -392,7 +490,8 @@ class MainActivity : AppCompatActivity() {
                 agxDisplayMidgray = previewRenderer.agxDisplayMidgray,
                 agxContrast = previewRenderer.agxContrast,
                 agxToe = previewRenderer.agxToe,
-                agxShoulder = previewRenderer.agxShoulder
+                agxShoulder = previewRenderer.agxShoulder,
+                isFrontCamera = previewRenderer.isFrontCamera
             )
 
             val thumbnailLatch = CountDownLatch(1)
@@ -409,7 +508,6 @@ class MainActivity : AppCompatActivity() {
                         isCapturing = false
                         shutterController.onCaptureComplete()
                         finishingCaptureOverlay.visibility = View.GONE
-                        autofocusController.revertToContinuous()
                         if (pendingPauseCleanup) {
                             pendingPauseCleanup = false
                             performCleanup()
@@ -422,7 +520,6 @@ class MainActivity : AppCompatActivity() {
                         isCapturing = false
                         shutterController.onCaptureFailed()
                         finishingCaptureOverlay.visibility = View.GONE
-                        autofocusController.revertToContinuous()
                         if (pendingPauseCleanup) {
                             pendingPauseCleanup = false
                             performCleanup()
@@ -433,22 +530,36 @@ class MainActivity : AppCompatActivity() {
         }
 
         textureView.setOnTouchListener { _, event ->
+            scaleGestureDetector?.onTouchEvent(event) // always feed; never veto on its return value
+
             if (event.action == MotionEvent.ACTION_DOWN && cameraReady) {
+                if (settingsPanelOpen) {
+                    settingsPanelOpen = false
+                    settingsPanel.visibility = View.GONE
+                    return@setOnTouchListener true
+                }
                 if (currentWbMode == WhiteBalanceMode.GRAY_CARD && grayCardSampler.isActive) {
                     grayCardSampler.sample(
                         previewRenderer.currentYPlane ?: return@setOnTouchListener false,
                         previewRenderer.currentUPlane ?: return@setOnTouchListener false,
                         previewRenderer.currentVPlane ?: return@setOnTouchListener false,
                         previewRenderer.currentYuvWidth, previewRenderer.currentYuvHeight,
-                        event.x, event.y,
-                        textureView.width, textureView.height
+                        event.x, event.y, textureView.width, textureView.height
                     )
-                } else {
-                    autofocusController.onTapToFocus(textureView.width, textureView.height, event.x, event.y)
+                } else if (!autofocusController.isLocked && currentLensCanTapToFocus) {
+                    showFocusIndicator(event.x, event.y)
+                    applyFocusPoint(event.x, event.y)
                 }
                 return@setOnTouchListener true
             }
-            false
+            if (event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_CANCEL) {
+                isScaling = false
+            }
+            true
+        }
+
+        wbButton.setOnClickListener {
+            if (cameraReady) showWbPopup()
         }
 
         wbButton.setOnLongClickListener {
@@ -457,6 +568,19 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Tap the preview to sample gray card", Toast.LENGTH_SHORT).show()
             }
             true
+        }
+
+        aeAfLockButton.setOnClickListener {
+            if (!cameraReady) return@setOnClickListener
+            if (autofocusController.isLocked) {
+                autofocusController.unlock()
+                aeAfLockButton.setImageResource(R.drawable.ic_lock_open)
+                aeAfLockButton.alpha = 0.6f
+            } else {
+                autofocusController.lock()
+                aeAfLockButton.setImageResource(R.drawable.ic_lock_closed)
+                aeAfLockButton.alpha = 1.0f
+            }
         }
 
         zoomSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
@@ -469,29 +593,97 @@ class MainActivity : AppCompatActivity() {
             val progress = ((zoom - ZoomController.MIN_ZOOM) / (ZoomController.MAX_ZOOM - ZoomController.MIN_ZOOM) * 400).toInt()
             if (zoomSlider.progress != progress) zoomSlider.progress = progress
             zoomLabel.text = String.format("%.1fx", zoom)
+            // Auto-hide zoom controls at 1.0x
+            val show = zoom > 1.01f
+            zoomSlider.visibility = if (show) View.VISIBLE else View.GONE
+            zoomLabel.visibility = if (show) View.VISIBLE else View.GONE
+            // Keep focus region glued to indicator across zoom changes
+            if (!autofocusController.isLocked && focusIndicator.visibility == View.VISIBLE) {
+                applyFocusPoint(
+                    focusIndicator.x + focusIndicator.width / 2f,
+                    focusIndicator.y + focusIndicator.height / 2f
+                )
+            }
         }
 
+        setupPinchZoom()
         setupSettingsPanel()
         updateFlashUI()
         updateWbUI()
     }
 
+    private var lastClickTime = 0L
+    private var clickCount = 0
+
     private fun setupSettingsPanel() {
+        // Double-click reset helper
+        fun setupDoubleClickReset(label: TextView, resetAction: () -> Unit) {
+            label.setOnClickListener {
+                val now = System.currentTimeMillis()
+                if (now - lastClickTime < 300) {
+                    clickCount++
+                    if (clickCount >= 2) {
+                        resetAction()
+                        clickCount = 0
+                    }
+                } else {
+                    clickCount = 1
+                }
+                lastClickTime = now
+            }
+        }
+
+        // Double-tap on SeekBar to reset to default
+        fun setupSliderDoubleClickReset(seekBar: SeekBar, defaultProgress: Int, resetAction: () -> Unit) {
+            var lastTapTime = 0L
+            var consumed = false
+            seekBar.setOnTouchListener { _, event ->
+                if (event.action == MotionEvent.ACTION_DOWN) {
+                    consumed = false
+                    val now = System.currentTimeMillis()
+                    if (now - lastTapTime < 300) {
+                        seekBar.progress = defaultProgress
+                        resetAction()
+                        lastTapTime = 0L
+                        consumed = true
+                        return@setOnTouchListener true
+                    }
+                    lastTapTime = now
+                }
+                consumed
+            }
+        }
+
         contrastSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(contrast = 1.4f + v * 0.1f)
             contrastLabel.text = String.format("Contrast  %.1f", agxParams.contrast)
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(contrastSlider, 10) {
+            agxParams = agxParams.copy(contrast = 2.4f)
+            contrastLabel.text = "Contrast  2.4"
+            uploadAgxUniforms()
+        }
         toeSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(toe = 0.7f + v * 0.1f)
             toeLabel.text = String.format("Toe  %.1f", agxParams.toe)
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(toeSlider, 8) {
+            agxParams = agxParams.copy(toe = 1.5f)
+            toeLabel.text = "Toe  1.5"
+            uploadAgxUniforms()
+        }
         shoulderSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(shoulder = 0.7f + v * 0.1f)
             shoulderLabel.text = String.format("Shoulder  %.1f", agxParams.shoulder)
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(shoulderSlider, 8) {
+            agxParams = agxParams.copy(shoulder = 1.5f)
+            shoulderLabel.text = "Shoulder  1.5"
+            uploadAgxUniforms()
+        }
 
         usePreForPostCb.setOnCheckedChangeListener { _, checked ->
             agxParams = agxParams.copy(usePreForPost = checked)
@@ -508,64 +700,124 @@ class MainActivity : AppCompatActivity() {
             insetRotRLabel.text = String.format("RGB Rot R  %.3f", agxParams.rgbRotation[0])
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(insetRotRSlider, rotToProgress(AgxParams().rgbRotation[0])) {
+            agxParams = agxParams.copy(rgbRotation = floatArrayOf(AgxParams().rgbRotation[0], agxParams.rgbRotation[1], agxParams.rgbRotation[2]))
+            insetRotRLabel.text = String.format("RGB Rot R  %.3f", agxParams.rgbRotation[0])
+            uploadAgxUniforms()
+        }
         insetRotGSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(rgbRotation = floatArrayOf(agxParams.rgbRotation[0], progressToRot(v.toFloat()), agxParams.rgbRotation[2]))
             insetRotGLabel.text = String.format("RGB Rot G  %.3f", agxParams.rgbRotation[1])
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(insetRotGSlider, rotToProgress(AgxParams().rgbRotation[1])) {
+            agxParams = agxParams.copy(rgbRotation = floatArrayOf(agxParams.rgbRotation[0], AgxParams().rgbRotation[1], agxParams.rgbRotation[2]))
+            insetRotGLabel.text = String.format("RGB Rot G  %.3f", agxParams.rgbRotation[1])
+            uploadAgxUniforms()
+        }
         insetRotBSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(rgbRotation = floatArrayOf(agxParams.rgbRotation[0], agxParams.rgbRotation[1], progressToRot(v.toFloat())))
             insetRotBLabel.text = String.format("RGB Rot B  %.3f", agxParams.rgbRotation[2])
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(insetRotBSlider, rotToProgress(AgxParams().rgbRotation[2])) {
+            agxParams = agxParams.copy(rgbRotation = floatArrayOf(agxParams.rgbRotation[0], agxParams.rgbRotation[1], AgxParams().rgbRotation[2]))
+            insetRotBLabel.text = String.format("RGB Rot B  %.3f", agxParams.rgbRotation[2])
+            uploadAgxUniforms()
+        }
 
         insetPurRSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(purityAttenuation = floatArrayOf(v.toFloat(), agxParams.purityAttenuation[1], agxParams.purityAttenuation[2]))
             insetPurRLabel.text = String.format("Purity R  %.1f", agxParams.purityAttenuation[0])
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(insetPurRSlider, AgxParams().purityAttenuation[0].toInt()) {
+            agxParams = agxParams.copy(purityAttenuation = floatArrayOf(AgxParams().purityAttenuation[0], agxParams.purityAttenuation[1], agxParams.purityAttenuation[2]))
+            insetPurRLabel.text = String.format("Purity R  %.1f", agxParams.purityAttenuation[0])
+            uploadAgxUniforms()
+        }
         insetPurGSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(purityAttenuation = floatArrayOf(agxParams.purityAttenuation[0], v.toFloat(), agxParams.purityAttenuation[2]))
             insetPurGLabel.text = String.format("Purity G  %.1f", agxParams.purityAttenuation[1])
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(insetPurGSlider, AgxParams().purityAttenuation[1].toInt()) {
+            agxParams = agxParams.copy(purityAttenuation = floatArrayOf(agxParams.purityAttenuation[0], AgxParams().purityAttenuation[1], agxParams.purityAttenuation[2]))
+            insetPurGLabel.text = String.format("Purity G  %.1f", agxParams.purityAttenuation[1])
+            uploadAgxUniforms()
+        }
         insetPurBSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(purityAttenuation = floatArrayOf(agxParams.purityAttenuation[0], agxParams.purityAttenuation[1], v.toFloat()))
             insetPurBLabel.text = String.format("Purity B  %.1f", agxParams.purityAttenuation[2])
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(insetPurBSlider, AgxParams().purityAttenuation[2].toInt()) {
+            agxParams = agxParams.copy(purityAttenuation = floatArrayOf(agxParams.purityAttenuation[0], agxParams.purityAttenuation[1], AgxParams().purityAttenuation[2]))
+            insetPurBLabel.text = String.format("Purity B  %.1f", agxParams.purityAttenuation[2])
+            uploadAgxUniforms()
+        }
 
         outsetRotRSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(reverseRgbRotation = floatArrayOf(progressToRot(v.toFloat()), agxParams.reverseRgbRotation[1], agxParams.reverseRgbRotation[2]))
             outsetRotRLabel.text = String.format("Rev Rot R  %.3f", agxParams.reverseRgbRotation[0])
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(outsetRotRSlider, rotToProgress(AgxParams().reverseRgbRotation[0])) {
+            agxParams = agxParams.copy(reverseRgbRotation = floatArrayOf(AgxParams().reverseRgbRotation[0], agxParams.reverseRgbRotation[1], agxParams.reverseRgbRotation[2]))
+            outsetRotRLabel.text = String.format("Rev Rot R  %.3f", agxParams.reverseRgbRotation[0])
+            uploadAgxUniforms()
+        }
         outsetRotGSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(reverseRgbRotation = floatArrayOf(agxParams.reverseRgbRotation[0], progressToRot(v.toFloat()), agxParams.reverseRgbRotation[2]))
             outsetRotGLabel.text = String.format("Rev Rot G  %.3f", agxParams.reverseRgbRotation[1])
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(outsetRotGSlider, rotToProgress(AgxParams().reverseRgbRotation[1])) {
+            agxParams = agxParams.copy(reverseRgbRotation = floatArrayOf(agxParams.reverseRgbRotation[0], AgxParams().reverseRgbRotation[1], agxParams.reverseRgbRotation[2]))
+            outsetRotGLabel.text = String.format("Rev Rot G  %.3f", agxParams.reverseRgbRotation[1])
+            uploadAgxUniforms()
+        }
         outsetRotBSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(reverseRgbRotation = floatArrayOf(agxParams.reverseRgbRotation[0], agxParams.reverseRgbRotation[1], progressToRot(v.toFloat())))
             outsetRotBLabel.text = String.format("Rev Rot B  %.3f", agxParams.reverseRgbRotation[2])
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(outsetRotBSlider, rotToProgress(AgxParams().reverseRgbRotation[2])) {
+            agxParams = agxParams.copy(reverseRgbRotation = floatArrayOf(agxParams.reverseRgbRotation[0], agxParams.reverseRgbRotation[1], AgxParams().reverseRgbRotation[2]))
+            outsetRotBLabel.text = String.format("Rev Rot B  %.3f", agxParams.reverseRgbRotation[2])
+            uploadAgxUniforms()
+        }
 
         outsetPurRSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(restorePurity = floatArrayOf(v.toFloat(), agxParams.restorePurity[1], agxParams.restorePurity[2]))
             outsetPurRLabel.text = String.format("Restore R  %.1f", agxParams.restorePurity[0])
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(outsetPurRSlider, AgxParams().restorePurity[0].toInt()) {
+            agxParams = agxParams.copy(restorePurity = floatArrayOf(AgxParams().restorePurity[0], agxParams.restorePurity[1], agxParams.restorePurity[2]))
+            outsetPurRLabel.text = String.format("Restore R  %.1f", agxParams.restorePurity[0])
+            uploadAgxUniforms()
+        }
         outsetPurGSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(restorePurity = floatArrayOf(agxParams.restorePurity[0], v.toFloat(), agxParams.restorePurity[2]))
             outsetPurGLabel.text = String.format("Restore G  %.1f", agxParams.restorePurity[1])
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(outsetPurGSlider, AgxParams().restorePurity[1].toInt()) {
+            agxParams = agxParams.copy(restorePurity = floatArrayOf(agxParams.restorePurity[0], AgxParams().restorePurity[1], agxParams.restorePurity[2]))
+            outsetPurGLabel.text = String.format("Restore G  %.1f", agxParams.restorePurity[1])
+            uploadAgxUniforms()
+        }
         outsetPurBSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(restorePurity = floatArrayOf(agxParams.restorePurity[0], agxParams.restorePurity[1], v.toFloat()))
             outsetPurBLabel.text = String.format("Restore B  %.1f", agxParams.restorePurity[2])
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(outsetPurBSlider, AgxParams().restorePurity[2].toInt()) {
+            agxParams = agxParams.copy(restorePurity = floatArrayOf(agxParams.restorePurity[0], agxParams.restorePurity[1], AgxParams().restorePurity[2]))
+            outsetPurBLabel.text = String.format("Restore B  %.1f", agxParams.restorePurity[2])
+            uploadAgxUniforms()
+        }
 
         copyInsetBtn.setOnClickListener {
             agxParams = agxParams.copy(
@@ -581,50 +833,69 @@ class MainActivity : AppCompatActivity() {
             tintingScaleLabel.text = String.format("Scale  %.3f", agxParams.tintingScale)
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(tintingScaleSlider, 200) {
+            agxParams = agxParams.copy(tintingScale = 0f)
+            tintingScaleLabel.text = "Scale  0.000"
+            uploadAgxUniforms()
+        }
         tintingHueSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(tintingHue = (v - 314) * 0.01f)
             tintingHueLabel.text = String.format("Hue  %.2f", agxParams.tintingHue)
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(tintingHueSlider, 314) {
+            agxParams = agxParams.copy(tintingHue = 0f)
+            tintingHueLabel.text = "Hue  0.00"
+            uploadAgxUniforms()
+        }
 
         nrSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(nrStrength = v / 100f)
             nrLabel.text = String.format("NR Strength  %.1f", agxParams.nrStrength)
             uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(nrSlider, 0) {
+            agxParams = agxParams.copy(nrStrength = 0f)
+            nrLabel.text = "NR Strength  0.0"
+            uploadAgxUniforms()
+        }
 
         kelvinSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             kelvinState = kelvinState.copy(kelvin = 2000f + v * 100f)
             kelvinLabel.text = String.format("Kelvin  %.0fK", kelvinState.kelvin)
             if (currentWbMode == WhiteBalanceMode.KELVIN) uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(kelvinSlider, 35) {
+            kelvinState = kelvinState.copy(kelvin = 5500f)
+            kelvinLabel.text = "Kelvin  5500K"
+            if (currentWbMode == WhiteBalanceMode.KELVIN) uploadAgxUniforms()
+        }
         tintSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             kelvinState = kelvinState.copy(tint = (v - 100).toFloat())
             tintLabel.text = String.format("Tint  %.0f", kelvinState.tint)
             if (currentWbMode == WhiteBalanceMode.KELVIN) uploadAgxUniforms()
         })
+        setupSliderDoubleClickReset(tintSlider, 100) {
+            kelvinState = kelvinState.copy(tint = 0f)
+            tintLabel.text = "Tint  0"
+            if (currentWbMode == WhiteBalanceMode.KELVIN) uploadAgxUniforms()
+        }
 
         jpegSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             photoOutput = photoOutput.copy(jpegQuality = v)
             jpegLabel.text = String.format("JPEG Quality  %d", v)
         })
-
-        val resOptions = arrayOf("Full", "1/2", "1/4")
-        resolutionSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, resOptions).apply {
-            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        setupSliderDoubleClickReset(jpegSlider, 85) {
+            photoOutput = photoOutput.copy(jpegQuality = 85)
+            jpegLabel.text = "JPEG Quality  85"
         }
+
         resolutionSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (camera2Manager.captureSize.width <= 640) return
-                val scale = when (position) {
-                    1 -> 2
-                    2 -> 4
-                    else -> 1
-                }
-                photoOutput = photoOutput.copy(
-                    resolutionWidth = camera2Manager.captureSize.width / scale,
-                    resolutionHeight = camera2Manager.captureSize.height / scale
-                )
+                if (presetInitialLoad || position == lastSelectedResolution) return
+                lastSelectedResolution = position
+                currentResolutionIndex = position
+                restartCameraWithResolution(position)
             }
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
@@ -640,6 +911,24 @@ class MainActivity : AppCompatActivity() {
                 loadPreset(name)
             }
             override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        presetAddBtn.setOnClickListener {
+            val input = EditText(this).apply { hint = "New preset name" }
+            AlertDialog.Builder(this)
+                .setTitle("Add Preset")
+                .setView(input)
+                .setPositiveButton("Add") { _, _ ->
+                    val name = input.text.toString().trim()
+                    if (name.isNotEmpty()) {
+                        presetManager.save(PresetManager.Preset(name = name, agxParams = agxParams))
+                        refreshPresetSpinner()
+                        selectPreset(name)
+                        Toast.makeText(this, "Created: $name", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
         }
 
         presetSaveBtn.setOnClickListener {
@@ -738,11 +1027,11 @@ class MainActivity : AppCompatActivity() {
         insetRotBSlider.progress = rotToProgress(agxParams.rgbRotation[2])
         insetRotBLabel.text = String.format("RGB Rot B  %.3f", agxParams.rgbRotation[2])
 
-        insetPurRSlider.progress = agxParams.purityAttenuation[0].toInt().coerceIn(0, 600)
+        insetPurRSlider.progress = agxParams.purityAttenuation[0].toInt().coerceIn(0, 60)
         insetPurRLabel.text = String.format("Purity R  %.1f", agxParams.purityAttenuation[0])
-        insetPurGSlider.progress = agxParams.purityAttenuation[1].toInt().coerceIn(0, 600)
+        insetPurGSlider.progress = agxParams.purityAttenuation[1].toInt().coerceIn(0, 60)
         insetPurGLabel.text = String.format("Purity G  %.1f", agxParams.purityAttenuation[1])
-        insetPurBSlider.progress = agxParams.purityAttenuation[2].toInt().coerceIn(0, 600)
+        insetPurBSlider.progress = agxParams.purityAttenuation[2].toInt().coerceIn(0, 60)
         insetPurBLabel.text = String.format("Purity B  %.1f", agxParams.purityAttenuation[2])
     }
 
@@ -756,11 +1045,11 @@ class MainActivity : AppCompatActivity() {
         outsetRotBSlider.progress = rotToProgress(agxParams.reverseRgbRotation[2])
         outsetRotBLabel.text = String.format("Rev Rot B  %.3f", agxParams.reverseRgbRotation[2])
 
-        outsetPurRSlider.progress = agxParams.restorePurity[0].toInt().coerceIn(0, 600)
+        outsetPurRSlider.progress = agxParams.restorePurity[0].toInt().coerceIn(0, 60)
         outsetPurRLabel.text = String.format("Restore R  %.1f", agxParams.restorePurity[0])
-        outsetPurGSlider.progress = agxParams.restorePurity[1].toInt().coerceIn(0, 600)
+        outsetPurGSlider.progress = agxParams.restorePurity[1].toInt().coerceIn(0, 60)
         outsetPurGLabel.text = String.format("Restore G  %.1f", agxParams.restorePurity[1])
-        outsetPurBSlider.progress = agxParams.restorePurity[2].toInt().coerceIn(0, 600)
+        outsetPurBSlider.progress = agxParams.restorePurity[2].toInt().coerceIn(0, 60)
         outsetPurBLabel.text = String.format("Restore B  %.1f", agxParams.restorePurity[2])
     }
 
@@ -796,12 +1085,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateFlashUI() {
-        flashButton.text = when (currentFlashMode) {
-            FlashMode.OFF -> "\u26A1"
-            FlashMode.AUTO -> "\u26A1A"
-            FlashMode.ON -> "\u26A1!"
-            FlashMode.TORCH -> "\uD83D\uDCA1"
-        }
+        flashButton.setImageResource(when (currentFlashMode) {
+            FlashMode.OFF -> R.drawable.ic_flash_off
+            FlashMode.AUTO -> R.drawable.ic_flash_auto
+            FlashMode.ON -> R.drawable.ic_flash_on
+            FlashMode.TORCH -> R.drawable.ic_flash_torch
+        })
     }
 
     private fun updateWbUI() {
@@ -810,6 +1099,307 @@ class MainActivity : AppCompatActivity() {
             WhiteBalanceMode.KELVIN -> "WB\u00B0K"
             WhiteBalanceMode.GRAY_CARD -> "WB\u25A1"
         }
+    }
+
+    private fun showFocusIndicator(x: Float, y: Float) {
+        val size = (80 * resources.displayMetrics.density).toFloat()
+        focusIndicator.x = x - size / 2f
+        focusIndicator.y = y - size / 2f
+        focusIndicator.setImageResource(R.drawable.focus_circle)
+        focusIndicator.visibility = View.VISIBLE
+        focusIndicator.alpha = 0f
+        focusIndicator.animate().cancel()
+        focusIndicator.animate()
+            .alpha(1f)
+            .setDuration(150)
+            .start()
+        val dp44 = 44 * resources.displayMetrics.density
+        aeAfLockButton.visibility = View.VISIBLE
+        aeAfLockButton.setImageResource(if (autofocusController.isLocked) R.drawable.ic_lock_closed else R.drawable.ic_lock_open)
+        aeAfLockButton.alpha = if (autofocusController.isLocked) 1.0f else 0.6f
+        aeAfLockButton.x = focusIndicator.x - dp44
+        aeAfLockButton.y = focusIndicator.y + size / 2f - 18 * resources.displayMetrics.density
+        
+        // Show EV slider in auto exposure mode
+        if (!isManualMode) {
+            showEvSlider(x, y)
+        }
+    }
+
+    private fun hideFocusIndicator() {
+        focusIndicator.animate().cancel()
+        focusIndicator.animate()
+            .alpha(0f)
+            .setDuration(200)
+            .withEndAction { 
+                focusIndicator.visibility = View.GONE
+                focusIndicator.alpha = 1f // reset for next show
+            }
+            .start()
+        aeAfLockButton.animate().cancel()
+        aeAfLockButton.animate()
+            .alpha(0f)
+            .setDuration(200)
+            .withEndAction { 
+                aeAfLockButton.visibility = View.GONE
+                aeAfLockButton.alpha = 1f
+            }
+            .start()
+        hideEvSlider()
+    }
+
+    private fun showEvSlider(x: Float, y: Float) {
+        if (isManualMode) return
+        
+        evSliderContainer?.let { container ->
+            container.visibility = View.VISIBLE
+            evSeekBarVertical?.apply {
+                progress = 50
+                setExposureCompFromProgress(50)
+            }
+            
+            // Position: center vertically on tap point, offset right of focus indicator
+            val density = resources.displayMetrics.density
+            val halfContainerH = 70 * density
+            container.x = x + 48 * density
+            container.y = y - halfContainerH
+            
+            evSeekBarVertical?.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                    if (fromUser) {
+                        val range = camera2Manager.aeExposureCompRange
+                        val step = camera2Manager.aeExposureStep
+                        if (range != null) {
+                            val min = range.start.toInt()
+                            val max = range.endInclusive.toInt()
+                            val steps = ((max - min) / step).toInt()
+                            val value = min + Math.round(progress / 100.0 * steps).toInt()
+                            camera2Manager.setExposureCompensation(value)
+                        }
+                    }
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar) {}
+            })
+        }
+    }
+
+    // Track last EV tap time for double-tap reset
+    private var lastEvTapTime = 0L
+
+    /** Maps view coordinates to normalized (0..1) coordinates in the camera frame. */
+    private fun viewToFrameCoords(x: Float, y: Float): FloatArray {
+        val fw = previewRenderer.currentYuvWidth.toFloat()
+        val fh = previewRenderer.currentYuvHeight.toFloat()
+        val vw = textureView.width.toFloat()
+        val vh = textureView.height.toFloat()
+
+        CrashLogger.log(TAG, "viewToFrameCoords: x=$x y=$y fw=$fw fh=$fh vw=$vw vh=$vh")
+
+        // Undo the renderer's CENTER_INSIDE viewport (letterbox/pillarbox)
+        val contentAspect = fw / fh
+        val viewAspect = vw / vh
+        var vpW: Float
+        var vpH: Float
+        var vpX: Float
+        var vpY: Float
+        if (contentAspect > viewAspect) {
+            vpW = vw
+            vpH = vw / contentAspect
+            vpX = 0f
+            vpY = (vh - vpH) / 2f
+        } else {
+            vpH = vh
+            vpW = vh * contentAspect
+            vpX = (vw - vpW) / 2f
+            vpY = 0f
+        }
+        var u = ((x - vpX) / vpW).coerceIn(0f, 1f)
+        var v = ((y - vpY) / vpH).coerceIn(0f, 1f)
+
+        CrashLogger.log(TAG, "viewToFrameCoords: vpX=$vpX vpY=$vpY vpW=$vpW vpH=$vpH u=$u v=$v")
+
+        // Undo zoom (shader pivots at 1 - zoomCenter: out = (in - pivot) * z + pivot)
+        val zc = previewRenderer.zoomController
+        u = (u - (1f - zc.zoomCenterX)) / zc.zoomFactor + zc.zoomCenterX
+        v = (v - (1f - zc.zoomCenterY)) / zc.zoomFactor + zc.zoomCenterY
+
+        CrashLogger.log(TAG, "viewToFrameCoords after zoom: u=$u v=$v zoomFactor=${zc.zoomFactor} zoomCenter=(${zc.zoomCenterX},${zc.zoomCenterY})")
+
+        return floatArrayOf(u.coerceIn(0f, 1f), v.coerceIn(0f, 1f))
+    }
+
+    private fun applyFocusPoint(viewX: Float, viewY: Float) {
+        val lens = lensManager.activeLens ?: return
+        val uv = viewToFrameCoords(viewX, viewY)
+        autofocusController.setFocusPoint(
+            uv[0], uv[1],
+            lensManager.getSensorActiveArraySize(lens),
+            lensManager.getSensorOrientation(lens),
+            previewRenderer.isFrontCamera
+        )
+    }
+
+    private fun showLensWarning(message: String) {
+        warningContainer?.let { container ->
+            warningDismissRunnable?.let { container.removeCallbacks(it) }
+            container.findViewById<TextView>(R.id.tvWarning).text = message
+            container.visibility = View.VISIBLE
+            container.alpha = 1f
+
+            warningDismissRunnable = Runnable {
+                container.animate()
+                    .alpha(0f)
+                    .setDuration(300)
+                    .withEndAction { container.visibility = View.GONE }
+                    .start()
+            }
+
+            container.postDelayed(warningDismissRunnable, 3000)
+        }
+    }
+
+    private fun disableTapToFocus() {
+        currentLensCanTapToFocus = false
+    }
+
+    private fun enableTapToFocus() {
+        currentLensCanTapToFocus = true
+    }
+
+    private fun showWbPopup() {
+        val chars = lensManager.activeLens?.let { lensManager.getCharacteristicsForLens(it) }
+        val awbModes = chars?.get(android.hardware.camera2.CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES) ?: intArrayOf()
+        
+        wbPopup.visibility = View.VISIBLE
+        val autoBtn = wbPopup.findViewById<TextView>(R.id.wb_auto)
+        val daylightBtn = wbPopup.findViewById<TextView>(R.id.wb_daylight)
+        val cloudyBtn = wbPopup.findViewById<TextView>(R.id.wb_cloudy)
+        val tungstenBtn = wbPopup.findViewById<TextView>(R.id.wb_tungsten)
+        val fluorescentBtn = wbPopup.findViewById<TextView>(R.id.wb_fluorescent)
+        val twilightBtn = wbPopup.findViewById<TextView>(R.id.wb_twilight)
+        val shadeBtn = wbPopup.findViewById<TextView>(R.id.wb_shade)
+
+        val clickListener = View.OnClickListener { v ->
+            val mode = when (v.id) {
+                R.id.wb_auto -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_AUTO
+                R.id.wb_daylight -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT
+                R.id.wb_cloudy -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT
+                R.id.wb_tungsten -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT
+                R.id.wb_fluorescent -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT
+                R.id.wb_twilight -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_TWILIGHT
+                R.id.wb_shade -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_SHADE
+                else -> return@OnClickListener
+            }
+            if (mode in awbModes) {
+                camera2Manager.setWhiteBalanceMode(mode)
+                currentWbMode = WhiteBalanceMode.AUTO
+                updateWbUI()
+                syncWbSliders()
+                uploadAgxUniforms()
+            }
+            wbPopup.visibility = View.GONE
+        }
+
+        autoBtn.setOnClickListener(clickListener)
+        daylightBtn.setOnClickListener(clickListener)
+        cloudyBtn.setOnClickListener(clickListener)
+        tungstenBtn.setOnClickListener(clickListener)
+        fluorescentBtn.setOnClickListener(clickListener)
+        twilightBtn.setOnClickListener(clickListener)
+        shadeBtn.setOnClickListener(clickListener)
+
+        // Hide buttons not supported by this camera
+        val supported = awbModes.toSet()
+        listOf(
+            R.id.wb_auto to android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_AUTO,
+            R.id.wb_daylight to android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT,
+            R.id.wb_cloudy to android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT,
+            R.id.wb_tungsten to android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT,
+            R.id.wb_fluorescent to android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT,
+            R.id.wb_twilight to android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_TWILIGHT,
+            R.id.wb_shade to android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_SHADE
+        ).forEach { (id, mode) ->
+            wbPopup.findViewById<TextView>(id).visibility = if (mode in supported) View.VISIBLE else View.GONE
+        }
+    }
+
+    private fun setupPinchZoom() {
+        scaleGestureDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                isScaling = true
+                return true
+            }
+
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                val currentZoom = previewRenderer.zoomController.zoomFactor
+                val newZoom = (currentZoom * detector.scaleFactor).coerceIn(ZoomController.MIN_ZOOM, previewRenderer.zoomController.maxZoom)
+                previewRenderer.zoomController.setZoom(newZoom)
+                return true
+            }
+
+            override fun onScaleEnd(detector: ScaleGestureDetector) {
+                isScaling = false
+            }
+        })
+    }
+
+    private fun populateResolutionSpinner(lens: LensInfo) {
+        currentResolutionOptions = lensManager.getResolutionOptions(lens)
+        val labels = currentResolutionOptions.map { it.label }
+        resolutionSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, labels).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        val restoreIndex = currentResolutionIndex.coerceIn(0, currentResolutionOptions.size - 1)
+        lastSelectedResolution = -1
+        presetInitialLoad = true
+        resolutionSpinner.setSelection(restoreIndex)
+        presetInitialLoad = false
+        lastSelectedResolution = restoreIndex
+    }
+
+    private fun restartCameraWithResolution(resIndex: Int) {
+        if (!cameraReady || openingCamera) return
+        val lens = lensManager.activeLens ?: return
+
+        val option = currentResolutionOptions.getOrNull(resIndex) ?: return
+
+        val targetW: Int
+        val targetH: Int
+        if (option.aspectW == 0 || option.aspectH == 0) {
+            targetW = lens.sensorActiveWidth
+            targetH = lens.sensorActiveHeight
+        } else {
+            targetW = option.width
+            targetH = option.height
+        }
+
+        val targetAspect = if (targetW > 0 && targetH > 0) targetW.toFloat() / targetH else 0f
+
+        photoOutput = photoOutput.copy(resolutionWidth = targetW, resolutionHeight = targetH)
+
+        CrashLogger.log(TAG, "restartCameraWithResolution: index=$resIndex target=${targetW}x${targetH} aspect=$targetAspect")
+
+        camera2Manager.close()
+
+        val previewSize = if (targetAspect > 0f) {
+            lensManager.getPreviewSizeForAspectRatio(lens, targetAspect, maxPreviewDimensions.first, maxPreviewDimensions.second)
+        } else {
+            lensManager.getBestPreviewSize(lens, maxPreviewDimensions.first, maxPreviewDimensions.second)
+        }
+
+        // Stop render thread to recreate FBO with new preview size
+        previewRenderer.stop()
+
+        camera2Manager.stopBackgroundThread()
+        camera2Manager.startBackgroundThread()
+        previewRenderer.sensorOrientation = lensManager.getSensorOrientation(lens)
+        previewRenderer.isFrontCamera = lens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
+        previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
+        previewRenderer.targetAspectRatio = targetAspect
+        previewRenderer.start()
+        camera2Manager.openCamera(lens, previewSize, targetW, targetH)
+        previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
     }
 
     private fun checkPermissions() {
@@ -851,10 +1441,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         CrashLogger.log(TAG, "initCamera: primary=${primary.cameraId} ${primary.label} level=${primary.hardwareLevel}")
-        val previewSize = lensManager.getBestPreviewSize(primary)
+        val previewSize = lensManager.getBestPreviewSize(primary, maxPreviewDimensions.first, maxPreviewDimensions.second)
         buildLensSelectorUI()
 
         previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
+        previewRenderer.targetAspectRatio = 0f
         previewRenderer.start()
 
         uploadAgxUniforms()
@@ -888,6 +1479,20 @@ class MainActivity : AppCompatActivity() {
             openingCamera = false
             mainHandler.post {
                 lensSwitchOverlay.visibility = View.GONE
+                val lens = lensManager.activeLens
+                if (lens != null) {
+                    populateResolutionSpinner(lens)
+                }
+                setupManualControls()
+                updateManualControlRanges()
+                previewRenderer.requestRender()
+                // Initial tap-to-focus capability
+                currentLensCanTapToFocus = lensManager.getLensProfile(lensManager.activeLens?.cameraId ?: "")?.canTapToFocus() == true
+                // Initial focus indicator at center
+                val cx = textureView.width / 2f
+                val cy = textureView.height / 2f
+                showFocusIndicator(cx, cy)
+                applyFocusPoint(cx, cy)
             }
         }
 
@@ -922,13 +1527,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        camera2Manager.onAutoExposureReadout = { iso, shutterNs ->
+            mainHandler.post { updateAutoExposureReadout(iso, shutterNs) }
+        }
+
         camera2Manager.startBackgroundThread()
 
         try {
             previewRenderer.sensorOrientation = lensManager.getSensorOrientation(primary)
             previewRenderer.isFrontCamera = primary.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
             CrashLogger.log(TAG, "initCamera: calling openCamera sensorOrientation=${previewRenderer.sensorOrientation} isFront=${previewRenderer.isFrontCamera}")
-            camera2Manager.openCamera(primary, previewSize)
+            camera2Manager.openCamera(primary, previewSize, 0, 0)
             previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
             CrashLogger.log(TAG, "initCamera: openCamera returned, captureSize=${camera2Manager.captureSize.width}x${camera2Manager.captureSize.height}")
         } catch (e: Exception) {
@@ -950,13 +1559,28 @@ class MainActivity : AppCompatActivity() {
         val lens = lensManager.activeLens ?: lensManager.selectPrimary() ?: return
         camera2Manager.close()
         camera2Manager.stopBackgroundThread()
-        val previewSize = lensManager.getBestPreviewSize(lens)
+
+        val option = currentResolutionOptions.getOrNull(currentResolutionIndex)
+        val targetAspect = if (option != null && option.aspectW > 0 && option.aspectH > 0) {
+            option.aspectW.toFloat() / option.aspectH
+        } else 0f
+
+        val previewSize = if (targetAspect > 0f) {
+            lensManager.getPreviewSizeForAspectRatio(lens, targetAspect, maxPreviewDimensions.first, maxPreviewDimensions.second)
+        } else {
+            lensManager.getBestPreviewSize(lens, maxPreviewDimensions.first, maxPreviewDimensions.second)
+        }
+
+        // Stop render thread to recreate FBO with new preview size
+        previewRenderer.stop()
+
         previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
+        previewRenderer.targetAspectRatio = targetAspect
         previewRenderer.start()
         camera2Manager.startBackgroundThread()
         previewRenderer.sensorOrientation = lensManager.getSensorOrientation(lens)
         previewRenderer.isFrontCamera = lens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
-        camera2Manager.openCamera(lens, previewSize)
+        camera2Manager.openCamera(lens, previewSize, photoOutput.resolutionWidth, photoOutput.resolutionHeight)
         previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
     }
 
@@ -980,8 +1604,6 @@ class MainActivity : AppCompatActivity() {
 
         camera2Manager.close()
 
-        autofocusController.revertToContinuous()
-
         lensManager.switchLens(targetLens) { /* save handled above */ }
 
         val restored = lensManager.getRestoredState(targetLens.cameraId)
@@ -999,29 +1621,67 @@ class MainActivity : AppCompatActivity() {
         syncAllSliders()
 
         buildLensSelectorUI()
-        frontRearToggle.text = if (targetLens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT) "↻F" else "↻"
+        frontRearToggle.rotation = if (targetLens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT) 0f else 0f
 
         uploadAgxUniforms()
 
-        val previewSize = lensManager.getBestPreviewSize(targetLens)
+        // Check if new lens supports tap-to-focus
+        onLensSwitched(targetLens.cameraId, lensManager.getLensProfile(targetLens.cameraId))
+
+        val option = currentResolutionOptions.getOrNull(currentResolutionIndex)
+        val targetAspect = if (option != null && option.aspectW > 0 && option.aspectH > 0) {
+            option.aspectW.toFloat() / option.aspectH
+        } else {
+            0f
+        }
+
+        val previewSize = if (targetAspect > 0f) {
+            lensManager.getPreviewSizeForAspectRatio(targetLens, targetAspect, maxPreviewDimensions.first, maxPreviewDimensions.second)
+        } else {
+            lensManager.getBestPreviewSize(targetLens, maxPreviewDimensions.first, maxPreviewDimensions.second)
+        }
+
+        // Stop render thread to recreate FBO with new preview size
+        previewRenderer.stop()
+
         camera2Manager.stopBackgroundThread()
         camera2Manager.startBackgroundThread()
+        previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
+        previewRenderer.targetAspectRatio = targetAspect
+        previewRenderer.start()
         previewRenderer.sensorOrientation = lensManager.getSensorOrientation(targetLens)
         previewRenderer.isFrontCamera = targetLens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
-        camera2Manager.openCamera(targetLens, previewSize)
+        camera2Manager.openCamera(targetLens, previewSize, photoOutput.resolutionWidth, photoOutput.resolutionHeight)
         previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
+
+        onLensSwitched(targetLens.cameraId, lensManager.getLensProfile(targetLens.cameraId))
+    }
+
+    private fun onLensSwitched(lensId: String, profile: LensProfile?) {
+        if (profile == null || !profile.canTapToFocus()) {
+            val msg = when {
+                profile?.facing == CameraCharacteristics.LENS_FACING_FRONT ->
+                    "Front camera: fixed focus, tap-to-focus disabled"
+                LensClassifier.isAuxiliaryBackCamera(profile!!) ->
+                    "Auxiliary lens: tap-to-focus not supported"
+                else -> "This lens does not support tap-to-focus"
+            }
+            showLensWarning(msg)
+            disableTapToFocus()
+        } else {
+            enableTapToFocus()
+        }
     }
 
     private fun buildLensSelectorUI() {
         lensSelector.removeAllViews()
         val active = lensManager.activeLens ?: return
-        val rearLenses = lensManager.getRearLenses()
-        val primaryFocal = rearLenses.firstOrNull()?.focalLengthMm ?: 1.0f
-
+        val currentFacing = active.facing
+        val lensesForFacing = lensManager.getLensesForFacing(currentFacing)
         val activeLensId = active.cameraId
 
-        for (lens in rearLenses) {
-            val zoomLabel = if (primaryFocal > 0) String.format("%.1f\u00D7", lens.focalLengthMm / primaryFocal) else lens.label
+        for (lens in lensesForFacing) {
+            val zoomLabel = lensManager.getLensLabel(lens.cameraId)
             val isActive = lens.cameraId == activeLensId
             val btn = TextView(this).apply {
                 text = zoomLabel
@@ -1095,7 +1755,7 @@ class MainActivity : AppCompatActivity() {
         return dst
     }
 
-    override fun onResume() {
+override fun onResume() {
         super.onResume()
         CrashLogger.log(TAG, "onResume: cameraReady=$cameraReady openingCamera=$openingCamera")
         orientationListener.enable()
@@ -1107,13 +1767,29 @@ class MainActivity : AppCompatActivity() {
             if (lens != null) {
                 camera2Manager.close()
                 camera2Manager.stopBackgroundThread()
-                val previewSize = lensManager.getBestPreviewSize(lens)
+                
+                // Respect current resolution selection
+                val option = currentResolutionOptions.getOrNull(currentResolutionIndex)
+                val targetAspect = if (option != null && option.aspectW > 0 && option.aspectH > 0) {
+                    option.aspectW.toFloat() / option.aspectH
+                } else 0f
+
+                val previewSize = if (targetAspect > 0f) {
+                    lensManager.getPreviewSizeForAspectRatio(lens, targetAspect, maxPreviewDimensions.first, maxPreviewDimensions.second)
+                } else {
+                    lensManager.getBestPreviewSize(lens, maxPreviewDimensions.first, maxPreviewDimensions.second)
+                }
+
+                // Stop render thread to recreate FBO with new preview size
+                previewRenderer.stop()
+
                 previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
+                previewRenderer.targetAspectRatio = targetAspect
                 previewRenderer.start()
                 camera2Manager.startBackgroundThread()
                 previewRenderer.sensorOrientation = lensManager.getSensorOrientation(lens)
                 previewRenderer.isFrontCamera = lens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
-                camera2Manager.openCamera(lens, previewSize)
+                camera2Manager.openCamera(lens, previewSize, photoOutput.resolutionWidth, photoOutput.resolutionHeight)
                 previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
             }
         }
@@ -1252,7 +1928,13 @@ class MainActivity : AppCompatActivity() {
 
                 val sensorOrientation = session.sensorOrientation
 
-                val exifRotation = (sensorOrientation + session.deviceOrientation) % 360
+                // EXIF orientation: rear=(sensor+device)%360, front=(sensor-device+360)%360
+                val isFront = session.isFrontCamera
+                val exifRotation = if (isFront) {
+                    (sensorOrientation - session.deviceOrientation + 360) % 360
+                } else {
+                    (sensorOrientation + session.deviceOrientation) % 360
+                }
                 val exifOrientation = when (exifRotation) {
                     90 -> 6
                     180 -> 3
@@ -1332,10 +2014,253 @@ class MainActivity : AppCompatActivity() {
         val agxDisplayMidgray: Float,
         val agxContrast: Float,
         val agxToe: Float,
-        val agxShoulder: Float
+        val agxShoulder: Float,
+        val isFrontCamera: Boolean = false
     ) {
         override fun equals(other: Any?) = this === other
         override fun hashCode() = System.identityHashCode(this)
+    }
+
+    private fun setupManualControls() {
+        amToggleButton = findViewById(R.id.am_toggle_button)
+        isoOverlay = findViewById(R.id.iso_overlay)
+        isoPopup = findViewById(R.id.iso_popup)
+        isoSeekBar = findViewById(R.id.iso_seekbar)
+        shutterOverlay = findViewById(R.id.shutter_overlay)
+        shutterPopup = findViewById(R.id.shutter_popup)
+        shutterSeekBar = findViewById(R.id.shutter_seekbar)
+        evPopup = findViewById(R.id.ev_popup)
+        evSeekBar = findViewById(R.id.ev_seekbar)
+
+        amToggleButton.setOnClickListener {
+            isManualMode = !isManualMode
+            updateManualModeUI()
+        }
+
+        isoOverlay.setOnClickListener { togglePopup(isoPopup, isoPopupShowing) { isoPopupShowing = it } }
+        shutterOverlay.setOnClickListener { togglePopup(shutterPopup, shutterPopupShowing) { shutterPopupShowing = it } }
+
+        // Double-tap to reset to auto values
+        isoOverlay.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_DOWN) {
+                val now = System.currentTimeMillis()
+                if (now - lastIsoTapTime < 300) {
+                    isoSeekBar.progress = 50
+                    updateManualExposure()
+                }
+                lastIsoTapTime = now
+            }
+            false
+        }
+        shutterOverlay.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_DOWN) {
+                val now = System.currentTimeMillis()
+                if (now - lastShutterTapTime < 300) {
+                    shutterSeekBar.progress = 50
+                    updateManualExposure()
+                }
+                lastShutterTapTime = now
+            }
+            false
+        }
+        evSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) setExposureCompFromProgress(progress)
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar) {}
+        })
+        // Double-tap on EV slider to reset
+        var lastEvTapTime = 0L
+        evSeekBar.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_DOWN) {
+                val now = System.currentTimeMillis()
+                if (now - lastEvTapTime < 300) {
+                    evSeekBar.progress = 50
+                    setExposureCompFromProgress(50)
+                }
+                lastEvTapTime = now
+            }
+            false
+        }
+
+        isoSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) updateManualExposure()
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar) {}
+        })
+        // Double-tap on ISO slider to reset
+        var lastIsoSliderTapTime = 0L
+        isoSeekBar.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_DOWN) {
+                val now = System.currentTimeMillis()
+                if (now - lastIsoSliderTapTime < 300) {
+                    isoSeekBar.progress = 50
+                    updateManualExposure()
+                }
+                lastIsoSliderTapTime = now
+            }
+            false
+        }
+
+        shutterSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) updateManualExposure()
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar) {}
+        })
+        // Double-tap on Shutter slider to reset
+        var lastShutterSliderTapTime = 0L
+        shutterSeekBar.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_DOWN) {
+                val now = System.currentTimeMillis()
+                if (now - lastShutterSliderTapTime < 300) {
+                    shutterSeekBar.progress = 50
+                    updateManualExposure()
+                }
+                lastShutterSliderTapTime = now
+            }
+            false
+        }
+
+        updateManualModeUI()
+    }
+
+    private fun updateManualModeUI() {
+        amToggleButton.text = if (isManualMode) "MANUAL" else "AUTO"
+        isoSeekBar.isEnabled = isManualMode
+        shutterSeekBar.isEnabled = isManualMode
+        isoSeekBar.alpha = if (isManualMode) 1.0f else 0.4f
+        shutterSeekBar.alpha = if (isManualMode) 1.0f else 0.4f
+        if (isManualMode) {
+            // sync sliders to last auto values
+            syncSlidersToAutoValues()
+            val iso = isoFromProgress(isoSeekBar.progress)
+            val expNs = shutterNsFromProgress(shutterSeekBar.progress)
+            camera2Manager.setManualExposure(iso, expNs)
+        } else {
+            camera2Manager.setAutoExposure()
+        }
+        dismissAllPopups()
+        // Hide EV slider in manual mode
+        if (isManualMode) hideEvSlider()
+    }
+
+    private fun syncSlidersToAutoValues() {
+        val isoVals = camera2Manager.availableIsoValues
+        val shutterVals = camera2Manager.availableShutterSpeedsNs
+        if (isoVals.isEmpty() || shutterVals.isEmpty()) return
+
+        val targetIso = lastAutoIso
+        val targetShutterNs = lastAutoShutterNs
+
+        val isoIdx = isoVals.indices.minByOrNull { i -> Math.abs(isoVals[i] - targetIso) } ?: 0
+        val shutterIdx = shutterVals.indices.minByOrNull { i -> Math.abs(shutterVals[i] - targetShutterNs) } ?: 0
+
+        isoSeekBar.progress = isoIdx * 100 / (isoVals.size - 1).coerceAtLeast(1)
+        shutterSeekBar.progress = shutterIdx * 100 / (shutterVals.size - 1).coerceAtLeast(1)
+    }
+
+    private fun updateAutoExposureReadout(iso: Int, shutterNs: Long) {
+        lastAutoIso = iso
+        lastAutoShutterNs = shutterNs
+        if (!isManualMode) {
+            isoOverlay.text = "ISO $iso"
+            shutterOverlay.text = formatShutterSpeed(shutterNs)
+        }
+    }
+
+    private fun updateManualExposure() {
+        val iso = isoFromProgress(isoSeekBar.progress)
+        val expNs = shutterNsFromProgress(shutterSeekBar.progress)
+        isoOverlay.text = "ISO $iso"
+        shutterOverlay.text = formatShutterSpeed(expNs)
+        camera2Manager.setManualExposure(iso, expNs)
+    }
+
+    private fun isoFromProgress(progress: Int): Int {
+        val vals = camera2Manager.availableIsoValues
+        if (vals.isEmpty()) return 400
+        val idx = progress * (vals.size - 1) / 100
+        return vals[idx.coerceIn(0, vals.size - 1)]
+    }
+
+    private fun shutterNsFromProgress(progress: Int): Long {
+        val vals = camera2Manager.availableShutterSpeedsNs
+        if (vals.isEmpty()) return 33_333_333L
+        val idx = progress * (vals.size - 1) / 100
+        return vals[idx.coerceIn(0, vals.size - 1)]
+    }
+
+    private fun formatShutterSpeed(ns: Long): String {
+        val sec = ns / 1_000_000_000.0
+        return if (sec >= 1.0) String.format("%.1fs", sec)
+        else if (sec >= 0.1) String.format("1/%d", (1.0 / sec).toInt())
+        else "1/${(1.0 / sec).toInt()}"
+    }
+
+    private fun togglePopup(popup: View, isShowing: Boolean, onChange: (Boolean) -> Unit) {
+        if (isShowing) {
+            popup.visibility = View.GONE
+            onChange(false)
+        } else {
+            dismissAllPopups()
+            popup.visibility = View.VISIBLE
+            onChange(true)
+        }
+    }
+
+    private fun dismissAllPopups() {
+        isoPopup.visibility = View.GONE
+        shutterPopup.visibility = View.GONE
+        evPopup.visibility = View.GONE
+        isoPopupShowing = false
+        shutterPopupShowing = false
+        evPopupShowing = false
+    }
+
+    private fun showEvSlider() {
+        if (!isManualMode) {
+            evPopup.visibility = View.VISIBLE
+            evSeekBar.progress = 50
+            evPopupShowing = true
+        }
+    }
+
+    private fun hideEvSlider() {
+        evPopup.visibility = View.GONE
+        evPopupShowing = false
+        evSliderContainer?.visibility = View.GONE
+    }
+
+    private fun updateManualControlRanges() {
+        val chars = lensManager.activeLens?.let { lensManager.getCharacteristicsForLens(it) }
+        chars?.let { camera2Manager.updateManualControlRanges(it) }
+    }
+
+    private fun setExposureCompFromProgress(progress: Int) {
+        val range = camera2Manager.aeExposureCompRange
+        val step = camera2Manager.aeExposureStep
+        if (range == null) return
+        val min = range.start.toInt()
+        val max = range.endInclusive.toInt()
+        val steps = ((max - min) / step).toInt()
+        val value = min + Math.round(progress / 100.0 * steps).toInt()
+        camera2Manager.setExposureCompensation(value)
+    }
+
+    private fun getMaxPreviewDimensions(): Pair<Int, Int> {
+        val display = windowManager.defaultDisplay
+        val metrics = android.util.DisplayMetrics()
+        display.getRealMetrics(metrics)
+        val screenWidth = metrics.widthPixels
+        val screenHeight = metrics.heightPixels
+        // Cap preview at 720p max dimension for performance
+        val maxDim = 1280
+        return Pair(maxDim, maxDim * screenHeight / screenWidth)
     }
 
     companion object {

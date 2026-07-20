@@ -39,9 +39,8 @@ class DeveloperSwitch(
         if (BuildConfig.DEBUG) {
             containerLayout.visibility = LinearLayout.VISIBLE
         } else {
-            containerLayout.visibility = LinearLayout.GONE
+            containerLayout.visibility = LinearLayout.VISIBLE
             bannerView.visibility = TextView.GONE
-            return
         }
 
         toggleSwitch.setOnCheckedChangeListener { _, isChecked ->

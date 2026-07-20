@@ -10,10 +10,17 @@ class ZoomController {
     var zoomCenterY: Float = 0.5f
         private set
 
+    var maxZoom: Float = MAX_ZOOM
+        private set
+
     var listener: ((Float, Float, Float) -> Unit)? = null
 
+    fun setMaxZoom(max: Float) {
+        maxZoom = max.coerceAtLeast(MIN_ZOOM)
+    }
+
     fun setZoom(factor: Float) {
-        zoomFactor = factor.coerceIn(MIN_ZOOM, MAX_ZOOM)
+        zoomFactor = factor.coerceIn(MIN_ZOOM, maxZoom)
         listener?.invoke(zoomFactor, zoomCenterX, zoomCenterY)
     }
 

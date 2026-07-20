@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/wb_popup"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:layout_gravity="top|start"
+    android:layout_marginTop="56dp"
+    android:layout_marginStart="8dp"
+    android:background="#DD111111"
+    android:orientation="horizontal"
+    android:padding="6dp"
+    android:visibility="gone">
+
+    <TextView
+        android:id="@+id/wb_auto"
+        android:layout_width="wrap_content"
+        android:layout_height="32dp"
+        android:layout_marginEnd="2dp"
+        android:background="#444444"
+        android:gravity="center"
+        android:paddingHorizontal="8dp"
+        android:text="Auto"
+        android:textColor="#FFFFFFFF"
+        android:textSize="10sp"
+        android:clickable="true"
+        android:focusable="true" />
+
+    <TextView
+        android:id="@+id/wb_daylight"
+        android:layout_width="wrap_content"
+        android:layout_height="32dp"
+        android:layout_marginEnd="2dp"
+        android:background="#444444"
+        android:gravity="center"
+        android:paddingHorizontal="8dp"
+        android:text="Sun"
+        android:textColor="#FFFFCC00"
+        android:textSize="10sp"
+        android:clickable="true"
+        android:focusable="true" />
+
+    <TextView
+        android:id="@+id/wb_cloudy"
+        android:layout_width="wrap_content"
+        android:layout_height="32dp"
+        android:layout_marginEnd="2dp"
+        android:background="#444444"
+        android:gravity="center"
+        android:paddingHorizontal="8dp"
+        android:text="Cloud"
+        android:textColor="#FFAABBCC"
+        android:textSize="10sp"
+        android:clickable="true"
+        android:focusable="true" />
+
+    <TextView
+        android:id="@+id/wb_tungsten"
+        android:layout_width="wrap_content"
+        android:layout_height="32dp"
+        android:layout_marginEnd="2dp"
+        android:background="#444444"
+        android:gravity="center"
+        android:paddingHorizontal="8dp"
+        android:text="Tung"
+        android:textColor="#FFFF8800"
+        android:textSize="10sp"
+        android:clickable="true"
+        android:focusable="true" />
+
+    <TextView
+        android:id="@+id/wb_fluorescent"
+        android:layout_width="wrap_content"
+        android:layout_height="32dp"
+        android:layout_marginEnd="2dp"
+        android:background="#444444"
+        android:gravity="center"
+        android:paddingHorizontal="8dp"
+        android:text="Fluor"
+        android:textColor="#FFCC88FF"
+        android:textSize="10sp"
+        android:clickable="true"
+        android:focusable="true" />
+
+    <TextView
+        android:id="@+id/wb_twilight"
+        android:layout_width="wrap_content"
+        android:layout_height="32dp"
+        android:layout_marginEnd="2dp"
+        android:background="#444444"
+        android:gravity="center"
+        android:paddingHorizontal="8dp"
+        android:text="Dusk"
+        android:textColor="#FF6688CC"
+        android:textSize="10sp"
+        android:clickable="true"
+        android:focusable="true" />
+
+    <TextView
+        android:id="@+id/wb_shade"
+        android:layout_width="wrap_content"
+        android:layout_height="32dp"
+        android:background="#444444"
+        android:gravity="center"
+        android:paddingHorizontal="8dp"
+        android:text="Shade"
+        android:textColor="#FFAAAAFF"
+        android:textSize="10sp"
+        android:clickable="true"
+        android:focusable="true" />
+</LinearLayout>
