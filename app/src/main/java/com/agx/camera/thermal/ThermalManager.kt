@@ -33,6 +33,13 @@ class ThermalManager(context: Context) {
     private var lastStateChangeTime = 0L
     private val minStateDurationMs = 10_000 // 10 seconds minimum before allowing state change
 
+    // Temperature smoothing (EMA)
+    private var smoothedTemp: Float? = null
+    private val tempEmaAlpha = 0.3f // lower = smoother, 0.3 = ~6 sample window
+
+    // Return hysteresis: temp must drop this far below a threshold before stepping down
+    private val returnHysteresisC = 3.0f
+
     val isWarmupComplete: Boolean get() = warmupComplete
 
     val isCaptureBlocked: Boolean
@@ -51,6 +58,7 @@ class ThermalManager(context: Context) {
         frameCount = 0
         warmupComplete = false
         consecutiveSlowFrames = 0
+        smoothedTemp = null
         currentState = State.NORMAL
     }
 
@@ -83,8 +91,21 @@ class ThermalManager(context: Context) {
         return tempTenths / 10.0f
     }
 
+    private fun smoothTemperature(raw: Float): Float {
+        val prev = smoothedTemp
+        return if (prev == null) {
+            smoothedTemp = raw
+            raw
+        } else {
+            val smoothed = prev + tempEmaAlpha * (raw - prev)
+            smoothedTemp = smoothed
+            smoothed
+        }
+    }
+
     private fun evaluateState() {
-        val batteryC = pollBatteryTemperature()
+        val rawBatteryC = pollBatteryTemperature()
+        val batteryC = smoothTemperature(rawBatteryC)
 
         val warmThreshold = if (isTorchActive) 42.0f else 48.0f
         val hotThreshold = if (isTorchActive) 47.0f else 52.0f
@@ -94,17 +115,33 @@ class ThermalManager(context: Context) {
             batteryC >= criticalThreshold -> State.CRITICAL
             batteryC >= hotThreshold -> State.HOT
             batteryC >= warmThreshold -> State.WARM
-            consecutiveSlowFrames > 20 -> State.HOT
-            consecutiveSlowFrames > 10 -> State.WARM
+            // Slow frames alone need much higher thresholds — don't trigger unless sustained
+            consecutiveSlowFrames > 50 -> State.HOT
+            consecutiveSlowFrames > 30 -> State.WARM
             else -> State.NORMAL
         }
 
         // Hysteresis: prevent rapid state transitions
         val now = System.currentTimeMillis()
-        if (newState != currentState && now - lastStateChangeTime >= minStateDurationMs) {
-            currentState = newState
+        if (now - lastStateChangeTime < minStateDurationMs) return
+
+        val resolved = if (newState.ordinal < currentState.ordinal) {
+            // Stepping down: require temp to drop below threshold minus hysteresis
+            val requiredDrop = when (currentState) {
+                State.CRITICAL -> criticalThreshold - returnHysteresisC
+                State.HOT -> hotThreshold - returnHysteresisC
+                State.WARM -> warmThreshold - returnHysteresisC
+                State.NORMAL -> 0f
+            }
+            if (batteryC < requiredDrop) newState else currentState
+        } else {
+            newState
+        }
+
+        if (resolved != currentState) {
+            currentState = resolved
             lastStateChangeTime = now
-            Log.d(TAG, "Thermal state: $currentState (battery=${batteryC}°C, slowFrames=$consecutiveSlowFrames, torch=$isTorchActive)")
+            Log.d(TAG, "Thermal state: $currentState (battery=${batteryC}°C raw=${rawBatteryC}°C, slowFrames=$consecutiveSlowFrames, torch=$isTorchActive)")
             onStateChanged?.invoke(currentState)
         }
     }
