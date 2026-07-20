@@ -90,6 +90,12 @@ class DeveloperSwitch(
         }
     }
 
+    fun revertToggle() {
+        useRawSensor = false
+        toggle?.isChecked = false
+        prefs?.edit()?.putBoolean(PREF_RAW_TOGGLE, false)?.apply()
+    }
+
     companion object {
         private const val TAG = "DeveloperSwitch"
         private const val PREFS_NAME = "agxcam_developer"

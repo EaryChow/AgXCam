@@ -268,15 +268,18 @@ class LensManager(private val context: Context) {
         listener?.invoke(lens)
     }
 
-    fun getFrontLens(): LensInfo? =
-        _lenses.firstOrNull { it.facing == CameraCharacteristics.LENS_FACING_FRONT }
+    fun getFrontLens(rawOnly: Boolean = false): LensInfo? {
+        val front = _lenses.filter { it.facing == CameraCharacteristics.LENS_FACING_FRONT }
+        return if (rawOnly) front.firstOrNull { it.hasRawSensor } else front.firstOrNull()
+    }
 
-    fun getRearLenses(): List<LensInfo> {
-        return lensOrganization?.usableBack?.mapNotNull { profile ->
+    fun getRearLenses(rawOnly: Boolean = false): List<LensInfo> {
+        val rear = lensOrganization?.usableBack?.mapNotNull { profile ->
             _lenses.firstOrNull { it.cameraId == profile.id }
-        }?.sortedBy { it.focalLengthMm } 
+        }?.sortedBy { it.focalLengthMm }
         ?: _lenses.filter { it.facing == CameraCharacteristics.LENS_FACING_BACK }
             .sortedBy { it.focalLengthMm }
+        return if (rawOnly) rear.filter { it.hasRawSensor } else rear
     }
 
     fun getLensesForFacing(facing: Int): List<LensInfo> {
@@ -287,6 +290,20 @@ class LensManager(private val context: Context) {
         } else {
             getRearLenses()
         }
+    }
+
+    fun hasAnyRawLens(facing: Int): Boolean {
+        return getLensesForFacing(facing).any { it.hasRawSensor }
+    }
+
+    fun hasAnyRawLens(): Boolean {
+        return _lenses.any { it.hasRawSensor }
+    }
+
+    fun getClosestRawLens(referenceLens: LensInfo): LensInfo? {
+        val rawLenses = _lenses.filter { it.hasRawSensor && it.facing == referenceLens.facing }
+        if (rawLenses.isEmpty()) return null
+        return rawLenses.minByOrNull { kotlin.math.abs(it.focalLengthMm - referenceLens.focalLengthMm) }
     }
 
     fun getSensorActiveArraySize(lens: LensInfo): Rect {

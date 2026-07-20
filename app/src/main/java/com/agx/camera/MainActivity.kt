@@ -300,30 +300,46 @@ class MainActivity : AppCompatActivity() {
         developerSwitch = DeveloperSwitch(this) { useRaw ->
             CrashLogger.log(TAG, "Developer switch toggled: useRaw=$useRaw")
             Log.d(TAG, "Developer switch toggled: useRaw=$useRaw")
+
+            // Update front/rear toggle visibility based on RAW front lens support
+            updateFrontRearToggleVisibility(useRaw)
+
+            // If enabling RAW and current lens doesn't support RAW, switch to closest RAW lens
             if (useRaw) {
-                val lens = lensManager.activeLens ?: return@DeveloperSwitch
-                val previewSize = lensManager.getBestPreviewSize(lens, maxPreviewDimensions.first, maxPreviewDimensions.second)
-                camera2Manager.close()
-                camera2Manager.stopBackgroundThread()
-                previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
-                previewRenderer.targetAspectRatio = 0f
-                previewRenderer.enableBayerMode(previewSize.width, previewSize.height)
-                previewRenderer.start()
-                camera2Manager.startBackgroundThread()
-                camera2Manager.openCamera(lens, previewSize, 0, 0)
-            } else {
-                val lens = lensManager.activeLens ?: return@DeveloperSwitch
-                val previewSize = lensManager.getBestPreviewSize(lens, maxPreviewDimensions.first, maxPreviewDimensions.second)
-                camera2Manager.close()
-                camera2Manager.stopBackgroundThread()
-                previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
-                previewRenderer.targetAspectRatio = 0f
-                previewRenderer.disableBayerMode()
-                previewRenderer.start()
-                camera2Manager.startBackgroundThread()
-                camera2Manager.openCamera(lens, previewSize, 0, 0)
+                val currentLens = lensManager.activeLens
+                if (currentLens != null && !currentLens.hasRawSensor) {
+                    val rawLens = lensManager.getClosestRawLens(currentLens)
+                    if (rawLens != null) {
+                        Log.d(TAG, "RAW mode: switching from non-RAW lens ${currentLens.cameraId} to RAW lens ${rawLens.cameraId}")
+                        switchToLens(rawLens)
+                        developerSwitch.updateBannerForRawMode(true)
+                        return@DeveloperSwitch
+                    } else {
+                        developerSwitch.revertToggle()
+                        developerSwitch.showErrorBanner("No RAW-capable lens found")
+                        updateFrontRearToggleVisibility(false)
+                        buildLensSelectorUI()
+                        return@DeveloperSwitch
+                    }
+                }
             }
+
+            val lens = lensManager.activeLens ?: return@DeveloperSwitch
+            val previewSize = lensManager.getBestPreviewSize(lens, maxPreviewDimensions.first, maxPreviewDimensions.second)
+            camera2Manager.close()
+            camera2Manager.stopBackgroundThread()
+            previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
+            previewRenderer.targetAspectRatio = 0f
+            if (useRaw) {
+                previewRenderer.enableBayerMode(previewSize.width, previewSize.height)
+            } else {
+                previewRenderer.disableBayerMode()
+            }
+            previewRenderer.start()
+            camera2Manager.startBackgroundThread()
+            camera2Manager.openCamera(lens, previewSize, 0, 0)
             developerSwitch.updateBannerForRawMode(useRaw)
+            buildLensSelectorUI()
         }
         developerSwitch.init(
             findViewById(R.id.developer_raw_toggle_container),
@@ -422,11 +438,13 @@ class MainActivity : AppCompatActivity() {
         frontRearToggle.setOnClickListener {
             if (!cameraReady) return@setOnClickListener
             val current = lensManager.activeLens ?: return@setOnClickListener
+            val rawOnly = developerSwitch.useRawSensor
             val target = if (current.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_BACK) {
-                lensManager.getFrontLens()
+                lensManager.getFrontLens(rawOnly)
             } else {
                 val rearId = lensManager.lastUsedRearLensId
-                lensManager.lenses.firstOrNull { it.cameraId == rearId } ?: lensManager.getRearLenses().firstOrNull()
+                lensManager.lenses.firstOrNull { it.cameraId == rearId && (!rawOnly || it.hasRawSensor) }
+                    ?: lensManager.getRearLenses(rawOnly).firstOrNull()
             }
             if (target != null && target.cameraId != current.cameraId) {
                 switchToLens(target)
@@ -1563,7 +1581,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        developerSwitch.setRawSensorAvailable(primary.hasRawSensor)
+        developerSwitch.setRawSensorAvailable(lensManager.hasAnyRawLens())
     }
 
     private fun restartCamera() {
@@ -1688,32 +1706,74 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun createLensButton(lens: LensInfo, isActive: Boolean): TextView {
+        return TextView(this).apply {
+            text = lensManager.getLensLabel(lens.cameraId)
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 11f
+            setPadding(16, 8, 16, 8)
+            setBackgroundColor(if (isActive) 0xFF4488FF.toInt() else 0x66444444.toInt())
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginStart = 4 }
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { if (lens.cameraId != lensManager.activeLens?.cameraId) switchToLens(lens) }
+            setOnLongClickListener {
+                Toast.makeText(this@MainActivity, "${lens.label}: ${lens.focalLengthMm}mm, HW level ${lens.hardwareLevel}", Toast.LENGTH_SHORT).show()
+                true
+            }
+        }
+    }
+
+    private fun updateFrontRearToggleVisibility(rawMode: Boolean) {
+        val current = lensManager.activeLens
+        val hasAlternative = when (current?.facing) {
+            CameraCharacteristics.LENS_FACING_BACK ->
+                lensManager.getFrontLens(rawMode) != null
+            CameraCharacteristics.LENS_FACING_FRONT ->
+                lensManager.getRearLenses(rawMode).isNotEmpty()
+            else -> false
+        }
+        frontRearToggle.visibility = if (hasAlternative) View.VISIBLE else View.GONE
+    }
+
     private fun buildLensSelectorUI() {
         lensSelector.removeAllViews()
         val active = lensManager.activeLens ?: return
         val currentFacing = active.facing
-        val lensesForFacing = lensManager.getLensesForFacing(currentFacing)
-        val activeLensId = active.cameraId
+        val lensesForFacing = if (developerSwitch.useRawSensor) {
+            lensManager.getLensesForFacing(currentFacing).filter { it.hasRawSensor }
+        } else {
+            lensManager.getLensesForFacing(currentFacing)
+        }
+
+        // Defensive: if RAW mode is on but active lens is non-RAW, or no RAW lenses exist, revert
+        if (developerSwitch.useRawSensor && (!active.hasRawSensor || lensesForFacing.isEmpty())) {
+            Log.e(TAG, "buildLensSelectorUI: invariant violated — RAW active but active lens ${active.cameraId} hasRaw=${active.hasRawSensor}, rawLenses=${lensesForFacing.size}")
+            developerSwitch.revertToggle()
+            updateFrontRearToggleVisibility(false)
+            // Camera pipeline may still be in RAW mode — force back to YUV and restart
+            previewRenderer.disableBayerMode()
+            val fallback = lensManager.getLensesForFacing(currentFacing)
+            if (fallback.isEmpty()) return
+            for (lens in fallback) {
+                lensSelector.addView(createLensButton(lens, lens.cameraId == active.cameraId))
+            }
+            // Restart camera to ensure YUV pipeline
+            val previewSize = lensManager.getBestPreviewSize(active, maxPreviewDimensions.first, maxPreviewDimensions.second)
+            camera2Manager.close()
+            camera2Manager.stopBackgroundThread()
+            previewRenderer.stop()
+            previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
+            previewRenderer.targetAspectRatio = 0f
+            previewRenderer.start()
+            camera2Manager.startBackgroundThread()
+            camera2Manager.openCamera(active, previewSize, photoOutput.resolutionWidth, photoOutput.resolutionHeight)
+            previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
+            return
+        }
 
         for (lens in lensesForFacing) {
-            val zoomLabel = lensManager.getLensLabel(lens.cameraId)
-            val isActive = lens.cameraId == activeLensId
-            val btn = TextView(this).apply {
-                text = zoomLabel
-                setTextColor(0xFFFFFFFF.toInt())
-                textSize = 11f
-                setPadding(16, 8, 16, 8)
-                setBackgroundColor(if (isActive) 0xFF4488FF.toInt() else 0x66444444.toInt())
-                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginStart = 4 }
-                isClickable = true
-                isFocusable = true
-                setOnClickListener { if (lens.cameraId != activeLensId) switchToLens(lens) }
-                setOnLongClickListener {
-                    Toast.makeText(this@MainActivity, "${lens.label}: ${lens.focalLengthMm}mm, HW level ${lens.hardwareLevel}", Toast.LENGTH_SHORT).show()
-                    true
-                }
-            }
-            lensSelector.addView(btn)
+            lensSelector.addView(createLensButton(lens, lens.cameraId == active.cameraId))
         }
     }
 
