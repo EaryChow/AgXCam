@@ -179,20 +179,21 @@
             android:focusable="true" />
     </LinearLayout>
 
-    <!-- Bottom Controls -->
+    <!-- Bottom Controls — compact, no overlap -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
-        android:orientation="vertical"
-        android:padding="16dp">
+        android:orientation="vertical">
 
+        <!-- Zoom Row (only visible when >1 lens) -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:layout_marginBottom="8dp">
+            android:paddingHorizontal="12dp"
+            android:visibility="gone">
 
             <TextView
                 android:id="@+id/zoom_label"
@@ -217,173 +218,189 @@
                 android:visibility="gone" />
         </LinearLayout>
 
-        <LinearLayout
-            android:id="@+id/lens_selector"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center_horizontal"
-            android:orientation="horizontal"
-            android:layout_marginBottom="8dp" />
-
-        <!-- Auto/Manual Toggle -->
-        <TextView
-            android:id="@+id/am_toggle_button"
-            android:layout_width="wrap_content"
-            android:layout_height="36dp"
-            android:layout_gravity="start"
-            android:layout_marginBottom="8dp"
-            android:layout_marginStart="8dp"
-            android:background="#88333333"
-            android:gravity="center"
-            android:paddingHorizontal="16dp"
-            android:text="AUTO"
-            android:textColor="#FFFFFFFF"
-            android:textSize="12sp"
-            android:clickable="true"
-            android:focusable="true" />
-
-        <!-- Manual Exposure Overlays (always visible in bottom-left) -->
-        <LinearLayout
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="start|bottom"
-            android:orientation="vertical"
-            android:layout_marginBottom="8dp"
-            android:layout_marginStart="8dp">
-
-            <!-- ISO Overlay + Popup -->
-            <LinearLayout
-                android:id="@+id/iso_popup"
-                android:layout_width="200dp"
-                android:layout_height="wrap_content"
-                android:background="#DD222222"
-                android:padding="8dp"
-                android:visibility="gone"
-                android:orientation="vertical">
-                <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:text="ISO" android:textColor="#FFFFFFFF" android:textSize="12sp" android:gravity="center"
-                    android:layout_marginBottom="4dp"/>
-                <SeekBar android:id="@+id/iso_seekbar"
-                    android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:min="0" android:max="100" android:progress="50" />
-            </LinearLayout>
-
-            <TextView
-                android:id="@+id/iso_overlay"
-                android:layout_width="wrap_content"
-                android:layout_height="32dp"
-                android:background="#CC000000"
-                android:gravity="center"
-                android:paddingHorizontal="12dp"
-                android:text="ISO 200"
-                android:textColor="#FFFFFFFF"
-                android:textSize="12sp"
-                android:clickable="true"
-                android:focusable="true" />
-
-            <!-- Shutter Overlay + Popup -->
-            <LinearLayout
-                android:id="@+id/shutter_popup"
-                android:layout_width="200dp"
-                android:layout_height="wrap_content"
-                android:background="#DD222222"
-                android:padding="8dp"
-                android:visibility="gone"
-                android:orientation="vertical"
-                android:layout_marginTop="4dp">
-                <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:text="Shutter" android:textColor="#FFFFFFFF" android:textSize="12sp" android:gravity="center"
-                    android:layout_marginBottom="4dp"/>
-                <SeekBar android:id="@+id/shutter_seekbar"
-                    android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:min="0" android:max="100" android:progress="50" />
-            </LinearLayout>
-
-            <TextView
-                android:id="@+id/shutter_overlay"
-                android:layout_width="wrap_content"
-                android:layout_height="32dp"
-                android:layout_marginTop="4dp"
-                android:background="#CC000000"
-                android:gravity="center"
-                android:paddingHorizontal="12dp"
-                android:text="1/30s"
-                android:textColor="#FFFFFFFF"
-                android:textSize="12sp"
-                android:clickable="true"
-                android:focusable="true" />
-
-            <!-- EV Popup -->
-            <LinearLayout
-                android:id="@+id/ev_popup"
-                android:layout_width="200dp"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:background="#DD222222"
-                android:padding="8dp"
-                android:visibility="gone"
-                android:orientation="vertical">
-                <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:text="EV" android:textColor="#FFFFFFFF" android:textSize="12sp" android:gravity="center"
-                    android:layout_marginBottom="4dp"
-                    android:drawableStart="@drawable/ic_sun"
-                    android:drawablePadding="8dp" />
-                <SeekBar android:id="@+id/ev_seekbar"
-                    android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:min="0" android:max="100" android:progress="50" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <!-- Shutter Button -->
+        <!-- Controls row: thumbnail | AM | ISO | shutter label | lens buttons | cooldown -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_gravity="center_horizontal"
-            android:layout_marginBottom="8dp"
             android:orientation="horizontal"
-            android:gravity="center_vertical">
+            android:gravity="center_vertical"
+            android:paddingHorizontal="8dp">
 
             <ImageView
                 android:id="@+id/thumbnail_button"
-                android:layout_width="48dp"
-                android:layout_height="48dp"
-                android:layout_marginEnd="24dp"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
                 android:background="@drawable/thumbnail_placeholder"
                 android:scaleType="centerCrop"
                 android:clickable="true"
                 android:focusable="true" />
 
+            <TextView
+                android:id="@+id/am_toggle_button"
+                android:layout_width="wrap_content"
+                android:layout_height="28dp"
+                android:layout_marginStart="8dp"
+                android:background="#88333333"
+                android:gravity="center"
+                android:paddingHorizontal="8dp"
+                android:text="A"
+                android:textColor="#FFFFFFFF"
+                android:textSize="10sp"
+                android:clickable="true"
+                android:focusable="true" />
+
+            <TextView
+                android:id="@+id/iso_overlay"
+                android:layout_width="wrap_content"
+                android:layout_height="28dp"
+                android:layout_marginStart="6dp"
+                android:background="#CC000000"
+                android:gravity="center"
+                android:paddingHorizontal="8dp"
+                android:text="ISO"
+                android:textColor="#FFFFFFFF"
+                android:textSize="10sp"
+                android:clickable="true"
+                android:focusable="true" />
+
+            <TextView
+                android:id="@+id/shutter_overlay"
+                android:layout_width="wrap_content"
+                android:layout_height="28dp"
+                android:layout_marginStart="4dp"
+                android:background="#CC000000"
+                android:gravity="center"
+                android:paddingHorizontal="8dp"
+                android:text="1/30"
+                android:textColor="#FFFFFFFF"
+                android:textSize="10sp"
+                android:clickable="true"
+                android:focusable="true" />
+
+            <View
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:layout_weight="1" />
+
+            <LinearLayout
+                android:id="@+id/lens_selector"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical" />
+
+            <TextView
+                android:id="@+id/cooldown_text"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:gravity="center"
+                android:text=""
+                android:textColor="#FFFFAA00"
+                android:textSize="14sp"
+                android:visibility="gone"
+                android:background="#66000000" />
+        </LinearLayout>
+
+        <!-- Shutter button: centered at very bottom -->
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingBottom="2dp">
+
             <ImageView
                 android:id="@+id/shutter_button"
-                android:layout_width="72dp"
-                android:layout_height="72dp"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:layout_gravity="center"
                 android:src="@drawable/ic_shutter"
                 android:scaleType="centerInside"
                 android:background="?android:attr/selectableItemBackgroundBorderless"
                 android:clickable="true"
                 android:focusable="true" />
-
-            <TextView
-                android:id="@+id/cooldown_text"
-                android:layout_width="72dp"
-                android:layout_height="72dp"
-                android:gravity="center"
-                android:text=""
-                android:textColor="#FFFFAA00"
-                android:textSize="16sp"
-                android:visibility="gone"
-                android:background="#66000000" />
-        </LinearLayout>
+        </FrameLayout>
 
         <TextView
             android:id="@+id/shutter_state_label"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="center_horizontal"
+            android:layout_marginBottom="2dp"
             android:text=""
             android:textColor="#88FFFFFF"
-            android:textSize="10sp"
-            android:layout_marginBottom="4dp" />
+            android:textSize="10sp" />
+    </LinearLayout>
+
+    <!-- ISO Popup — thin vertical line + dot, positioned dynamically above label -->
+    <FrameLayout
+        android:id="@+id/iso_popup"
+        android:layout_width="48dp"
+        android:layout_height="140dp"
+        android:visibility="gone">
+
+        <View
+            android:layout_width="1dp"
+            android:layout_height="match_parent"
+            android:layout_gravity="center"
+            android:background="#44FFFFFF" />
+
+        <SeekBar
+            android:id="@+id/iso_seekbar"
+            android:layout_width="120dp"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:min="0"
+            android:max="100"
+            android:progress="50"
+            android:rotation="-90"
+            android:thumb="@drawable/seekbar_circle_thumb"
+            android:progressDrawable="@android:color/transparent"
+            android:splitTrack="false"
+            android:padding="16dp" />
+    </FrameLayout>
+
+    <!-- Shutter Popup — thin vertical line + dot, positioned dynamically above label -->
+    <FrameLayout
+        android:id="@+id/shutter_popup"
+        android:layout_width="48dp"
+        android:layout_height="140dp"
+        android:visibility="gone">
+
+        <View
+            android:layout_width="1dp"
+            android:layout_height="match_parent"
+            android:layout_gravity="center"
+            android:background="#44FFFFFF" />
+
+        <SeekBar
+            android:id="@+id/shutter_seekbar"
+            android:layout_width="120dp"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:min="0"
+            android:max="100"
+            android:progress="50"
+            android:rotation="-90"
+            android:thumb="@drawable/seekbar_circle_thumb"
+            android:progressDrawable="@android:color/transparent"
+            android:splitTrack="false"
+            android:padding="16dp" />
+    </FrameLayout>
+
+    <!-- EV Popup (appears near focus indicator) -->
+    <LinearLayout
+        android:id="@+id/ev_popup"
+        android:layout_width="180dp"
+        android:layout_height="wrap_content"
+        android:layout_gravity="start|bottom"
+        android:layout_marginStart="52dp"
+        android:layout_marginBottom="130dp"
+        android:background="#DD222222"
+        android:padding="8dp"
+        android:visibility="gone"
+        android:orientation="vertical">
+        <SeekBar android:id="@+id/ev_seekbar"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:min="0" android:max="100" android:progress="50" />
     </LinearLayout>
 
     <!-- Thermal Indicator (top right) -->

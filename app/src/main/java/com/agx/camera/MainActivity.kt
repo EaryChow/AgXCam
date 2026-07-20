@@ -100,10 +100,10 @@ class MainActivity : AppCompatActivity() {
     // Manual Exposure
     private lateinit var amToggleButton: TextView
     private lateinit var isoOverlay: TextView
-    private lateinit var isoPopup: LinearLayout
+    private lateinit var isoPopup: View
     private lateinit var isoSeekBar: SeekBar
     private lateinit var shutterOverlay: TextView
-    private lateinit var shutterPopup: LinearLayout
+    private lateinit var shutterPopup: View
     private lateinit var shutterSeekBar: SeekBar
     private lateinit var evPopup: LinearLayout
     private lateinit var evSeekBar: SeekBar
@@ -533,6 +533,10 @@ class MainActivity : AppCompatActivity() {
             scaleGestureDetector?.onTouchEvent(event) // always feed; never veto on its return value
 
             if (event.action == MotionEvent.ACTION_DOWN && cameraReady) {
+                if (isoPopupShowing || shutterPopupShowing || evPopupShowing) {
+                    dismissAllPopups()
+                    return@setOnTouchListener true
+                }
                 if (settingsPanelOpen) {
                     settingsPanelOpen = false
                     settingsPanel.visibility = View.GONE
@@ -1686,10 +1690,10 @@ class MainActivity : AppCompatActivity() {
             val btn = TextView(this).apply {
                 text = zoomLabel
                 setTextColor(0xFFFFFFFF.toInt())
-                textSize = 12f
-                setPadding(24, 12, 24, 12)
+                textSize = 11f
+                setPadding(16, 8, 16, 8)
                 setBackgroundColor(if (isActive) 0xFF4488FF.toInt() else 0x66444444.toInt())
-                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginStart = 8 }
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginStart = 4 }
                 isClickable = true
                 isFocusable = true
                 setOnClickListener { if (lens.cameraId != activeLensId) switchToLens(lens) }
@@ -2037,8 +2041,8 @@ override fun onResume() {
             updateManualModeUI()
         }
 
-        isoOverlay.setOnClickListener { togglePopup(isoPopup, isoPopupShowing) { isoPopupShowing = it } }
-        shutterOverlay.setOnClickListener { togglePopup(shutterPopup, shutterPopupShowing) { shutterPopupShowing = it } }
+        isoOverlay.setOnClickListener { togglePopup(isoPopup, isoOverlay, isoPopupShowing) { isoPopupShowing = it } }
+        shutterOverlay.setOnClickListener { togglePopup(shutterPopup, shutterOverlay, shutterPopupShowing) { shutterPopupShowing = it } }
 
         // Double-tap to reset to auto values
         isoOverlay.setOnTouchListener { _, event ->
@@ -2130,7 +2134,7 @@ override fun onResume() {
     }
 
     private fun updateManualModeUI() {
-        amToggleButton.text = if (isManualMode) "MANUAL" else "AUTO"
+        amToggleButton.text = if (isManualMode) "M" else "A"
         isoSeekBar.isEnabled = isManualMode
         shutterSeekBar.isEnabled = isManualMode
         isoSeekBar.alpha = if (isManualMode) 1.0f else 0.4f
@@ -2202,13 +2206,21 @@ override fun onResume() {
         else "1/${(1.0 / sec).toInt()}"
     }
 
-    private fun togglePopup(popup: View, isShowing: Boolean, onChange: (Boolean) -> Unit) {
+    private fun togglePopup(popup: View, anchor: View, isShowing: Boolean, onChange: (Boolean) -> Unit) {
         if (isShowing) {
             popup.visibility = View.GONE
             onChange(false)
         } else {
             dismissAllPopups()
             popup.visibility = View.VISIBLE
+            popup.post {
+                val anchorLoc = IntArray(2)
+                anchor.getLocationOnScreen(anchorLoc)
+                val popupW = popup.width
+                val popupH = popup.height
+                popup.x = anchorLoc[0].toFloat() + anchor.width / 2f - popupW / 2f
+                popup.y = anchorLoc[1].toFloat() - popupH - 8
+            }
             onChange(true)
         }
     }
