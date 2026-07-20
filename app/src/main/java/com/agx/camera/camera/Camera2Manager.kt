@@ -66,6 +66,10 @@ class Camera2Manager(private val context: Context) {
     private var meteringRegions: Array<MeteringRectangle>? = null
     private var focusLocked = false
 
+    // Device region capabilities (set on session open)
+    private var deviceMaxAfRegions = 0
+    private var deviceMaxAeRegions = 0
+
     // Manual exposure
     var isManualExposure = false
         private set
@@ -119,6 +123,8 @@ class Camera2Manager(private val context: Context) {
 
             val maxAfRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
             val maxAeRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0
+            deviceMaxAfRegions = maxAfRegions
+            deviceMaxAeRegions = maxAeRegions
             CrashLogger.log(TAG, "max AF regions=$maxAfRegions, max AE regions=$maxAeRegions")
 
             populateAeExposureRange(chars)
@@ -389,15 +395,21 @@ class Camera2Manager(private val context: Context) {
             cancelAfTrigger()
         }
 
-        isAfScanning = true
         meteringRegions = arrayOf(rect)
+
+        // If no AF regions, just apply AE regions directly without AF trigger
+        if (deviceMaxAfRegions == 0) {
+            if (deviceMaxAeRegions > 0) holdRegionFocus()
+            return
+        }
+
+        isAfScanning = true
 
         // Use repeating request with AF_TRIGGER_START
         val triggerRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addTarget(previewReader!!.surface)
             set(CaptureRequest.CONTROL_AF_MODE, safeAfMode(CaptureRequest.CONTROL_AF_MODE_AUTO))
-            set(CaptureRequest.CONTROL_AF_REGIONS, meteringRegions)
-            set(CaptureRequest.CONTROL_AE_REGIONS, meteringRegions)
+            setMeteringRegions(meteringRegions)
             set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
             if (isManualExposure) {
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
@@ -439,10 +451,11 @@ class Camera2Manager(private val context: Context) {
         // Switch to repeating request with AF_TRIGGER_CANCEL, no AE_LOCK
         val holdRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addTarget(previewReader!!.surface)
-            set(CaptureRequest.CONTROL_AF_MODE, safeAfMode(CaptureRequest.CONTROL_AF_MODE_AUTO))
-            set(CaptureRequest.CONTROL_AF_REGIONS, meteringRegions)
-            set(CaptureRequest.CONTROL_AE_REGIONS, meteringRegions)
-            set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
+            if (deviceMaxAfRegions > 0) {
+                set(CaptureRequest.CONTROL_AF_MODE, safeAfMode(CaptureRequest.CONTROL_AF_MODE_AUTO))
+                set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
+            }
+            setMeteringRegions(meteringRegions)
             if (isManualExposure) {
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
                 set(CaptureRequest.SENSOR_SENSITIVITY, currentManualIso)
@@ -515,21 +528,20 @@ class Camera2Manager(private val context: Context) {
         val camera = cameraDevice ?: run { CrashLogger.log(TAG, "applyPreviewRequest: cameraDevice null"); return }
         val session = captureSession ?: run { CrashLogger.log(TAG, "applyPreviewRequest: session null"); return }
 
-        // AF_MODE_AUTO with no AF_TRIGGER = lens holds position (focus lock).
-        // CONTINUOUS_PICTURE + regions = keeps refocusing inside the tapped area.
-        val afMode = safeAfMode(
-            if (focusLocked) CaptureRequest.CONTROL_AF_MODE_AUTO
-            else CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
-        )
+        val afMode = if (deviceMaxAfRegions > 0) {
+            safeAfMode(
+                if (focusLocked) CaptureRequest.CONTROL_AF_MODE_AUTO
+                else CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+            )
+        } else {
+            CaptureRequest.CONTROL_AF_MODE_OFF
+        }
 
         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addTarget(previewReader!!.surface)
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
             set(CaptureRequest.CONTROL_AWB_MODE, currentAwbMode)
-            meteringRegions?.let {
-                set(CaptureRequest.CONTROL_AF_REGIONS, it)
-                set(CaptureRequest.CONTROL_AE_REGIONS, it)
-            }
+            meteringRegions?.let { setMeteringRegions(it) }
             if (currentExposureComp != 0) {
                 set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, currentExposureComp)
             }
@@ -594,16 +606,17 @@ class Camera2Manager(private val context: Context) {
         val camera = cameraDevice ?: run { CrashLogger.log(TAG, "startAfAeLock: cameraDevice is null"); return }
         val session = captureSession ?: run { CrashLogger.log(TAG, "startAfAeLock: captureSession is null"); return }
 
-        val afMode = safeAfMode(CaptureRequest.CONTROL_AF_MODE_AUTO)
+        val afMode = if (deviceMaxAfRegions > 0) safeAfMode(CaptureRequest.CONTROL_AF_MODE_AUTO) else CaptureRequest.CONTROL_AF_MODE_OFF
         CrashLogger.log(TAG, "startAfAeLock afMode=$afMode rect=(${meteringRect.x},${meteringRect.y},${meteringRect.width},${meteringRect.height})")
 
         val triggerRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addTarget(previewReader!!.surface)
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
-            set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRect))
-            set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(meteringRect))
-            set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
-            set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
+            setMeteringRegions(arrayOf(meteringRect))
+            if (deviceMaxAfRegions > 0) {
+                set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
+                set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
+            }
             if (isManualExposure) {
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
                 set(CaptureRequest.SENSOR_SENSITIVITY, currentManualIso)
@@ -618,36 +631,38 @@ class Camera2Manager(private val context: Context) {
             session.setRepeatingRequest(triggerRequest.build(), object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
                     val afState = result.get(CaptureResult.CONTROL_AF_STATE)
-                    if (afState == null || afState == CaptureResult.CONTROL_AF_STATE_ACTIVE_SCAN) {
-                        return
-                    }
-                    try {
-                        session.stopRepeating()
-                    } catch (e: CameraAccessException) {
-                        Log.e(TAG, "stopRepeating failed: ${e.message}", e)
-                    }
-                    val lockRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                        addTarget(previewReader!!.surface)
-                        set(CaptureRequest.CONTROL_AF_MODE, afMode)
-                        set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRect))
-                        set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
-                        set(CaptureRequest.CONTROL_AE_LOCK, true)
-                        set(CaptureRequest.CONTROL_AWB_LOCK, true)
-                        if (isManualExposure) {
-                            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
-                            set(CaptureRequest.SENSOR_SENSITIVITY, currentManualIso)
-                            set(CaptureRequest.SENSOR_EXPOSURE_TIME, currentManualExposureNs)
-                            set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
-                        } else {
-                            currentFlashMode.applyToRequest(this, availableAeModes)
+                    if (afState != null && afState != CaptureResult.CONTROL_AF_STATE_ACTIVE_SCAN) {
+                        try {
+                            session.stopRepeating()
+                        } catch (e: CameraAccessException) {
+                            Log.e(TAG, "stopRepeating failed: ${e.message}", e)
                         }
+                        val lockRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                            addTarget(previewReader!!.surface)
+                            set(CaptureRequest.CONTROL_AF_MODE, afMode)
+                            if (deviceMaxAfRegions > 0) {
+                                set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRect))
+                                set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
+                            }
+                            setMeteringRegions(arrayOf(meteringRect))
+                            set(CaptureRequest.CONTROL_AE_LOCK, true)
+                            set(CaptureRequest.CONTROL_AWB_LOCK, true)
+                            if (isManualExposure) {
+                                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                                set(CaptureRequest.SENSOR_SENSITIVITY, currentManualIso)
+                                set(CaptureRequest.SENSOR_EXPOSURE_TIME, currentManualExposureNs)
+                                set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                            } else {
+                                currentFlashMode.applyToRequest(this, availableAeModes)
+                            }
+                        }
+                        try {
+                            session.setRepeatingRequest(lockRequest.build(), null, backgroundHandler)
+                        } catch (e: CameraAccessException) {
+                            Log.e(TAG, "lock setRepeatingRequest failed: ${e.message}", e)
+                        }
+                        onCaptureCompleted(result)
                     }
-                    try {
-                        session.setRepeatingRequest(lockRequest.build(), null, backgroundHandler)
-                    } catch (e: CameraAccessException) {
-                        Log.e(TAG, "lock setRepeatingRequest failed: ${e.message}", e)
-                    }
-                    onCaptureCompleted(result)
                 }
             }, handler)
             onCaptureStarted()
@@ -661,16 +676,17 @@ class Camera2Manager(private val context: Context) {
         val camera = cameraDevice ?: run { CrashLogger.log(TAG, "lockAeAf: cameraDevice is null"); return }
         val session = captureSession ?: run { CrashLogger.log(TAG, "lockAeAf: captureSession is null"); return }
 
-        val afMode = safeAfMode(CaptureRequest.CONTROL_AF_MODE_AUTO)
+        val afMode = if (deviceMaxAfRegions > 0) safeAfMode(CaptureRequest.CONTROL_AF_MODE_AUTO) else CaptureRequest.CONTROL_AF_MODE_OFF
         CrashLogger.log(TAG, "lockAeAf afMode=$afMode rect=(${meteringRect.x},${meteringRect.y},${meteringRect.width},${meteringRect.height})")
 
         val triggerRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addTarget(previewReader!!.surface)
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
-            set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRect))
-            set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(meteringRect))
-            set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
-            set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
+            setMeteringRegions(arrayOf(meteringRect))
+            if (deviceMaxAfRegions > 0) {
+                set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
+                set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
+            }
             if (isManualExposure) {
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
                 set(CaptureRequest.SENSOR_SENSITIVITY, currentManualIso)
@@ -696,8 +712,11 @@ class Camera2Manager(private val context: Context) {
                         val lockRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                             addTarget(previewReader!!.surface)
                             set(CaptureRequest.CONTROL_AF_MODE, afMode)
-                            set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRect))
-                            set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
+                            if (deviceMaxAfRegions > 0) {
+                                set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRect))
+                                set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
+                            }
+                            setMeteringRegions(arrayOf(meteringRect))
                             set(CaptureRequest.CONTROL_AE_LOCK, true)
                             set(CaptureRequest.CONTROL_AWB_LOCK, true)
                             if (isManualExposure) {
@@ -839,6 +858,11 @@ class Camera2Manager(private val context: Context) {
         if (CaptureRequest.CONTROL_AE_MODE_ON in availableAeModes) return CaptureRequest.CONTROL_AE_MODE_ON
         if (CaptureRequest.CONTROL_AE_MODE_OFF in availableAeModes) return CaptureRequest.CONTROL_AE_MODE_OFF
         return CaptureRequest.CONTROL_AE_MODE_OFF
+    }
+
+    private fun CaptureRequest.Builder.setMeteringRegions(regions: Array<MeteringRectangle>?) {
+        if (deviceMaxAfRegions > 0) set(CaptureRequest.CONTROL_AF_REGIONS, regions)
+        if (deviceMaxAeRegions > 0) set(CaptureRequest.CONTROL_AE_REGIONS, regions)
     }
 
     private val aeReadoutCallback = object : CameraCaptureSession.CaptureCallback() {

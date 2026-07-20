@@ -13,6 +13,7 @@ data class LensProfile(
     val hardwareLevel: Int,
     val focalLength: Float,
     val maxAfRegions: Int,
+    val maxAeRegions: Int,
     val hasContinuousAf: Boolean,
     val hasAutoAf: Boolean,
     val maxResolution: Size,
@@ -21,6 +22,8 @@ data class LensProfile(
 ) {
     fun isFixedFocus(): Boolean = minFocusDistance == 0.0f
     fun canTapToFocus(): Boolean = maxAfRegions > 0 && (hasAutoAf || hasContinuousAf)
+    fun canMeterExposure(): Boolean = maxAeRegions > 0
+    fun canTapToAdjust(): Boolean = canTapToFocus() || canMeterExposure()
 }
 
 object LensClassifier {
@@ -37,6 +40,7 @@ object LensClassifier {
             val focalLengths = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
             val focalLength = focalLengths?.firstOrNull() ?: 0f
             val maxAfRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
+            val maxAeRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0
             val afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: intArrayOf()
             val hasContinuousAf = afModes.contains(CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
             val hasAutoAf = afModes.contains(CaptureRequest.CONTROL_AF_MODE_AUTO)
@@ -48,7 +52,7 @@ object LensClassifier {
                 ?.maxByOrNull { it.width * it.height } ?: Size(0, 0)
 
             profiles.add(LensProfile(
-                id, facing, level, focalLength, maxAfRegions,
+                id, facing, level, focalLength, maxAfRegions, maxAeRegions,
                 hasContinuousAf, hasAutoAf, maxSize, hasFlash, minFocusDist
             ))
         }

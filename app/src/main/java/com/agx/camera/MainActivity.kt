@@ -1494,7 +1494,12 @@ class MainActivity : AppCompatActivity() {
                 updateManualControlRanges()
                 previewRenderer.requestRender()
                 // Initial tap-to-focus capability
-                currentLensCanTapToFocus = lensManager.getLensProfile(lensManager.activeLens?.cameraId ?: "")?.canTapToFocus() == true
+                val profile = lensManager.getLensProfile(lensManager.activeLens?.cameraId ?: "")
+                if (profile == null || !profile.canTapToAdjust()) {
+                    disableTapToFocus()
+                } else {
+                    enableTapToFocus()
+                }
                 // Initial focus indicator at center
                 val cx = textureView.width / 2f
                 val cy = textureView.height / 2f
@@ -1665,17 +1670,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onLensSwitched(lensId: String, profile: LensProfile?) {
-        if (profile == null || !profile.canTapToFocus()) {
+        if (profile == null || !profile.canTapToAdjust()) {
             val msg = when {
                 profile?.facing == CameraCharacteristics.LENS_FACING_FRONT ->
-                    "Front camera: fixed focus, tap-to-focus disabled"
+                    "Front camera: fixed focus, tap-to-adjust disabled"
                 LensClassifier.isAuxiliaryBackCamera(profile!!) ->
-                    "Auxiliary lens: tap-to-focus not supported"
-                else -> "This lens does not support tap-to-focus"
+                    "Auxiliary lens: tap-to-adjust not supported"
+                else -> "This lens does not support tap-to-adjust"
             }
             showLensWarning(msg)
             disableTapToFocus()
         } else {
+            if (!profile.canTapToFocus()) {
+                showLensWarning("Lens lacks autofocus — tap to adjust exposure only")
+            }
             enableTapToFocus()
         }
     }

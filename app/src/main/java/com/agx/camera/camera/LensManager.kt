@@ -141,6 +141,7 @@ class LensManager(private val context: Context) {
                 hardwareLevel = lens.hardwareLevel,
                 focalLength = lens.focalLengthMm,
                 maxAfRegions = maxAfRegions,
+                maxAeRegions = maxAeRegions,
                 hasContinuousAf = hasContinuousAf,
                 hasAutoAf = hasAutoAf,
                 maxResolution = maxSize,
@@ -312,8 +313,7 @@ class LensManager(private val context: Context) {
     fun getLensLabel(lensId: String): String = lensLabels[lensId] ?: "Unknown"
 
     fun canLensTapToFocus(lensId: String): Boolean {
-        return lensOrganization?.usableBack?.any { it.id == lensId } == true
-            || lensOrganization?.front?.any { it.id == lensId } == true
+        return getLensProfile(lensId)?.canTapToAdjust() == true
     }
 
     fun getLensProfile(lensId: String): LensProfile? {
