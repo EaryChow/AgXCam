@@ -1836,12 +1836,6 @@ override fun onResume() {
     }
 
     private fun updateThermalUI(state: ThermalManager.State) {
-        if (!thermalManager.isWarmupComplete) {
-            thermalIndicator.text = "Calibrating\u2026"
-            thermalIndicator.setTextColor(0xFFAAAAAA.toInt())
-            thermalIndicator.visibility = View.VISIBLE
-            return
-        }
 
         when (state) {
             ThermalManager.State.NORMAL -> {
