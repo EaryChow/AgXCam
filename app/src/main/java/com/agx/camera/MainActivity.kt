@@ -80,6 +80,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var frontRearToggle: ImageView
     private lateinit var zoomLabel: TextView
     private lateinit var zoomSlider: SeekBar
+    private lateinit var zoomRow: View
     private lateinit var lensSelector: LinearLayout
     private lateinit var settingsPanel: ScrollView
     private lateinit var finishingCaptureOverlay: TextView
@@ -197,7 +198,7 @@ class MainActivity : AppCompatActivity() {
 
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
+            v.setPadding(0, (systemBars.top * 0.7f).toInt(), 0, (systemBars.bottom * 0.7f).toInt())
             insets
         }
 
@@ -211,6 +212,7 @@ class MainActivity : AppCompatActivity() {
         frontRearToggle = findViewById(R.id.front_rear_toggle)
         zoomLabel = findViewById(R.id.zoom_label)
         zoomSlider = findViewById(R.id.zoom_slider)
+        zoomRow = findViewById(R.id.zoom_row)
         lensSelector = findViewById(R.id.lens_selector)
         settingsPanel = findViewById(R.id.settings_panel)
         finishingCaptureOverlay = findViewById(R.id.finishing_capture_overlay)
@@ -599,6 +601,7 @@ class MainActivity : AppCompatActivity() {
             zoomLabel.text = String.format("%.1fx", zoom)
             // Auto-hide zoom controls at 1.0x
             val show = zoom > 1.01f
+            zoomRow.visibility = if (show) View.VISIBLE else View.GONE
             zoomSlider.visibility = if (show) View.VISIBLE else View.GONE
             zoomLabel.visibility = if (show) View.VISIBLE else View.GONE
             // Keep focus region glued to indicator across zoom changes

@@ -119,65 +119,88 @@
     <!-- WB Popup -->
     <include layout="@layout/wb_popup" />
 
-    <!-- Top Controls Bar -->
-    <LinearLayout
-        android:layout_width="wrap_content"
+    <!-- Top Controls + Thermal share top edge via FrameLayout -->
+    <FrameLayout
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_gravity="top|start"
-        android:layout_marginStart="16dp"
-        android:layout_marginTop="40dp"
-        android:orientation="horizontal"
-        android:gravity="center_vertical">
+        android:layout_gravity="top"
+        android:clipChildren="false"
+        android:clipToPadding="false">
 
-        <ImageView
-            android:id="@+id/flash_button"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:background="#66000000"
-            android:padding="8dp"
-            android:src="@drawable/ic_flash_off"
-            android:scaleType="centerInside"
-            android:clickable="true"
-            android:focusable="true" />
+        <!-- Top icons: flash, wb, settings, camera switch -->
+        <LinearLayout
+            android:id="@+id/top_controls_row"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|start"
+            android:layout_marginStart="8dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
 
+            <ImageView
+                android:id="@+id/flash_button"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="#66000000"
+                android:padding="8dp"
+                android:src="@drawable/ic_flash_off"
+                android:scaleType="centerInside"
+                android:clickable="true"
+                android:focusable="true" />
+
+            <TextView
+                android:id="@+id/wb_button"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_marginStart="8dp"
+                android:background="#66000000"
+                android:gravity="center"
+                android:text="WB"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:clickable="true"
+                android:focusable="true" />
+
+            <ImageView
+                android:id="@+id/settings_button"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_marginStart="8dp"
+                android:background="#66000000"
+                android:padding="8dp"
+                android:src="@drawable/ic_settings_gear"
+                android:scaleType="centerInside"
+                android:clickable="true"
+                android:focusable="true" />
+
+            <ImageView
+                android:id="@+id/front_rear_toggle"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_marginStart="8dp"
+                android:background="#66000000"
+                android:padding="8dp"
+                android:src="@drawable/ic_camera_switch"
+                android:scaleType="centerInside"
+                android:clickable="true"
+                android:focusable="true" />
+        </LinearLayout>
+
+        <!-- Thermal Indicator: top right, same top edge as icons -->
         <TextView
-            android:id="@+id/wb_button"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:layout_marginStart="8dp"
+            android:id="@+id/thermal_indicator"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|end"
+            android:layout_marginEnd="8dp"
             android:background="#66000000"
-            android:gravity="center"
-            android:text="WB"
-            android:textColor="#FFFFFF"
-            android:textSize="12sp"
-            android:clickable="true"
-            android:focusable="true" />
-
-
-        <ImageView
-            android:id="@+id/settings_button"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:layout_marginStart="8dp"
-            android:background="#66000000"
-            android:padding="8dp"
-            android:src="@drawable/ic_settings_gear"
-            android:scaleType="centerInside"
-            android:clickable="true"
-            android:focusable="true" />
-
-        <ImageView
-            android:id="@+id/front_rear_toggle"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:layout_marginStart="8dp"
-            android:background="#66000000"
-            android:padding="8dp"
-            android:src="@drawable/ic_camera_switch"
-            android:scaleType="centerInside"
-            android:clickable="true"
-            android:focusable="true" />
-    </LinearLayout>
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="4dp"
+            android:text=""
+            android:textColor="#FFFFFFFF"
+            android:textSize="10sp"
+            android:visibility="gone" />
+    </FrameLayout>
 
     <!-- Bottom Controls — compact, no overlap -->
     <LinearLayout
@@ -188,6 +211,7 @@
 
         <!-- Zoom Row (only visible when >1 lens) -->
         <LinearLayout
+            android:id="@+id/zoom_row"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
@@ -218,100 +242,101 @@
                 android:visibility="gone" />
         </LinearLayout>
 
-        <!-- Controls row: thumbnail | AM | ISO | shutter label | lens buttons | cooldown -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:paddingHorizontal="8dp">
-
-            <ImageView
-                android:id="@+id/thumbnail_button"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
-                android:background="@drawable/thumbnail_placeholder"
-                android:scaleType="centerCrop"
-                android:clickable="true"
-                android:focusable="true" />
-
-            <TextView
-                android:id="@+id/am_toggle_button"
-                android:layout_width="wrap_content"
-                android:layout_height="28dp"
-                android:layout_marginStart="8dp"
-                android:background="#88333333"
-                android:gravity="center"
-                android:paddingHorizontal="8dp"
-                android:text="A"
-                android:textColor="#FFFFFFFF"
-                android:textSize="10sp"
-                android:clickable="true"
-                android:focusable="true" />
-
-            <TextView
-                android:id="@+id/iso_overlay"
-                android:layout_width="wrap_content"
-                android:layout_height="28dp"
-                android:layout_marginStart="6dp"
-                android:background="#CC000000"
-                android:gravity="center"
-                android:paddingHorizontal="8dp"
-                android:text="ISO"
-                android:textColor="#FFFFFFFF"
-                android:textSize="10sp"
-                android:clickable="true"
-                android:focusable="true" />
-
-            <TextView
-                android:id="@+id/shutter_overlay"
-                android:layout_width="wrap_content"
-                android:layout_height="28dp"
-                android:layout_marginStart="4dp"
-                android:background="#CC000000"
-                android:gravity="center"
-                android:paddingHorizontal="8dp"
-                android:text="1/30"
-                android:textColor="#FFFFFFFF"
-                android:textSize="10sp"
-                android:clickable="true"
-                android:focusable="true" />
-
-            <View
-                android:layout_width="0dp"
-                android:layout_height="0dp"
-                android:layout_weight="1" />
-
-            <LinearLayout
-                android:id="@+id/lens_selector"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical" />
-
-            <TextView
-                android:id="@+id/cooldown_text"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
-                android:gravity="center"
-                android:text=""
-                android:textColor="#FFFFAA00"
-                android:textSize="14sp"
-                android:visibility="gone"
-                android:background="#66000000" />
-        </LinearLayout>
-
-        <!-- Shutter button: centered at very bottom -->
+        <!-- Controls + Shutter share bottom edge via FrameLayout -->
         <FrameLayout
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingBottom="2dp">
+            android:layout_height="wrap_content">
 
+            <!-- Controls row: thumbnail | AM | ISO | shutter label | lens buttons | cooldown -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_gravity="bottom"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingHorizontal="8dp">
+
+                <ImageView
+                    android:id="@+id/thumbnail_button"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
+                    android:background="@drawable/ic_photo_placeholder"
+                    android:scaleType="centerCrop"
+                    android:clickable="true"
+                    android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/am_toggle_button"
+                    android:layout_width="wrap_content"
+                    android:layout_height="28dp"
+                    android:layout_marginStart="8dp"
+                    android:background="#88333333"
+                    android:gravity="center"
+                    android:paddingHorizontal="8dp"
+                    android:text="A"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="10sp"
+                    android:clickable="true"
+                    android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/iso_overlay"
+                    android:layout_width="wrap_content"
+                    android:layout_height="28dp"
+                    android:layout_marginStart="6dp"
+                    android:background="#CC000000"
+                    android:gravity="center"
+                    android:paddingHorizontal="8dp"
+                    android:text="ISO"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="10sp"
+                    android:clickable="true"
+                    android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/shutter_overlay"
+                    android:layout_width="wrap_content"
+                    android:layout_height="28dp"
+                    android:layout_marginStart="4dp"
+                    android:background="#CC000000"
+                    android:gravity="center"
+                    android:paddingHorizontal="8dp"
+                    android:text="1/30"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="10sp"
+                    android:clickable="true"
+                    android:focusable="true" />
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="0dp"
+                    android:layout_weight="1" />
+
+                <LinearLayout
+                    android:id="@+id/lens_selector"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical" />
+
+                <TextView
+                    android:id="@+id/cooldown_text"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
+                    android:gravity="center"
+                    android:text=""
+                    android:textColor="#FFFFAA00"
+                    android:textSize="14sp"
+                    android:visibility="gone"
+                    android:background="#66000000" />
+            </LinearLayout>
+
+            <!-- Shutter button: centered horizontally, baseline aligned with controls row -->
             <ImageView
                 android:id="@+id/shutter_button"
                 android:layout_width="64dp"
                 android:layout_height="64dp"
-                android:layout_gravity="center"
+                android:layout_gravity="center_horizontal|bottom"
                 android:src="@drawable/ic_shutter"
                 android:scaleType="centerInside"
                 android:background="?android:attr/selectableItemBackgroundBorderless"
@@ -402,22 +427,6 @@
             android:layout_width="match_parent" android:layout_height="wrap_content"
             android:min="0" android:max="100" android:progress="50" />
     </LinearLayout>
-
-    <!-- Thermal Indicator (top right) -->
-    <TextView
-        android:id="@+id/thermal_indicator"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|end"
-        android:layout_marginTop="40dp"
-        android:layout_marginEnd="16dp"
-        android:background="#66000000"
-        android:paddingHorizontal="8dp"
-        android:paddingVertical="4dp"
-        android:text=""
-        android:textColor="#FFFFFFFF"
-        android:textSize="10sp"
-        android:visibility="gone" />
 
     <!-- Settings Panel (slides from right) -->
     <ScrollView
