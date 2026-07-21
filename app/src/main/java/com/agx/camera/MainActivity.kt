@@ -238,7 +238,7 @@ class MainActivity : AppCompatActivity() {
         insetPurGLabel = findViewById(R.id.inset_pur_g_label); insetPurGSlider = findViewById(R.id.inset_pur_g_slider)
         insetPurBLabel = findViewById(R.id.inset_pur_b_label); insetPurBSlider = findViewById(R.id.inset_pur_b_slider)
 
-        outsetSection = findViewById(R.id.outset_section)
+        outsetSection = findViewById(R.id.post_section)
         outsetRotRLabel = findViewById(R.id.outset_rot_r_label); outsetRotRSlider = findViewById(R.id.outset_rot_r_slider)
         outsetRotGLabel = findViewById(R.id.outset_rot_g_label); outsetRotGSlider = findViewById(R.id.outset_rot_g_slider)
         outsetRotBLabel = findViewById(R.id.outset_rot_b_label); outsetRotBSlider = findViewById(R.id.outset_rot_b_slider)
@@ -722,133 +722,133 @@ class MainActivity : AppCompatActivity() {
         fun progressToRot(p: Float) = (p / 524f * rotRange * 2) - rotRange
 
         insetRotRSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
-            agxParams = agxParams.copy(rgbRotation = floatArrayOf(progressToRot(v.toFloat()), agxParams.rgbRotation[1], agxParams.rgbRotation[2]))
-            insetRotRLabel.text = String.format("RGB Rot R  %.3f", agxParams.rgbRotation[0])
+            agxParams = agxParams.copy(rotation = floatArrayOf(progressToRot(v.toFloat()), agxParams.rotation[1], agxParams.rotation[2]))
+            insetRotRLabel.text = String.format("Red Rotation  %.3f", agxParams.rotation[0])
             uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(insetRotRSlider, rotToProgress(AgxParams().rgbRotation[0])) {
-            agxParams = agxParams.copy(rgbRotation = floatArrayOf(AgxParams().rgbRotation[0], agxParams.rgbRotation[1], agxParams.rgbRotation[2]))
-            insetRotRLabel.text = String.format("RGB Rot R  %.3f", agxParams.rgbRotation[0])
+        setupSliderDoubleClickReset(insetRotRSlider, rotToProgress(AgxParams().rotation[0])) {
+            agxParams = agxParams.copy(rotation = floatArrayOf(AgxParams().rotation[0], agxParams.rotation[1], agxParams.rotation[2]))
+            insetRotRLabel.text = String.format("Red Rotation  %.3f", agxParams.rotation[0])
             uploadAgxUniforms()
         }
         insetRotGSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
-            agxParams = agxParams.copy(rgbRotation = floatArrayOf(agxParams.rgbRotation[0], progressToRot(v.toFloat()), agxParams.rgbRotation[2]))
-            insetRotGLabel.text = String.format("RGB Rot G  %.3f", agxParams.rgbRotation[1])
+            agxParams = agxParams.copy(rotation = floatArrayOf(agxParams.rotation[0], progressToRot(v.toFloat()), agxParams.rotation[2]))
+            insetRotGLabel.text = String.format("Green Rotation  %.3f", agxParams.rotation[1])
             uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(insetRotGSlider, rotToProgress(AgxParams().rgbRotation[1])) {
-            agxParams = agxParams.copy(rgbRotation = floatArrayOf(agxParams.rgbRotation[0], AgxParams().rgbRotation[1], agxParams.rgbRotation[2]))
-            insetRotGLabel.text = String.format("RGB Rot G  %.3f", agxParams.rgbRotation[1])
+        setupSliderDoubleClickReset(insetRotGSlider, rotToProgress(AgxParams().rotation[1])) {
+            agxParams = agxParams.copy(rotation = floatArrayOf(agxParams.rotation[0], AgxParams().rotation[1], agxParams.rotation[2]))
+            insetRotGLabel.text = String.format("Green Rotation  %.3f", agxParams.rotation[1])
             uploadAgxUniforms()
         }
         insetRotBSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
-            agxParams = agxParams.copy(rgbRotation = floatArrayOf(agxParams.rgbRotation[0], agxParams.rgbRotation[1], progressToRot(v.toFloat())))
-            insetRotBLabel.text = String.format("RGB Rot B  %.3f", agxParams.rgbRotation[2])
+            agxParams = agxParams.copy(rotation = floatArrayOf(agxParams.rotation[0], agxParams.rotation[1], progressToRot(v.toFloat())))
+            insetRotBLabel.text = String.format("Blue Rotation  %.3f", agxParams.rotation[2])
             uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(insetRotBSlider, rotToProgress(AgxParams().rgbRotation[2])) {
-            agxParams = agxParams.copy(rgbRotation = floatArrayOf(agxParams.rgbRotation[0], agxParams.rgbRotation[1], AgxParams().rgbRotation[2]))
-            insetRotBLabel.text = String.format("RGB Rot B  %.3f", agxParams.rgbRotation[2])
+        setupSliderDoubleClickReset(insetRotBSlider, rotToProgress(AgxParams().rotation[2])) {
+            agxParams = agxParams.copy(rotation = floatArrayOf(agxParams.rotation[0], agxParams.rotation[1], AgxParams().rotation[2]))
+            insetRotBLabel.text = String.format("Blue Rotation  %.3f", agxParams.rotation[2])
             uploadAgxUniforms()
         }
 
         insetPurRSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
-            agxParams = agxParams.copy(purityAttenuation = floatArrayOf(v.toFloat(), agxParams.purityAttenuation[1], agxParams.purityAttenuation[2]))
-            insetPurRLabel.text = String.format("Purity R  %.1f", agxParams.purityAttenuation[0])
+            agxParams = agxParams.copy(attenuation = floatArrayOf(v.toFloat(), agxParams.attenuation[1], agxParams.attenuation[2]))
+            insetPurRLabel.text = String.format("Attenuation R  %.1f", agxParams.attenuation[0])
             uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(insetPurRSlider, AgxParams().purityAttenuation[0].toInt()) {
-            agxParams = agxParams.copy(purityAttenuation = floatArrayOf(AgxParams().purityAttenuation[0], agxParams.purityAttenuation[1], agxParams.purityAttenuation[2]))
-            insetPurRLabel.text = String.format("Purity R  %.1f", agxParams.purityAttenuation[0])
+        setupSliderDoubleClickReset(insetPurRSlider, AgxParams().attenuation[0].toInt()) {
+            agxParams = agxParams.copy(attenuation = floatArrayOf(AgxParams().attenuation[0], agxParams.attenuation[1], agxParams.attenuation[2]))
+            insetPurRLabel.text = String.format("Attenuation R  %.1f", agxParams.attenuation[0])
             uploadAgxUniforms()
         }
         insetPurGSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
-            agxParams = agxParams.copy(purityAttenuation = floatArrayOf(agxParams.purityAttenuation[0], v.toFloat(), agxParams.purityAttenuation[2]))
-            insetPurGLabel.text = String.format("Purity G  %.1f", agxParams.purityAttenuation[1])
+            agxParams = agxParams.copy(attenuation = floatArrayOf(agxParams.attenuation[0], v.toFloat(), agxParams.attenuation[2]))
+            insetPurGLabel.text = String.format("Attenuation G  %.1f", agxParams.attenuation[1])
             uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(insetPurGSlider, AgxParams().purityAttenuation[1].toInt()) {
-            agxParams = agxParams.copy(purityAttenuation = floatArrayOf(agxParams.purityAttenuation[0], AgxParams().purityAttenuation[1], agxParams.purityAttenuation[2]))
-            insetPurGLabel.text = String.format("Purity G  %.1f", agxParams.purityAttenuation[1])
+        setupSliderDoubleClickReset(insetPurGSlider, AgxParams().attenuation[1].toInt()) {
+            agxParams = agxParams.copy(attenuation = floatArrayOf(agxParams.attenuation[0], AgxParams().attenuation[1], agxParams.attenuation[2]))
+            insetPurGLabel.text = String.format("Attenuation G  %.1f", agxParams.attenuation[1])
             uploadAgxUniforms()
         }
         insetPurBSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
-            agxParams = agxParams.copy(purityAttenuation = floatArrayOf(agxParams.purityAttenuation[0], agxParams.purityAttenuation[1], v.toFloat()))
-            insetPurBLabel.text = String.format("Purity B  %.1f", agxParams.purityAttenuation[2])
+            agxParams = agxParams.copy(attenuation = floatArrayOf(agxParams.attenuation[0], agxParams.attenuation[1], v.toFloat()))
+            insetPurBLabel.text = String.format("Attenuation B  %.1f", agxParams.attenuation[2])
             uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(insetPurBSlider, AgxParams().purityAttenuation[2].toInt()) {
-            agxParams = agxParams.copy(purityAttenuation = floatArrayOf(agxParams.purityAttenuation[0], agxParams.purityAttenuation[1], AgxParams().purityAttenuation[2]))
-            insetPurBLabel.text = String.format("Purity B  %.1f", agxParams.purityAttenuation[2])
+        setupSliderDoubleClickReset(insetPurBSlider, AgxParams().attenuation[2].toInt()) {
+            agxParams = agxParams.copy(attenuation = floatArrayOf(agxParams.attenuation[0], agxParams.attenuation[1], AgxParams().attenuation[2]))
+            insetPurBLabel.text = String.format("Attenuation B  %.1f", agxParams.attenuation[2])
             uploadAgxUniforms()
         }
 
         outsetRotRSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
-            agxParams = agxParams.copy(reverseRgbRotation = floatArrayOf(progressToRot(v.toFloat()), agxParams.reverseRgbRotation[1], agxParams.reverseRgbRotation[2]))
-            outsetRotRLabel.text = String.format("Rev Rot R  %.3f", agxParams.reverseRgbRotation[0])
+            agxParams = agxParams.copy(reverseRotation = floatArrayOf(progressToRot(v.toFloat()), agxParams.reverseRotation[1], agxParams.reverseRotation[2]))
+            outsetRotRLabel.text = String.format("Reverse R  %.3f", agxParams.reverseRotation[0])
             uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(outsetRotRSlider, rotToProgress(AgxParams().reverseRgbRotation[0])) {
-            agxParams = agxParams.copy(reverseRgbRotation = floatArrayOf(AgxParams().reverseRgbRotation[0], agxParams.reverseRgbRotation[1], agxParams.reverseRgbRotation[2]))
-            outsetRotRLabel.text = String.format("Rev Rot R  %.3f", agxParams.reverseRgbRotation[0])
+        setupSliderDoubleClickReset(outsetRotRSlider, rotToProgress(AgxParams().reverseRotation[0])) {
+            agxParams = agxParams.copy(reverseRotation = floatArrayOf(AgxParams().reverseRotation[0], agxParams.reverseRotation[1], agxParams.reverseRotation[2]))
+            outsetRotRLabel.text = String.format("Reverse R  %.3f", agxParams.reverseRotation[0])
             uploadAgxUniforms()
         }
         outsetRotGSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
-            agxParams = agxParams.copy(reverseRgbRotation = floatArrayOf(agxParams.reverseRgbRotation[0], progressToRot(v.toFloat()), agxParams.reverseRgbRotation[2]))
-            outsetRotGLabel.text = String.format("Rev Rot G  %.3f", agxParams.reverseRgbRotation[1])
+            agxParams = agxParams.copy(reverseRotation = floatArrayOf(agxParams.reverseRotation[0], progressToRot(v.toFloat()), agxParams.reverseRotation[2]))
+            outsetRotGLabel.text = String.format("Reverse G  %.3f", agxParams.reverseRotation[1])
             uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(outsetRotGSlider, rotToProgress(AgxParams().reverseRgbRotation[1])) {
-            agxParams = agxParams.copy(reverseRgbRotation = floatArrayOf(agxParams.reverseRgbRotation[0], AgxParams().reverseRgbRotation[1], agxParams.reverseRgbRotation[2]))
-            outsetRotGLabel.text = String.format("Rev Rot G  %.3f", agxParams.reverseRgbRotation[1])
+        setupSliderDoubleClickReset(outsetRotGSlider, rotToProgress(AgxParams().reverseRotation[1])) {
+            agxParams = agxParams.copy(reverseRotation = floatArrayOf(agxParams.reverseRotation[0], AgxParams().reverseRotation[1], agxParams.reverseRotation[2]))
+            outsetRotGLabel.text = String.format("Reverse G  %.3f", agxParams.reverseRotation[1])
             uploadAgxUniforms()
         }
         outsetRotBSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
-            agxParams = agxParams.copy(reverseRgbRotation = floatArrayOf(agxParams.reverseRgbRotation[0], agxParams.reverseRgbRotation[1], progressToRot(v.toFloat())))
-            outsetRotBLabel.text = String.format("Rev Rot B  %.3f", agxParams.reverseRgbRotation[2])
+            agxParams = agxParams.copy(reverseRotation = floatArrayOf(agxParams.reverseRotation[0], agxParams.reverseRotation[1], progressToRot(v.toFloat())))
+            outsetRotBLabel.text = String.format("Reverse B  %.3f", agxParams.reverseRotation[2])
             uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(outsetRotBSlider, rotToProgress(AgxParams().reverseRgbRotation[2])) {
-            agxParams = agxParams.copy(reverseRgbRotation = floatArrayOf(agxParams.reverseRgbRotation[0], agxParams.reverseRgbRotation[1], AgxParams().reverseRgbRotation[2]))
-            outsetRotBLabel.text = String.format("Rev Rot B  %.3f", agxParams.reverseRgbRotation[2])
+        setupSliderDoubleClickReset(outsetRotBSlider, rotToProgress(AgxParams().reverseRotation[2])) {
+            agxParams = agxParams.copy(reverseRotation = floatArrayOf(agxParams.reverseRotation[0], agxParams.reverseRotation[1], AgxParams().reverseRotation[2]))
+            outsetRotBLabel.text = String.format("Reverse B  %.3f", agxParams.reverseRotation[2])
             uploadAgxUniforms()
         }
 
         outsetPurRSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
-            agxParams = agxParams.copy(restorePurity = floatArrayOf(v.toFloat(), agxParams.restorePurity[1], agxParams.restorePurity[2]))
-            outsetPurRLabel.text = String.format("Restore R  %.1f", agxParams.restorePurity[0])
+            agxParams = agxParams.copy(purityBoost = floatArrayOf(v.toFloat(), agxParams.purityBoost[1], agxParams.purityBoost[2]))
+            outsetPurRLabel.text = String.format("Purity Boost R  %.1f", agxParams.purityBoost[0])
             uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(outsetPurRSlider, AgxParams().restorePurity[0].toInt()) {
-            agxParams = agxParams.copy(restorePurity = floatArrayOf(AgxParams().restorePurity[0], agxParams.restorePurity[1], agxParams.restorePurity[2]))
-            outsetPurRLabel.text = String.format("Restore R  %.1f", agxParams.restorePurity[0])
+        setupSliderDoubleClickReset(outsetPurRSlider, AgxParams().purityBoost[0].toInt()) {
+            agxParams = agxParams.copy(purityBoost = floatArrayOf(AgxParams().purityBoost[0], agxParams.purityBoost[1], agxParams.purityBoost[2]))
+            outsetPurRLabel.text = String.format("Purity Boost R  %.1f", agxParams.purityBoost[0])
             uploadAgxUniforms()
         }
         outsetPurGSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
-            agxParams = agxParams.copy(restorePurity = floatArrayOf(agxParams.restorePurity[0], v.toFloat(), agxParams.restorePurity[2]))
-            outsetPurGLabel.text = String.format("Restore G  %.1f", agxParams.restorePurity[1])
+            agxParams = agxParams.copy(purityBoost = floatArrayOf(agxParams.purityBoost[0], v.toFloat(), agxParams.purityBoost[2]))
+            outsetPurGLabel.text = String.format("Purity Boost G  %.1f", agxParams.purityBoost[1])
             uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(outsetPurGSlider, AgxParams().restorePurity[1].toInt()) {
-            agxParams = agxParams.copy(restorePurity = floatArrayOf(agxParams.restorePurity[0], AgxParams().restorePurity[1], agxParams.restorePurity[2]))
-            outsetPurGLabel.text = String.format("Restore G  %.1f", agxParams.restorePurity[1])
+        setupSliderDoubleClickReset(outsetPurGSlider, AgxParams().purityBoost[1].toInt()) {
+            agxParams = agxParams.copy(purityBoost = floatArrayOf(agxParams.purityBoost[0], AgxParams().purityBoost[1], agxParams.purityBoost[2]))
+            outsetPurGLabel.text = String.format("Purity Boost G  %.1f", agxParams.purityBoost[1])
             uploadAgxUniforms()
         }
         outsetPurBSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
-            agxParams = agxParams.copy(restorePurity = floatArrayOf(agxParams.restorePurity[0], agxParams.restorePurity[1], v.toFloat()))
-            outsetPurBLabel.text = String.format("Restore B  %.1f", agxParams.restorePurity[2])
+            agxParams = agxParams.copy(purityBoost = floatArrayOf(agxParams.purityBoost[0], agxParams.purityBoost[1], v.toFloat()))
+            outsetPurBLabel.text = String.format("Purity Boost B  %.1f", agxParams.purityBoost[2])
             uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(outsetPurBSlider, AgxParams().restorePurity[2].toInt()) {
-            agxParams = agxParams.copy(restorePurity = floatArrayOf(agxParams.restorePurity[0], agxParams.restorePurity[1], AgxParams().restorePurity[2]))
-            outsetPurBLabel.text = String.format("Restore B  %.1f", agxParams.restorePurity[2])
+        setupSliderDoubleClickReset(outsetPurBSlider, AgxParams().purityBoost[2].toInt()) {
+            agxParams = agxParams.copy(purityBoost = floatArrayOf(agxParams.purityBoost[0], agxParams.purityBoost[1], AgxParams().purityBoost[2]))
+            outsetPurBLabel.text = String.format("Purity Boost B  %.1f", agxParams.purityBoost[2])
             uploadAgxUniforms()
         }
 
         copyInsetBtn.setOnClickListener {
             agxParams = agxParams.copy(
-                reverseRgbRotation = agxParams.rgbRotation.copyOf(),
-                restorePurity = agxParams.purityAttenuation.copyOf()
+                reverseRotation = agxParams.rotation.copyOf(),
+                purityBoost = agxParams.attenuation.copyOf()
             )
             syncOutsetSliders()
             uploadAgxUniforms()
@@ -1046,37 +1046,37 @@ class MainActivity : AppCompatActivity() {
     private fun syncInsetSliders() {
         val rotRange = 0.5236f
         fun rotToProgress(v: Float) = ((v + rotRange) / (rotRange * 2) * 524).toInt().coerceIn(0, 524)
-        insetRotRSlider.progress = rotToProgress(agxParams.rgbRotation[0])
-        insetRotRLabel.text = String.format("RGB Rot R  %.3f", agxParams.rgbRotation[0])
-        insetRotGSlider.progress = rotToProgress(agxParams.rgbRotation[1])
-        insetRotGLabel.text = String.format("RGB Rot G  %.3f", agxParams.rgbRotation[1])
-        insetRotBSlider.progress = rotToProgress(agxParams.rgbRotation[2])
-        insetRotBLabel.text = String.format("RGB Rot B  %.3f", agxParams.rgbRotation[2])
+        insetRotRSlider.progress = rotToProgress(agxParams.rotation[0])
+        insetRotRLabel.text = String.format("Red Rotation  %.3f", agxParams.rotation[0])
+        insetRotGSlider.progress = rotToProgress(agxParams.rotation[1])
+        insetRotGLabel.text = String.format("Green Rotation  %.3f", agxParams.rotation[1])
+        insetRotBSlider.progress = rotToProgress(agxParams.rotation[2])
+        insetRotBLabel.text = String.format("Blue Rotation  %.3f", agxParams.rotation[2])
 
-        insetPurRSlider.progress = agxParams.purityAttenuation[0].toInt().coerceIn(0, 60)
-        insetPurRLabel.text = String.format("Purity R  %.1f", agxParams.purityAttenuation[0])
-        insetPurGSlider.progress = agxParams.purityAttenuation[1].toInt().coerceIn(0, 60)
-        insetPurGLabel.text = String.format("Purity G  %.1f", agxParams.purityAttenuation[1])
-        insetPurBSlider.progress = agxParams.purityAttenuation[2].toInt().coerceIn(0, 60)
-        insetPurBLabel.text = String.format("Purity B  %.1f", agxParams.purityAttenuation[2])
+        insetPurRSlider.progress = agxParams.attenuation[0].toInt().coerceIn(0, 60)
+        insetPurRLabel.text = String.format("Attenuation R  %.1f", agxParams.attenuation[0])
+        insetPurGSlider.progress = agxParams.attenuation[1].toInt().coerceIn(0, 60)
+        insetPurGLabel.text = String.format("Attenuation G  %.1f", agxParams.attenuation[1])
+        insetPurBSlider.progress = agxParams.attenuation[2].toInt().coerceIn(0, 60)
+        insetPurBLabel.text = String.format("Attenuation B  %.1f", agxParams.attenuation[2])
     }
 
     private fun syncOutsetSliders() {
         val rotRange = 0.5236f
         fun rotToProgress(v: Float) = ((v + rotRange) / (rotRange * 2) * 524).toInt().coerceIn(0, 524)
-        outsetRotRSlider.progress = rotToProgress(agxParams.reverseRgbRotation[0])
-        outsetRotRLabel.text = String.format("Rev Rot R  %.3f", agxParams.reverseRgbRotation[0])
-        outsetRotGSlider.progress = rotToProgress(agxParams.reverseRgbRotation[1])
-        outsetRotGLabel.text = String.format("Rev Rot G  %.3f", agxParams.reverseRgbRotation[1])
-        outsetRotBSlider.progress = rotToProgress(agxParams.reverseRgbRotation[2])
-        outsetRotBLabel.text = String.format("Rev Rot B  %.3f", agxParams.reverseRgbRotation[2])
+        outsetRotRSlider.progress = rotToProgress(agxParams.reverseRotation[0])
+        outsetRotRLabel.text = String.format("Reverse R  %.3f", agxParams.reverseRotation[0])
+        outsetRotGSlider.progress = rotToProgress(agxParams.reverseRotation[1])
+        outsetRotGLabel.text = String.format("Reverse G  %.3f", agxParams.reverseRotation[1])
+        outsetRotBSlider.progress = rotToProgress(agxParams.reverseRotation[2])
+        outsetRotBLabel.text = String.format("Reverse B  %.3f", agxParams.reverseRotation[2])
 
-        outsetPurRSlider.progress = agxParams.restorePurity[0].toInt().coerceIn(0, 60)
-        outsetPurRLabel.text = String.format("Restore R  %.1f", agxParams.restorePurity[0])
-        outsetPurGSlider.progress = agxParams.restorePurity[1].toInt().coerceIn(0, 60)
-        outsetPurGLabel.text = String.format("Restore G  %.1f", agxParams.restorePurity[1])
-        outsetPurBSlider.progress = agxParams.restorePurity[2].toInt().coerceIn(0, 60)
-        outsetPurBLabel.text = String.format("Restore B  %.1f", agxParams.restorePurity[2])
+        outsetPurRSlider.progress = agxParams.purityBoost[0].toInt().coerceIn(0, 60)
+        outsetPurRLabel.text = String.format("Purity Boost R  %.1f", agxParams.purityBoost[0])
+        outsetPurGSlider.progress = agxParams.purityBoost[1].toInt().coerceIn(0, 60)
+        outsetPurGLabel.text = String.format("Purity Boost G  %.1f", agxParams.purityBoost[1])
+        outsetPurBSlider.progress = agxParams.purityBoost[2].toInt().coerceIn(0, 60)
+        outsetPurBLabel.text = String.format("Purity Boost B  %.1f", agxParams.purityBoost[2])
     }
 
     private fun syncWbSliders() {
@@ -1305,6 +1305,7 @@ class MainActivity : AppCompatActivity() {
         val fluorescentBtn = wbPopup.findViewById<TextView>(R.id.wb_fluorescent)
         val twilightBtn = wbPopup.findViewById<TextView>(R.id.wb_twilight)
         val shadeBtn = wbPopup.findViewById<TextView>(R.id.wb_shade)
+        val kelvinBtn = wbPopup.findViewById<TextView>(R.id.wb_kelvin)
 
         val clickListener = View.OnClickListener { v ->
             val mode = when (v.id) {
@@ -1324,6 +1325,15 @@ class MainActivity : AppCompatActivity() {
                 syncWbSliders()
                 uploadAgxUniforms()
             }
+            wbPopup.visibility = View.GONE
+        }
+
+        kelvinBtn.setOnClickListener {
+            camera2Manager.setWhiteBalanceMode(android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_OFF)
+            currentWbMode = WhiteBalanceMode.KELVIN
+            updateWbUI()
+            syncWbSliders()
+            uploadAgxUniforms()
             wbPopup.visibility = View.GONE
         }
 
@@ -1348,6 +1358,8 @@ class MainActivity : AppCompatActivity() {
         ).forEach { (id, mode) ->
             wbPopup.findViewById<TextView>(id).visibility = if (mode in supported) View.VISIBLE else View.GONE
         }
+        // Kelvin is always available (software WB, no camera mode needed)
+        kelvinBtn.visibility = View.VISIBLE
     }
 
     private fun setupPinchZoom() {
@@ -1786,10 +1798,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun uploadAgxUniforms() {
+        // For YUV path: camera already handles CCM/AWB, so AUTO is identity.
+        // KELVIN applies only the relative chromatic adaptation (D65 → target),
+        // not the absolute xyzToRGB conversion which is for raw sensor data.
         val sceneLinearTo709 = when (currentWbMode) {
-            WhiteBalanceMode.AUTO -> WhiteBalanceMath.buildAutoSceneLinearTo709(null)
-            WhiteBalanceMode.KELVIN -> WhiteBalanceMath.buildSceneLinearTo709(kelvinState.kelvin, kelvinState.tint)
-            WhiteBalanceMode.GRAY_CARD -> WhiteBalanceMath.buildAutoSceneLinearTo709(null)
+            WhiteBalanceMode.AUTO -> ColorMatrix.identity()
+            WhiteBalanceMode.KELVIN -> {
+                val d65xy = Pair(ColorMatrix.D65_X, ColorMatrix.D65_Y)
+                val userXY = WhiteBalanceMath.kelvinToXy(kelvinState.kelvin, kelvinState.tint)
+                WhiteBalanceMath.chromaticAdaptationBradford(d65xy, userXY)
+            }
+            WhiteBalanceMode.GRAY_CARD -> ColorMatrix.identity()
         }
 
         val insetParams = agxParams.toInsetParams()

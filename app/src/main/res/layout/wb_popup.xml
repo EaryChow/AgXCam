@@ -99,11 +99,25 @@
         android:id="@+id/wb_shade"
         android:layout_width="wrap_content"
         android:layout_height="32dp"
+        android:layout_marginEnd="2dp"
         android:background="#444444"
         android:gravity="center"
         android:paddingHorizontal="8dp"
         android:text="Shade"
         android:textColor="#FFAAAAFF"
+        android:textSize="10sp"
+        android:clickable="true"
+        android:focusable="true" />
+
+    <TextView
+        android:id="@+id/wb_kelvin"
+        android:layout_width="wrap_content"
+        android:layout_height="32dp"
+        android:background="#444444"
+        android:gravity="center"
+        android:paddingHorizontal="8dp"
+        android:text="Kelvin"
+        android:textColor="#FFFFDD44"
         android:textSize="10sp"
         android:clickable="true"
         android:focusable="true" />

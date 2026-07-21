@@ -122,10 +122,10 @@ class PresetManager(private val context: Context) {
                 contrast = p.optDouble("general_contrast", 2.4).toFloat(),
                 toe = p.optDouble("toe_contrast", 1.5).toFloat(),
                 shoulder = p.optDouble("shoulder_contrast", 1.5).toFloat(),
-                rgbRotation = jsonArrayToFloatArray(p.optJSONArray("rgb_rotation"), floatArrayOf(0.0373f, -0.0214f, -0.0532f)),
-                purityAttenuation = jsonArrayToFloatArray(p.optJSONArray("purity_attenuation"), floatArrayOf(32.9652f, 28.0513f, 12.4754f)),
-                reverseRgbRotation = jsonArrayToFloatArray(p.optJSONArray("reverse_rgb_rotation"), floatArrayOf(0f, 0f, 0f)),
-                restorePurity = jsonArrayToFloatArray(p.optJSONArray("restore_purity"), floatArrayOf(32.3174f, 28.3256f, 3.7433f)),
+                rotation = jsonArrayToFloatArray(p.optJSONArray("rotation"), floatArrayOf(0.0373f, -0.0214f, -0.0532f)),
+                attenuation = jsonArrayToFloatArray(p.optJSONArray("attenuation"), floatArrayOf(32.9652f, 28.0513f, 12.4754f)),
+                reverseRotation = jsonArrayToFloatArray(p.optJSONArray("reverse_rotation"), floatArrayOf(0f, 0f, 0f)),
+                purityBoost = jsonArrayToFloatArray(p.optJSONArray("purity_boost"), floatArrayOf(32.3174f, 28.3256f, 3.7433f)),
                 tintingScale = p.optDouble("tinting_scale", 0.0).toFloat(),
                 tintingHue = p.optDouble("tinting_hue", 0.0).toFloat(),
                 nrStrength = p.optDouble("nr_strength", 0.0).toFloat(),
@@ -140,10 +140,10 @@ class PresetManager(private val context: Context) {
             put("general_contrast", p.contrast.toDouble())
             put("toe_contrast", p.toe.toDouble())
             put("shoulder_contrast", p.shoulder.toDouble())
-            put("rgb_rotation", floatArrayToJson(p.rgbRotation))
-            put("purity_attenuation", floatArrayToJson(p.purityAttenuation))
-            put("reverse_rgb_rotation", floatArrayToJson(p.reverseRgbRotation))
-            put("restore_purity", floatArrayToJson(p.restorePurity))
+            put("rotation", floatArrayToJson(p.rotation))
+            put("attenuation", floatArrayToJson(p.attenuation))
+            put("reverse_rotation", floatArrayToJson(p.reverseRotation))
+            put("purity_boost", floatArrayToJson(p.purityBoost))
             put("tinting_scale", p.tintingScale.toDouble())
             put("tinting_hue", p.tintingHue.toDouble())
             put("nr_strength", p.nrStrength.toDouble())

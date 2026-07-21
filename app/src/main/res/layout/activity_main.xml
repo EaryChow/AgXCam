@@ -564,49 +564,49 @@
 
             <!-- Inset Primaries -->
             <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical" android:layout_marginBottom="4dp">
-                <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Inset Primaries" android:textColor="#FFAAAAAA" android:textSize="11sp" />
+                <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Pre-Processing" android:textColor="#FFAAAAAA" android:textSize="11sp" />
                 <CheckBox android:id="@+id/use_pre_for_post_cb" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Use Pre for Post" android:textColor="#FFFFFFFF" android:textSize="10sp" android:checked="true" />
             </LinearLayout>
 
-            <TextView android:id="@+id/inset_rot_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="RGB Rot R  0.037" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <TextView android:id="@+id/inset_rot_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Red Rotation  0.037" android:textColor="#FFFFFFFF" android:textSize="11sp" />
             <SeekBar android:id="@+id/inset_rot_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="268" android:layout_marginBottom="2dp" />
 
-            <TextView android:id="@+id/inset_rot_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="RGB Rot G  -0.021" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <TextView android:id="@+id/inset_rot_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Green Rotation  -0.021" android:textColor="#FFFFFFFF" android:textSize="11sp" />
             <SeekBar android:id="@+id/inset_rot_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="253" android:layout_marginBottom="2dp" />
 
-            <TextView android:id="@+id/inset_rot_b_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="RGB Rot B  -0.053" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <TextView android:id="@+id/inset_rot_b_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Blue Rotation  -0.053" android:textColor="#FFFFFFFF" android:textSize="11sp" />
             <SeekBar android:id="@+id/inset_rot_b_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="236" android:layout_marginBottom="4dp" />
 
-            <TextView android:id="@+id/inset_pur_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Purity R  33.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <TextView android:id="@+id/inset_pur_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Attenuation R  33.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
             <SeekBar android:id="@+id/inset_pur_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="60" android:progress="33" android:layout_marginBottom="2dp" />
 
-            <TextView android:id="@+id/inset_pur_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Purity G  28.1" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <TextView android:id="@+id/inset_pur_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Attenuation G  28.1" android:textColor="#FFFFFFFF" android:textSize="11sp" />
             <SeekBar android:id="@+id/inset_pur_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="60" android:progress="28" android:layout_marginBottom="2dp" />
 
-            <TextView android:id="@+id/inset_pur_b_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Purity B  12.5" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <TextView android:id="@+id/inset_pur_b_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Attenuation B  12.5" android:textColor="#FFFFFFFF" android:textSize="11sp" />
             <SeekBar android:id="@+id/inset_pur_b_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="60" android:progress="12" android:layout_marginBottom="8dp" />
 
             <!-- Outset Primaries (hidden when Use Pre for Post is on) -->
-            <LinearLayout android:id="@+id/outset_section" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
+            <LinearLayout android:id="@+id/post_section" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
                 <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
-                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Outset Primaries" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Post-Processing" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
 
-                <TextView android:id="@+id/outset_rot_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Rev Rot R  0.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                <TextView android:id="@+id/outset_rot_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Reverse R  0.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
                 <SeekBar android:id="@+id/outset_rot_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="262" android:layout_marginBottom="2dp" />
 
-                <TextView android:id="@+id/outset_rot_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Rev Rot G  0.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                <TextView android:id="@+id/outset_rot_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Reverse G  0.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
                 <SeekBar android:id="@+id/outset_rot_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="262" android:layout_marginBottom="2dp" />
 
-                <TextView android:id="@+id/outset_rot_b_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Rev Rot B  0.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                <TextView android:id="@+id/outset_rot_b_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Reverse B  0.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
                 <SeekBar android:id="@+id/outset_rot_b_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="262" android:layout_marginBottom="4dp" />
 
-                <TextView android:id="@+id/outset_pur_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Restore R  32.3" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                <TextView android:id="@+id/outset_pur_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Purity Boost R  32.3" android:textColor="#FFFFFFFF" android:textSize="11sp" />
                 <SeekBar android:id="@+id/outset_pur_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="60" android:progress="32" android:layout_marginBottom="2dp" />
 
-                <TextView android:id="@+id/outset_pur_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Restore G  28.3" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                <TextView android:id="@+id/outset_pur_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Purity Boost G  28.3" android:textColor="#FFFFFFFF" android:textSize="11sp" />
                 <SeekBar android:id="@+id/outset_pur_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="60" android:progress="28" android:layout_marginBottom="2dp" />
 
-                <TextView android:id="@+id/outset_pur_b_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Restore B  3.7" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                <TextView android:id="@+id/outset_pur_b_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Purity Boost B  3.7" android:textColor="#FFFFFFFF" android:textSize="11sp" />
                 <SeekBar android:id="@+id/outset_pur_b_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="60" android:progress="4" android:layout_marginBottom="4dp" />
 
                 <TextView
@@ -615,7 +615,7 @@
                     android:layout_height="32dp"
                     android:background="#444444"
                     android:gravity="center"
-                    android:text="Copy Inset to Outset"
+                    android:text="Copy Pre to Post"
                     android:textColor="#FFFFFFFF"
                     android:textSize="11sp"
                     android:paddingHorizontal="10dp"

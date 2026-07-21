@@ -16,11 +16,11 @@ object AgxPrecomputer {
     )
 
     data class InsetParams(
-        val rgbRotation: FloatArray = floatArrayOf(0.0373f, -0.0214f, -0.0532f),
-        val purityAttenuation: FloatArray = floatArrayOf(32.9652f, 28.0513f, 12.4754f),
+        val rotation: FloatArray = floatArrayOf(0.0373f, -0.0214f, -0.0532f),
+        val attenuation: FloatArray = floatArrayOf(32.9652f, 28.0513f, 12.4754f),
         val usePreForPost: Boolean = true,
-        val reverseRgbRotation: FloatArray = floatArrayOf(0f, 0f, 0f),
-        val restorePurity: FloatArray = floatArrayOf(32.3174f, 28.3256f, 3.7433f),
+        val reverseRotation: FloatArray = floatArrayOf(0f, 0f, 0f),
+        val purityBoost: FloatArray = floatArrayOf(32.3174f, 28.3256f, 3.7433f),
         val tintingScale: Float = 0f,
         val tintingHue: Float = 0f
     )
@@ -63,8 +63,8 @@ object AgxPrecomputer {
     private fun computeInsetMatrix(params: InsetParams): ColorMatrix.Mat3 {
         val insetCh = insetPrimaries(
             ColorMatrix.REC709,
-            params.purityAttenuation[0], params.purityAttenuation[1], params.purityAttenuation[2],
-            params.rgbRotation[0], params.rgbRotation[1], params.rgbRotation[2],
+            params.attenuation[0], params.attenuation[1], params.attenuation[2],
+            params.rotation[0], params.rotation[1], params.rotation[2],
             0f, 0f
         )
         return ColorMatrix.rgbToRGB(insetCh, ColorMatrix.REC709)
@@ -74,16 +74,16 @@ object AgxPrecomputer {
         return if (params.usePreForPost) {
             val ch = insetPrimaries(
                 ColorMatrix.REC709,
-                params.purityAttenuation[0], params.purityAttenuation[1], params.purityAttenuation[2],
-                params.rgbRotation[0], params.rgbRotation[1], params.rgbRotation[2],
+                params.attenuation[0], params.attenuation[1], params.attenuation[2],
+                params.rotation[0], params.rotation[1], params.rotation[2],
                 params.tintingHue + PI.toFloat(), params.tintingScale
             )
             ColorMatrix.inverse(ColorMatrix.rgbToRGB(ch, ColorMatrix.REC709))
         } else {
             val ch = insetPrimaries(
                 ColorMatrix.REC709,
-                params.restorePurity[0], params.restorePurity[1], params.restorePurity[2],
-                params.reverseRgbRotation[0], params.reverseRgbRotation[1], params.reverseRgbRotation[2],
+                params.purityBoost[0], params.purityBoost[1], params.purityBoost[2],
+                params.reverseRotation[0], params.reverseRotation[1], params.reverseRotation[2],
                 params.tintingHue + PI.toFloat(), params.tintingScale
             )
             ColorMatrix.inverse(ColorMatrix.rgbToRGB(ch, ColorMatrix.REC709))

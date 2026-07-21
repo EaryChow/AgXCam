@@ -241,6 +241,7 @@ ${AgxCoreGlsl.CORE_HELPERS}
 
 vec3 agxFormationYuv(vec3 rgb) {
     rgb = compensateLowSide(rgb);
+    rgb = u_scene_linear_to_709 * rgb;
     rgb = u_insetmat * rgb;
     rgb = lin2log(rgb, u_log_min, u_log_max);
     rgb.r = sigmoid(rgb.r, u_shoulder, u_toe, u_contrast, u_log_midgray, u_display_midgray);
