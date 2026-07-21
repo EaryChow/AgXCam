@@ -1488,11 +1488,18 @@ class MainActivity : AppCompatActivity() {
             val w = image.width
             val h = image.height
 
-            val yCopy = extractPlane(planes[0].buffer, w, h, planes[0].rowStride, 1)
+            if (previewFrameCount == 1) {
+                CrashLogger.log(TAG, "YUV planes: Y stride=${planes[0].rowStride} cap=${planes[0].buffer.capacity()} " +
+                    "U stride=${planes[1].rowStride} pixel=${planes[1].pixelStride} cap=${planes[1].buffer.capacity()} " +
+                    "V stride=${planes[2].rowStride} pixel=${planes[2].pixelStride} cap=${planes[2].buffer.capacity()} " +
+                    "size=${w}x${h}")
+            }
+
+            val yCopy = extractPlane(planes[0], w, h)
             val uvWidth = w / 2
             val uvHeight = h / 2
-            val uCopy = extractPlane(planes[1].buffer, uvWidth, uvHeight, planes[1].rowStride, planes[1].pixelStride)
-            val vCopy = extractPlane(planes[2].buffer, uvWidth, uvHeight, planes[2].rowStride, planes[2].pixelStride)
+            val uCopy = extractPlane(planes[1], uvWidth, uvHeight)
+            val vCopy = extractPlane(planes[2], uvWidth, uvHeight)
 
             previewRenderer.setYuvFrame(yCopy, uCopy, vCopy, w, h)
         }
@@ -1802,31 +1809,34 @@ class MainActivity : AppCompatActivity() {
         previewRenderer.agxShoulder = agxParams.shoulder
     }
 
-    private fun extractPlane(src: java.nio.ByteBuffer, width: Int, height: Int, rowStride: Int, pixelStride: Int): java.nio.ByteBuffer {
-        val dst = java.nio.ByteBuffer.allocateDirect(width * height).order(java.nio.ByteOrder.nativeOrder())
-        src.position(0)
-        if (pixelStride == 1) {
-            for (row in 0 until height) {
-                val srcOffset = row * rowStride
-                src.position(srcOffset)
-                src.limit(srcOffset + width)
-                dst.position(row * width)
-                dst.put(src)
-            }
-        } else {
-            for (row in 0 until height) {
-                val srcRowStart = row * rowStride
-                val dstRowStart = row * width
-                src.position(srcRowStart)
-                for (col in 0 until width) {
-                    val srcIdx = srcRowStart + col * pixelStride
-                    if (srcIdx < src.capacity()) dst.put(dstRowStart + col, src.get(srcIdx))
-                }
+    private fun extractPlane(plane: android.media.Image.Plane, width: Int, height: Int): java.nio.ByteBuffer {
+        val buffer = plane.buffer
+        val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
+
+        if (rowStride != width || buffer.capacity() != width * height) {
+            CrashLogger.log(TAG, "extractPlane: size=${width}x${height} rowStride=$rowStride " +
+                "pixelStride=$pixelStride capacity=${buffer.capacity()}")
+        }
+
+        // Use absolute buffer.get(index) to bypass Huawei's broken buffer.limit().
+        // The limit is wrong on some devices, but capacity is always correct.
+        val out = ByteArray(width * height)
+
+        for (row in 0 until height) {
+            val rowStart = row * rowStride
+            val lastIndex = rowStart + (width - 1) * pixelStride
+
+            if (lastIndex >= buffer.capacity()) break
+
+            for (col in 0 until width) {
+                out[row * width + col] = buffer.get(rowStart + col * pixelStride)
             }
         }
+
+        val dst = java.nio.ByteBuffer.allocateDirect(width * height).order(java.nio.ByteOrder.nativeOrder())
+        dst.put(out)
         dst.position(0)
-        src.position(0)
-        src.limit(src.capacity())
         return dst
     }
 
@@ -1954,9 +1964,9 @@ override fun onResume() {
                 val planes = image.planes
                 val w = image.width
                 val h = image.height
-                val yBuffer = extractPlane(planes[0].buffer, w, h, planes[0].rowStride, 1)
-                val uBuffer = extractPlane(planes[1].buffer, w / 2, h / 2, planes[1].rowStride, planes[1].pixelStride)
-                val vBuffer = extractPlane(planes[2].buffer, w / 2, h / 2, planes[2].rowStride, planes[2].pixelStride)
+                val yBuffer = extractPlane(planes[0], w, h)
+                val uBuffer = extractPlane(planes[1], w / 2, h / 2)
+                val vBuffer = extractPlane(planes[2], w / 2, h / 2)
 
                 val gpuBitmapRef = java.util.concurrent.atomic.AtomicReference<Bitmap?>(null)
                 val gpuLatch = java.util.concurrent.CountDownLatch(1)
