@@ -2311,10 +2311,12 @@ override fun onResume() {
             popup.post {
                 val anchorLoc = IntArray(2)
                 anchor.getLocationOnScreen(anchorLoc)
+                val parentLoc = IntArray(2)
+                (popup.parent as View).getLocationOnScreen(parentLoc)
                 val popupW = popup.width
                 val popupH = popup.height
-                popup.x = anchorLoc[0].toFloat() + anchor.width / 2f - popupW / 2f
-                popup.y = anchorLoc[1].toFloat() - popupH - 8
+                popup.x = (anchorLoc[0] - parentLoc[0]).toFloat() + anchor.width / 2f - popupW / 2f
+                popup.y = (anchorLoc[1] - parentLoc[1]).toFloat() - popupH - 8
             }
             onChange(true)
         }
