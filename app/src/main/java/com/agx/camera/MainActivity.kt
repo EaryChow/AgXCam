@@ -194,6 +194,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         CrashLogger.log(TAG, "onCreate: begin")
         enableEdgeToEdge()
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.activity_main)
 
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
