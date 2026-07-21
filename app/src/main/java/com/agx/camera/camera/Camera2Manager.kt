@@ -14,6 +14,8 @@ import android.util.Log
 import android.util.Size
 import com.agx.camera.CrashLogger
 import java.lang.reflect.Field
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class Camera2Manager(private val context: Context) {
 
@@ -75,6 +77,7 @@ class Camera2Manager(private val context: Context) {
         private set
     private var currentManualIso = 400
     private var currentManualExposureNs = 33_333_333L
+    private var captureImageLatch = CountDownLatch(1)
     var availableIsoValues: IntArray = intArrayOf()
     var availableShutterSpeedsNs: LongArray = longArrayOf()
 
@@ -754,13 +757,22 @@ class Camera2Manager(private val context: Context) {
     fun captureStill(onCaptureAvailable: (Image, TotalCaptureResult) -> Unit, onCaptureFailed: () -> Unit) {
         val camera = cameraDevice ?: run { CrashLogger.log(TAG, "captureStill: cameraDevice is null"); onCaptureFailed(); return }
         val session = captureSession ?: run { CrashLogger.log(TAG, "captureStill: captureSession is null"); onCaptureFailed(); return }
+        val reader = captureReader ?: run { CrashLogger.log(TAG, "captureStill: captureReader is null"); onCaptureFailed(); return }
 
         val afMode = safeAfMode(CaptureRequest.CONTROL_AF_MODE_AUTO)
         val aeMode = safeAeMode(if (isManualExposure) CaptureRequest.CONTROL_AE_MODE_OFF else CaptureRequest.CONTROL_AE_MODE_ON)
         CrashLogger.log(TAG, "captureStill afMode=$afMode aeMode=$aeMode manual=$isManualExposure")
 
+        captureImageLatch = CountDownLatch(1)
+        reader.setOnImageAvailableListener({ r ->
+            CrashLogger.log(TAG, "stillCapture onImageAvailable")
+            captureImageLatch.countDown()
+        }, backgroundHandler)
+
+        val preview = previewReader?.surface
         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
-            addTarget(captureReader!!.surface)
+            addTarget(reader.surface)
+            if (preview != null) addTarget(preview)
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
             set(CaptureRequest.CONTROL_AE_MODE, aeMode)
             if (isManualExposure) {
@@ -774,22 +786,37 @@ class Camera2Manager(private val context: Context) {
 
         try {
             session.capture(request.build(), object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureStarted(session: CameraCaptureSession, request: CaptureRequest, timestamp: Long, frameNumber: Long) {
+                    CrashLogger.log(TAG, "stillCapture onCaptureStarted frame=$frameNumber")
+                }
+
                 override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+                    CrashLogger.log(TAG, "stillCapture onCaptureCompleted frame=${result.frameNumber}")
+                    val imageReady = captureImageLatch.await(5, TimeUnit.SECONDS)
+                    CrashLogger.log(TAG, "stillCapture latch waited imageReady=$imageReady")
                     val image = captureReader?.acquireLatestImage()
+                    reader.setOnImageAvailableListener(null, null)
                     if (image != null) {
+                        CrashLogger.log(TAG, "stillCapture image acquired ${image.width}x${image.height}")
                         onCaptureAvailable(image, result)
                     } else {
-                        Log.e(TAG, "Capture image not available at onCaptureCompleted")
+                        CrashLogger.log(TAG, "stillCapture image is null after latch")
+                        Log.e(TAG, "Capture image not available after onImageAvailable latch")
                         onCaptureFailed()
                     }
                 }
 
                 override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+                    CrashLogger.log(TAG, "stillCapture onCaptureFailed reason=${failure.reason} wasImageCaptured=${failure.wasImageCaptured()}")
+                    captureImageLatch.countDown()
+                    reader.setOnImageAvailableListener(null, null)
                     Log.e(TAG, "Capture failed: ${failure.reason}")
                     onCaptureFailed()
                 }
             }, backgroundHandler)
         } catch (e: CameraAccessException) {
+            CrashLogger.log(TAG, "stillCapture exception: ${e.message}")
+            reader.setOnImageAvailableListener(null, null)
             Log.e(TAG, "captureStill failed: ${e.message}", e)
             CrashLogger.logException(TAG, e)
             onCaptureFailed()
