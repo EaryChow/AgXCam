@@ -2199,7 +2199,7 @@ override fun onResume() {
             if (event.action == MotionEvent.ACTION_DOWN) {
                 val now = System.currentTimeMillis()
                 if (now - lastIsoTapTime < 300) {
-                    isoSeekBar.progress = 50
+                    isoSeekBar.progress = isoSeekBar.max / 2
                     updateManualExposure()
                 }
                 lastIsoTapTime = now
@@ -2210,7 +2210,7 @@ override fun onResume() {
             if (event.action == MotionEvent.ACTION_DOWN) {
                 val now = System.currentTimeMillis()
                 if (now - lastShutterTapTime < 300) {
-                    shutterSeekBar.progress = 50
+                    shutterSeekBar.progress = shutterSeekBar.max / 2
                     updateManualExposure()
                 }
                 lastShutterTapTime = now
@@ -2251,7 +2251,7 @@ override fun onResume() {
             if (event.action == MotionEvent.ACTION_DOWN) {
                 val now = System.currentTimeMillis()
                 if (now - lastIsoSliderTapTime < 300) {
-                    isoSeekBar.progress = 50
+                    isoSeekBar.progress = isoSeekBar.max / 2
                     updateManualExposure()
                 }
                 lastIsoSliderTapTime = now
@@ -2272,7 +2272,7 @@ override fun onResume() {
             if (event.action == MotionEvent.ACTION_DOWN) {
                 val now = System.currentTimeMillis()
                 if (now - lastShutterSliderTapTime < 300) {
-                    shutterSeekBar.progress = 50
+                    shutterSeekBar.progress = shutterSeekBar.max / 2
                     updateManualExposure()
                 }
                 lastShutterSliderTapTime = now
@@ -2314,8 +2314,8 @@ override fun onResume() {
         val isoIdx = isoVals.indices.minByOrNull { i -> Math.abs(isoVals[i] - targetIso) } ?: 0
         val shutterIdx = shutterVals.indices.minByOrNull { i -> Math.abs(shutterVals[i] - targetShutterNs) } ?: 0
 
-        isoSeekBar.progress = isoIdx * 100 / (isoVals.size - 1).coerceAtLeast(1)
-        shutterSeekBar.progress = shutterIdx * 100 / (shutterVals.size - 1).coerceAtLeast(1)
+        isoSeekBar.progress = isoIdx
+        shutterSeekBar.progress = shutterIdx
     }
 
     private fun updateAutoExposureReadout(iso: Int, shutterNs: Long) {
@@ -2338,15 +2338,13 @@ override fun onResume() {
     private fun isoFromProgress(progress: Int): Int {
         val vals = camera2Manager.availableIsoValues
         if (vals.isEmpty()) return 400
-        val idx = progress * (vals.size - 1) / 100
-        return vals[idx.coerceIn(0, vals.size - 1)]
+        return vals[progress.coerceIn(0, vals.size - 1)]
     }
 
     private fun shutterNsFromProgress(progress: Int): Long {
         val vals = camera2Manager.availableShutterSpeedsNs
         if (vals.isEmpty()) return 33_333_333L
-        val idx = progress * (vals.size - 1) / 100
-        return vals[idx.coerceIn(0, vals.size - 1)]
+        return vals[progress.coerceIn(0, vals.size - 1)]
     }
 
     private fun formatShutterSpeed(ns: Long): String {
@@ -2370,8 +2368,11 @@ override fun onResume() {
                 (popup.parent as View).getLocationOnScreen(parentLoc)
                 val popupW = popup.width
                 val popupH = popup.height
+                val density = popup.resources.displayMetrics.density
+                val lineBottomOffsetPx = 180 * density
+                val gapPx = 4 * density
                 popup.x = (anchorLoc[0] - parentLoc[0]).toFloat() + anchor.width / 2f - popupW / 2f
-                popup.y = (anchorLoc[1] - parentLoc[1]).toFloat() - popupH - 8
+                popup.y = (anchorLoc[1] - parentLoc[1]).toFloat() - lineBottomOffsetPx - gapPx
             }
             onChange(true)
         }
@@ -2403,6 +2404,14 @@ override fun onResume() {
     private fun updateManualControlRanges() {
         val chars = lensManager.activeLens?.let { lensManager.getCharacteristicsForLens(it) }
         chars?.let { camera2Manager.updateManualControlRanges(it) }
+        syncSeekBarMax()
+    }
+
+    private fun syncSeekBarMax() {
+        val isoMax = (camera2Manager.availableIsoValues.size - 1).coerceAtLeast(0)
+        val shutterMax = (camera2Manager.availableShutterSpeedsNs.size - 1).coerceAtLeast(0)
+        isoSeekBar.max = isoMax
+        shutterSeekBar.max = shutterMax
     }
 
     private fun setExposureCompFromProgress(progress: Int) {

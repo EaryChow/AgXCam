@@ -630,26 +630,34 @@ class Camera2Manager(private val context: Context) {
         val expMinNs = expRange?.lower ?: 1_000_000L
         val expMaxNs = expRange?.upper ?: 1_000_000_000L
 
+        Log.d(TAG, "Sensor sensitivity range: $sensMin - $sensMax")
+        Log.d(TAG, "Sensor exposure range: ${expMinNs/1_000_000.0}ms - ${expMaxNs/1_000_000.0}ms")
+
         val isoVals = mutableListOf<Int>()
         var iso = sensMin.coerceAtLeast(50)
         while (iso <= sensMax) {
             isoVals.add(iso)
-            iso *= 2
+            iso = (iso * 1.26).toInt().coerceAtLeast(iso + 1)
         }
-        if (isoVals.isEmpty()) isoVals.add(sensMax)
+        if (isoVals.lastOrNull() != sensMax) isoVals.add(sensMax)
         availableIsoValues = isoVals.toIntArray()
 
         val shutterVals = mutableListOf<Long>()
-        var exp = expMinNs.coerceAtLeast(100_000L)
+        var exp = expMinNs.coerceAtLeast(10_000L)
         while (exp <= expMaxNs) {
             shutterVals.add(exp)
-            exp *= 2
+            exp = (exp * 1.26).toLong().coerceAtLeast(exp + 1)
         }
-        if (shutterVals.isEmpty()) shutterVals.add(expMaxNs)
+        if (shutterVals.lastOrNull() != expMaxNs) shutterVals.add(expMaxNs)
         availableShutterSpeedsNs = shutterVals.toLongArray()
 
-        Log.d(TAG, "Manual ISO values: ${availableIsoValues.toList()}")
-        Log.d(TAG, "Manual shutter speeds (ns): ${availableShutterSpeedsNs.toList()}")
+        Log.d(TAG, "Manual ISO values (${availableIsoValues.size}): ${availableIsoValues.toList()}")
+        Log.d(TAG, "Manual shutter speeds (${availableShutterSpeedsNs.size}): ${availableShutterSpeedsNs.map { formatNs(it) }}")
+    }
+
+    private fun formatNs(ns: Long): String {
+        val sec = ns / 1_000_000_000.0
+        return if (sec >= 1.0) String.format("%.2fs", sec) else String.format("1/%.0fs", 1.0 / sec)
     }
 
     fun startContinuousAf() {
