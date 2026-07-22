@@ -695,6 +695,27 @@
 
             <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
 
+            <!-- Focus Indicator Timeout -->
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Focus Indicator Timeout" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
+
+            <Spinner
+                android:id="@+id/focus_timeout_spinner"
+                android:layout_width="match_parent"
+                android:layout_height="36dp"
+                android:background="#444444"
+                android:popupBackground="#333333"
+                android:layout_marginBottom="4dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Indicator stays visible when focus is locked"
+                android:textColor="#FF888888"
+                android:textSize="10sp"
+                android:layout_marginBottom="8dp" />
+
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
+
             <!-- Developer Settings (debug builds only) -->
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Developer Settings" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
 

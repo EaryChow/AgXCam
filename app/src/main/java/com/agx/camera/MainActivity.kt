@@ -120,6 +120,8 @@ class MainActivity : AppCompatActivity() {
     private var isoPopupShowing = false
     private var shutterPopupShowing = false
     private var evPopupShowing = false
+    private val focusIndicatorHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val focusIndicatorHideRunnable = Runnable { hideFocusIndicator() }
 
     // Pinch-to-zoom
     private var scaleGestureDetector: ScaleGestureDetector? = null
@@ -142,7 +144,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var maxPreviewDimensions: Pair<Int, Int>
     private lateinit var previewResPrefs: android.content.SharedPreferences
     private lateinit var previewResSpinner: Spinner
+    private lateinit var focusTimeoutSpinner: Spinner
     private var previewResCapMaxDim = 1280 // default 720p
+    private var focusIndicatorTimeoutMs = 0L // 0 = never hide
 
     // Preset
     private lateinit var presetSpinner: Spinner
@@ -262,6 +266,7 @@ class MainActivity : AppCompatActivity() {
         jpegLabel = findViewById(R.id.jpeg_label);         jpegSlider = findViewById(R.id.jpeg_slider)
         resolutionSpinner = findViewById(R.id.resolution_spinner)
         previewResSpinner = findViewById(R.id.preview_res_spinner)
+        focusTimeoutSpinner = findViewById(R.id.focus_timeout_spinner)
 
         shutterButton = findViewById(R.id.shutter_button)
         thumbnailButton = findViewById(R.id.thumbnail_button)
@@ -303,6 +308,7 @@ class MainActivity : AppCompatActivity() {
         // Compute max preview dimensions based on screen resolution
         previewResPrefs = getSharedPreferences("agxcam_settings", Context.MODE_PRIVATE)
         previewResCapMaxDim = previewResPrefs.getInt(PREF_PREVIEW_RES_CAP, 1280)
+        focusIndicatorTimeoutMs = previewResPrefs.getLong(PREF_FOCUS_TIMEOUT, 0L)
         maxPreviewDimensions = getMaxPreviewDimensions()
 
         developerSwitch = DeveloperSwitch(this) { useRaw ->
@@ -605,10 +611,14 @@ class MainActivity : AppCompatActivity() {
                 autofocusController.unlock()
                 aeAfLockButton.setImageResource(R.drawable.ic_lock_open)
                 aeAfLockButton.alpha = 0.6f
+                if (focusIndicatorTimeoutMs > 0 && focusIndicator.visibility == View.VISIBLE) {
+                    focusIndicatorHandler.postDelayed(focusIndicatorHideRunnable, focusIndicatorTimeoutMs)
+                }
             } else {
                 autofocusController.lock()
                 aeAfLockButton.setImageResource(R.drawable.ic_lock_closed)
                 aeAfLockButton.alpha = 1.0f
+                focusIndicatorHandler.removeCallbacks(focusIndicatorHideRunnable)
             }
         }
 
@@ -972,6 +982,24 @@ class MainActivity : AppCompatActivity() {
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
 
+        // Focus indicator timeout spinner
+        val focusTimeoutOptions = listOf("Never", "1s", "3s", "10s")
+        val focusTimeoutValues = listOf(0L, 1000L, 3000L, 10000L)
+        focusTimeoutSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, focusTimeoutOptions).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        val savedTimeoutIndex = focusTimeoutValues.indexOf(focusIndicatorTimeoutMs).coerceIn(0, focusTimeoutOptions.size - 1)
+        focusTimeoutSpinner.setSelection(savedTimeoutIndex, false)
+        focusTimeoutSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val newTimeout = focusTimeoutValues[position]
+                if (newTimeout == focusIndicatorTimeoutMs) return
+                focusIndicatorTimeoutMs = newTimeout
+                previewResPrefs.edit().putLong(PREF_FOCUS_TIMEOUT, newTimeout).apply()
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
         val presetAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, mutableListOf<String>())
         presetAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         presetSpinner.adapter = presetAdapter
@@ -1174,6 +1202,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showFocusIndicator(x: Float, y: Float) {
+        focusIndicatorHandler.removeCallbacks(focusIndicatorHideRunnable)
         val size = (80 * resources.displayMetrics.density).toFloat()
         focusIndicator.x = x - size / 2f
         focusIndicator.y = y - size / 2f
@@ -1195,6 +1224,10 @@ class MainActivity : AppCompatActivity() {
         // Show EV slider in auto exposure mode
         if (!isManualMode) {
             showEvSlider(x, y)
+        }
+        // Auto-hide after timeout (never if focus is locked)
+        if (focusIndicatorTimeoutMs > 0 && !autofocusController.isLocked) {
+            focusIndicatorHandler.postDelayed(focusIndicatorHideRunnable, focusIndicatorTimeoutMs)
         }
     }
 
@@ -1979,6 +2012,7 @@ override fun onResume() {
     }
 
     override fun onDestroy() {
+        focusIndicatorHandler.removeCallbacks(focusIndicatorHideRunnable)
         super.onDestroy()
         performCleanup()
     }
@@ -2439,5 +2473,6 @@ override fun onResume() {
         private const val TAG = "MainActivity"
         private const val REQUEST_CAMERA = 100
         private const val PREF_PREVIEW_RES_CAP = "preview_res_cap"
+        private const val PREF_FOCUS_TIMEOUT = "focus_indicator_timeout"
     }
 }
