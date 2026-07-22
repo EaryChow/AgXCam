@@ -3,6 +3,7 @@ package com.agx.camera.camera
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.ImageFormat
+import android.graphics.Rect
 import android.hardware.camera2.*
 import android.hardware.camera2.params.MeteringRectangle
 import android.media.Image
@@ -41,6 +42,7 @@ class Camera2Manager(private val context: Context) {
     var onError: ((String) -> Unit)? = null
     var onDisconnected: (() -> Unit)? = null
     var onAutoExposureReadout: ((Int, Long) -> Unit)? = null
+    var onMaxZoomReady: ((Float) -> Unit)? = null
 
     private var sessionRetryCount = 0
     private val maxSessionRetries = 1
@@ -88,6 +90,12 @@ class Camera2Manager(private val context: Context) {
 
     val currentFlashModeForExif: FlashMode get() = currentFlashMode
 
+    // Zoom (SCALER_CROP_REGION)
+    private var currentZoomFactor = 1.0f
+    private var currentZoomCenterX = 0.5f
+    private var currentZoomCenterY = 0.5f
+    private var pendingZoomUpdate = false
+
     fun startBackgroundThread() {
         backgroundThread = HandlerThread("Camera2Background").also { it.start() }
         backgroundHandler = Handler(backgroundThread!!.looper)
@@ -131,6 +139,10 @@ class Camera2Manager(private val context: Context) {
             CrashLogger.log(TAG, "max AF regions=$maxAfRegions, max AE regions=$maxAeRegions")
 
             populateAeExposureRange(chars)
+
+            val maxZoom = chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1.0f
+            CrashLogger.log(TAG, "maxDigitalZoom=$maxZoom")
+            onMaxZoomReady?.invoke(maxZoom)
 
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
             
@@ -350,12 +362,49 @@ class Camera2Manager(private val context: Context) {
             set(CaptureRequest.SENSOR_SENSITIVITY, iso)
             set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureTimeNs)
             set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+            applyCropRegion()
         }
 
         try {
             session.setRepeatingRequest(request.build(), aeReadoutCallback, backgroundHandler)
         } catch (e: CameraAccessException) {
             Log.e(TAG, "setManualExposure setRepeatingRequest failed: ${e.message}", e)
+        }
+    }
+
+    // --- SCALER_CROP_REGION zoom ---
+
+    fun computeCropRegion(): Rect? {
+        val chars = cameraCharacteristics ?: return null
+        val sensorRect = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return null
+        val maxZoom = chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1.0f
+        val zoom = currentZoomFactor.coerceIn(1.0f, maxZoom)
+        if (zoom <= 1.0f) return sensorRect
+
+        val cropWidth = (sensorRect.width() / zoom).toInt()
+        val cropHeight = (sensorRect.height() / zoom).toInt()
+        val centerX = sensorRect.left + (currentZoomCenterX * sensorRect.width()).toInt()
+        val centerY = sensorRect.top + (currentZoomCenterY * sensorRect.height()).toInt()
+        val left = (centerX - cropWidth / 2).coerceIn(sensorRect.left, sensorRect.right - cropWidth)
+        val top = (centerY - cropHeight / 2).coerceIn(sensorRect.top, sensorRect.bottom - cropHeight)
+        return Rect(left, top, left + cropWidth, top + cropHeight)
+    }
+
+    private fun CaptureRequest.Builder.applyCropRegion() {
+        val crop = computeCropRegion() ?: return
+        set(CaptureRequest.SCALER_CROP_REGION, crop)
+    }
+
+    fun updateZoom(factor: Float, centerX: Float, centerY: Float) {
+        currentZoomFactor = factor
+        currentZoomCenterX = centerX
+        currentZoomCenterY = centerY
+        if (!pendingZoomUpdate && backgroundHandler != null) {
+            pendingZoomUpdate = true
+            backgroundHandler!!.postDelayed({
+                pendingZoomUpdate = false
+                applyPreviewRequest()
+            }, 16)
         }
     }
 
@@ -421,6 +470,7 @@ class Camera2Manager(private val context: Context) {
             } else {
                 currentFlashMode.applyToRequest(this, availableAeModes)
             }
+            applyCropRegion()
         }
 
         try {
@@ -466,6 +516,7 @@ class Camera2Manager(private val context: Context) {
             } else {
                 currentFlashMode.applyToRequest(this, availableAeModes)
             }
+            applyCropRegion()
         }
 
         try {
@@ -491,6 +542,7 @@ class Camera2Manager(private val context: Context) {
             } else {
                 currentFlashMode.applyToRequest(this, availableAeModes)
             }
+            applyCropRegion()
         }
 
         try {
@@ -531,9 +583,11 @@ class Camera2Manager(private val context: Context) {
         val camera = cameraDevice ?: run { CrashLogger.log(TAG, "applyPreviewRequest: cameraDevice null"); return }
         val session = captureSession ?: run { CrashLogger.log(TAG, "applyPreviewRequest: session null"); return }
 
+        val inHoldState = !focusLocked && meteringRegions != null && !isAfScanning
+
         val afMode = if (deviceMaxAfRegions > 0) {
             safeAfMode(
-                if (focusLocked) CaptureRequest.CONTROL_AF_MODE_AUTO
+                if (focusLocked || inHoldState) CaptureRequest.CONTROL_AF_MODE_AUTO
                 else CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
             )
         } else {
@@ -545,6 +599,9 @@ class Camera2Manager(private val context: Context) {
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
             set(CaptureRequest.CONTROL_AWB_MODE, currentAwbMode)
             meteringRegions?.let { setMeteringRegions(it) }
+            if (inHoldState) {
+                set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
+            }
             if (currentExposureComp != 0) {
                 set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, currentExposureComp)
             }
@@ -553,6 +610,7 @@ class Camera2Manager(private val context: Context) {
                 set(CaptureRequest.CONTROL_AWB_LOCK, true)
             }
             currentFlashMode.applyToRequest(this, availableAeModes)
+            applyCropRegion()
         }
 
         try {
@@ -628,6 +686,7 @@ class Camera2Manager(private val context: Context) {
             } else {
                 currentFlashMode.applyToRequest(this, availableAeModes)
             }
+            applyCropRegion()
         }
 
         try {
@@ -658,6 +717,7 @@ class Camera2Manager(private val context: Context) {
                             } else {
                                 currentFlashMode.applyToRequest(this, availableAeModes)
                             }
+                            applyCropRegion()
                         }
                         try {
                             session.setRepeatingRequest(lockRequest.build(), null, backgroundHandler)
@@ -698,6 +758,7 @@ class Camera2Manager(private val context: Context) {
             } else {
                 currentFlashMode.applyToRequest(this, availableAeModes)
             }
+            applyCropRegion()
         }
 
         try {
@@ -730,6 +791,7 @@ class Camera2Manager(private val context: Context) {
                             } else {
                                 currentFlashMode.applyToRequest(this, availableAeModes)
                             }
+                            applyCropRegion()
                         }
                         try {
                             session.setRepeatingRequest(lockRequest.build(), null, backgroundHandler)
@@ -782,6 +844,7 @@ class Camera2Manager(private val context: Context) {
             } else {
                 currentFlashMode.applyToRequest(this, availableAeModes)
             }
+            applyCropRegion()
         }
 
         try {

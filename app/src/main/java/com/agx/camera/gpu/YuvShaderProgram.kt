@@ -16,8 +16,6 @@ class YuvShaderProgram {
     private var uYTexLoc = 0
     private var uUTexLoc = 0
     private var vVTexLoc = 0
-    private var uZoomFactorLoc = 0
-    private var uZoomCenterLoc = 0
     private var uOutputResolutionLoc = 0
     private var uTransformMatrixLoc = 0
 
@@ -50,8 +48,6 @@ class YuvShaderProgram {
         uYTexLoc = GLES20.glGetUniformLocation(programId, "u_yTex")
         uUTexLoc = GLES20.glGetUniformLocation(programId, "u_uTex")
         vVTexLoc = GLES20.glGetUniformLocation(programId, "u_vTex")
-        uZoomFactorLoc = GLES20.glGetUniformLocation(programId, "u_zoom_factor")
-        uZoomCenterLoc = GLES20.glGetUniformLocation(programId, "u_zoom_center")
         uOutputResolutionLoc = GLES20.glGetUniformLocation(programId, "u_outputResolution")
         uTransformMatrixLoc = GLES20.glGetUniformLocation(programId, "u_transformMatrix")
 
@@ -121,7 +117,6 @@ class YuvShaderProgram {
 
     fun draw(
         outputWidth: Int, outputHeight: Int,
-        zoomFactor: Float, zoomCenterX: Float, zoomCenterY: Float,
         transformMatrix: FloatArray,
         sceneLinearTo709: FloatArray,
         insetMat: FloatArray,
@@ -146,8 +141,6 @@ class YuvShaderProgram {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vTextureId)
         GLES20.glUniform1i(vVTexLoc, 2)
 
-        GLES20.glUniform1f(uZoomFactorLoc, zoomFactor)
-        GLES20.glUniform2f(uZoomCenterLoc, zoomCenterX, zoomCenterY)
         GLES20.glUniform2f(uOutputResolutionLoc, outputWidth.toFloat(), outputHeight.toFloat())
         GLES20.glUniformMatrix4fv(uTransformMatrixLoc, 1, false, transformMatrix, 0)
 
@@ -219,8 +212,6 @@ varying vec2 v_texCoord;
 uniform sampler2D u_yTex;
 uniform sampler2D u_uTex;
 uniform sampler2D u_vTex;
-uniform float u_zoom_factor;
-uniform vec2 u_zoom_center;
 uniform vec2 u_outputResolution;
 
 uniform mat3 u_scene_linear_to_709;
@@ -256,7 +247,6 @@ vec3 agxFormationYuv(vec3 rgb) {
 
 void main() {
     vec2 uv = v_texCoord;
-    uv = (uv - u_zoom_center) / u_zoom_factor + u_zoom_center;
 
     float y = texture2D(u_yTex, uv).r;
     float u = texture2D(u_uTex, uv).r - 0.5;

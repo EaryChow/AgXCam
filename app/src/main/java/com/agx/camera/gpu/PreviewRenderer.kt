@@ -165,7 +165,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val y: ByteBuffer, val u: ByteBuffer, val v: ByteBuffer,
         val w: Int, val h: Int,
         val targetW: Int, val targetH: Int,
-        val zoomFactor: Float, val zoomCenterX: Float, val zoomCenterY: Float,
         val agxSceneLinearTo709: FloatArray,
         val agxInsetMat: FloatArray,
         val agxOutsetMat: FloatArray,
@@ -192,7 +191,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     ) {
         pendingCaptureFrame = CaptureFrame(
             y, u, v, w, h, targetW, targetH,
-            session.zoomFactor, session.zoomCenterX, session.zoomCenterY,
             session.agxSceneLinearTo709, session.agxInsetMat, session.agxOutsetMat, session.agxToRec2020,
             session.agxWhiteLevel, session.agxBlackLevel,
             session.agxLogMin, session.agxLogMax,
@@ -292,9 +290,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
         yuvShader.draw(
             fboWidth, fboHeight,
-            zoomController.zoomFactor,
-            zoomController.zoomCenterX,
-            zoomController.zoomCenterY,
             computePreviewTransform(),
             agxSceneLinearTo709,
             agxInsetMat,
@@ -325,9 +320,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
         bayerShader.drawDemosaic(
             demosaicFboWidth, demosaicFboHeight,
-            zoomController.zoomFactor,
-            zoomController.zoomCenterX,
-            zoomController.zoomCenterY,
             computePreviewTransform(),
             bayerBlackLevelPattern,
             bayerColorMap,
@@ -432,9 +424,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     android.opengl.Matrix.translateM(captureMatrix, 0, -0.5f, -0.5f, 0f)
                     yuvShader.draw(
                         captureFboWidth, captureFboHeight,
-                        captureReq.zoomFactor,
-                        captureReq.zoomCenterX,
-                        captureReq.zoomCenterY,
                         captureMatrix,
                         captureReq.agxSceneLinearTo709, captureReq.agxInsetMat, captureReq.agxOutsetMat, captureReq.agxToRec2020,
                         captureReq.agxWhiteLevel, captureReq.agxBlackLevel,

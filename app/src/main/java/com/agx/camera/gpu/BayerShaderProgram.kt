@@ -18,8 +18,6 @@ class BayerShaderProgram {
 
     private var uBayerTexLoc = 0
     private var uLensShadingMapLoc = 0
-    private var uZoomFactorLoc = 0
-    private var uZoomCenterLoc = 0
     private var uOutputResolutionLoc = 0
     private var uTransformMatrixLoc = 0
     private var uSensorSizeLoc = 0
@@ -45,8 +43,6 @@ class BayerShaderProgram {
 
     private var dUTextureLoc = 0
     private var dULensShadingMapLoc = 0
-    private var dUZoomFactorLoc = 0
-    private var dUZoomCenterLoc = 0
     private var dUOutputResolutionLoc = 0
     private var dUTransformMatrixLoc = 0
     private var dUSensorSizeLoc = 0
@@ -80,8 +76,6 @@ class BayerShaderProgram {
 
         uBayerTexLoc = GLES20.glGetUniformLocation(programId, "u_bayerTex")
         uLensShadingMapLoc = GLES20.glGetUniformLocation(programId, "u_lens_shading_map")
-        uZoomFactorLoc = GLES20.glGetUniformLocation(programId, "u_zoom_factor")
-        uZoomCenterLoc = GLES20.glGetUniformLocation(programId, "u_zoom_center")
         uOutputResolutionLoc = GLES20.glGetUniformLocation(programId, "u_outputResolution")
         uTransformMatrixLoc = GLES20.glGetUniformLocation(programId, "u_transformMatrix")
         uSensorSizeLoc = GLES20.glGetUniformLocation(programId, "u_sensorSize")
@@ -107,8 +101,6 @@ class BayerShaderProgram {
 
         dUTextureLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_bayerTex")
         dULensShadingMapLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_lens_shading_map")
-        dUZoomFactorLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_zoom_factor")
-        dUZoomCenterLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_zoom_center")
         dUOutputResolutionLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_outputResolution")
         dUTransformMatrixLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_transformMatrix")
         dUSensorSizeLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_sensorSize")
@@ -179,7 +171,6 @@ class BayerShaderProgram {
 
     fun draw(
         outputWidth: Int, outputHeight: Int,
-        zoomFactor: Float, zoomCenterX: Float, zoomCenterY: Float,
         transformMatrix: FloatArray,
         sceneLinearTo709: FloatArray,
         insetMat: FloatArray,
@@ -204,8 +195,6 @@ class BayerShaderProgram {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, lensShadingTextureId)
         GLES20.glUniform1i(uLensShadingMapLoc, 1)
 
-        GLES20.glUniform1f(uZoomFactorLoc, zoomFactor)
-        GLES20.glUniform2f(uZoomCenterLoc, zoomCenterX, zoomCenterY)
         GLES20.glUniform2f(uOutputResolutionLoc, outputWidth.toFloat(), outputHeight.toFloat())
         GLES20.glUniformMatrix4fv(uTransformMatrixLoc, 1, false, transformMatrix, 0)
         GLES20.glUniform2f(uSensorSizeLoc, sensorWidth.toFloat(), sensorHeight.toFloat())
@@ -250,7 +239,6 @@ class BayerShaderProgram {
 
     fun drawDemosaic(
         outputWidth: Int, outputHeight: Int,
-        zoomFactor: Float, zoomCenterX: Float, zoomCenterY: Float,
         transformMatrix: FloatArray,
         blackLevelPattern: IntArray,
         bayerColorMap: IntArray,
@@ -266,8 +254,6 @@ class BayerShaderProgram {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, lensShadingTextureId)
         GLES20.glUniform1i(dULensShadingMapLoc, 1)
 
-        GLES20.glUniform1f(dUZoomFactorLoc, zoomFactor)
-        GLES20.glUniform2f(dUZoomCenterLoc, zoomCenterX, zoomCenterY)
         GLES20.glUniform2f(dUOutputResolutionLoc, outputWidth.toFloat(), outputHeight.toFloat())
         GLES20.glUniformMatrix4fv(dUTransformMatrixLoc, 1, false, transformMatrix, 0)
         GLES20.glUniform2f(dUSensorSizeLoc, sensorWidth.toFloat(), sensorHeight.toFloat())
@@ -342,8 +328,6 @@ out vec4 fragColor;
 
 uniform usampler2D u_bayerTex;
 uniform sampler2D u_lens_shading_map;
-uniform float u_zoom_factor;
-uniform vec2 u_zoom_center;
 uniform vec2 u_outputResolution;
 uniform vec2 u_sensorSize;
 
@@ -495,7 +479,6 @@ ${AgxCoreGlsl.AGX_FORMATION}
 void main() {
     vec2 uv = v_texCoord;
     vec2 lsSensorUV = uv * u_sensorSize;
-    uv = (uv - u_zoom_center) / u_zoom_factor + u_zoom_center;
 
     vec2 sensorUV = uv * u_sensorSize;
     sensorUV = clamp(sensorUV, vec2(0.0), u_sensorSize - vec2(1.0));
@@ -519,8 +502,6 @@ out vec4 fragColor;
 
 uniform usampler2D u_bayerTex;
 uniform sampler2D u_lens_shading_map;
-uniform float u_zoom_factor;
-uniform vec2 u_zoom_center;
 uniform vec2 u_outputResolution;
 uniform vec2 u_sensorSize;
 
@@ -635,7 +616,6 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
 void main() {
     vec2 uv = v_texCoord;
     vec2 lsSensorUV = uv * u_sensorSize;
-    uv = (uv - u_zoom_center) / u_zoom_factor + u_zoom_center;
 
     vec2 sensorUV = uv * u_sensorSize;
     sensorUV = clamp(sensorUV, vec2(0.0), u_sensorSize - vec2(1.0));

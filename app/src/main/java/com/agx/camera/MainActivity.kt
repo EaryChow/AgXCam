@@ -1,6 +1,7 @@
 package com.agx.camera
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -139,6 +140,9 @@ class MainActivity : AppCompatActivity() {
 
     // Preview size cap
     private lateinit var maxPreviewDimensions: Pair<Int, Int>
+    private lateinit var previewResPrefs: android.content.SharedPreferences
+    private lateinit var previewResSpinner: Spinner
+    private var previewResCapMaxDim = 1280 // default 720p
 
     // Preset
     private lateinit var presetSpinner: Spinner
@@ -257,6 +261,7 @@ class MainActivity : AppCompatActivity() {
 
         jpegLabel = findViewById(R.id.jpeg_label);         jpegSlider = findViewById(R.id.jpeg_slider)
         resolutionSpinner = findViewById(R.id.resolution_spinner)
+        previewResSpinner = findViewById(R.id.preview_res_spinner)
 
         shutterButton = findViewById(R.id.shutter_button)
         thumbnailButton = findViewById(R.id.thumbnail_button)
@@ -296,6 +301,8 @@ class MainActivity : AppCompatActivity() {
         mediaStoreSaver = MediaStoreSaver(this)
 
         // Compute max preview dimensions based on screen resolution
+        previewResPrefs = getSharedPreferences("agxcam_settings", Context.MODE_PRIVATE)
+        previewResCapMaxDim = previewResPrefs.getInt(PREF_PREVIEW_RES_CAP, 1280)
         maxPreviewDimensions = getMaxPreviewDimensions()
 
         developerSwitch = DeveloperSwitch(this) { useRaw ->
@@ -496,9 +503,6 @@ class MainActivity : AppCompatActivity() {
                         ?.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
                         ?.getOrNull(0)
                 } ?: 4.0f,
-                zoomFactor = previewRenderer.zoomController.zoomFactor,
-                zoomCenterX = previewRenderer.zoomController.zoomCenterX,
-                zoomCenterY = previewRenderer.zoomController.zoomCenterY,
                 agxSceneLinearTo709 = previewRenderer.agxSceneLinearTo709.copyOf(),
                 agxInsetMat = previewRenderer.agxInsetMat.copyOf(),
                 agxOutsetMat = previewRenderer.agxOutsetMat.copyOf(),
@@ -614,7 +618,8 @@ class MainActivity : AppCompatActivity() {
             zoomLabel.text = String.format("%.1fx", zoom)
         })
 
-        previewRenderer.zoomController.listener = { zoom: Float, _: Float, _: Float ->
+        previewRenderer.zoomController.listener = { zoom: Float, centerX: Float, centerY: Float ->
+            camera2Manager.updateZoom(zoom, centerX, centerY)
             val progress = ((zoom - ZoomController.MIN_ZOOM) / (ZoomController.MAX_ZOOM - ZoomController.MIN_ZOOM) * 400).toInt()
             if (zoomSlider.progress != progress) zoomSlider.progress = progress
             zoomLabel.text = String.format("%.1fx", zoom)
@@ -922,6 +927,47 @@ class MainActivity : AppCompatActivity() {
                 lastSelectedResolution = position
                 currentResolutionIndex = position
                 restartCameraWithResolution(position)
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        // Preview resolution cap spinner
+        val previewResOptions = listOf("480p", "720p", "1080p")
+        val previewResMaxDims = listOf(854, 1280, 1920)
+        previewResSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, previewResOptions).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        val savedCapIndex = previewResMaxDims.indexOf(previewResCapMaxDim).coerceIn(0, previewResOptions.size - 1)
+        previewResSpinner.setSelection(savedCapIndex, false)
+        previewResSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!cameraReady) return
+                val newCap = previewResMaxDims[position]
+                if (newCap == previewResCapMaxDim) return
+                previewResCapMaxDim = newCap
+                previewResPrefs.edit().putInt(PREF_PREVIEW_RES_CAP, newCap).apply()
+                maxPreviewDimensions = getMaxPreviewDimensions()
+                val lens = lensManager.activeLens ?: return
+                val option = currentResolutionOptions.getOrNull(currentResolutionIndex)
+                val targetAspect = if (option != null && option.aspectW > 0 && option.aspectH > 0) {
+                    option.aspectW.toFloat() / option.aspectH
+                } else 0f
+                val previewSize = if (targetAspect > 0f) {
+                    lensManager.getPreviewSizeForAspectRatio(lens, targetAspect, maxPreviewDimensions.first, maxPreviewDimensions.second)
+                } else {
+                    lensManager.getBestPreviewSize(lens, maxPreviewDimensions.first, maxPreviewDimensions.second)
+                }
+                previewRenderer.stop()
+                camera2Manager.close()
+                camera2Manager.stopBackgroundThread()
+                camera2Manager.startBackgroundThread()
+                previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
+                previewRenderer.targetAspectRatio = targetAspect
+                previewRenderer.sensorOrientation = lensManager.getSensorOrientation(lens)
+                previewRenderer.isFrontCamera = lens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
+                previewRenderer.start()
+                camera2Manager.openCamera(lens, previewSize, photoOutput.resolutionWidth, photoOutput.resolutionHeight)
+                previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
             }
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
@@ -1245,12 +1291,17 @@ class MainActivity : AppCompatActivity() {
 
         CrashLogger.log(TAG, "viewToFrameCoords: vpX=$vpX vpY=$vpY vpW=$vpW vpH=$vpH u=$u v=$v")
 
-        // Undo zoom (shader pivots at 1 - zoomCenter: out = (in - pivot) * z + pivot)
-        val zc = previewRenderer.zoomController
-        u = (u - (1f - zc.zoomCenterX)) / zc.zoomFactor + zc.zoomCenterX
-        v = (v - (1f - zc.zoomCenterY)) / zc.zoomFactor + zc.zoomCenterY
-
-        CrashLogger.log(TAG, "viewToFrameCoords after zoom: u=$u v=$v zoomFactor=${zc.zoomFactor} zoomCenter=(${zc.zoomCenterX},${zc.zoomCenterY})")
+        // Map viewport coords to full sensor coordinates via crop region
+        val crop = camera2Manager.computeCropRegion()
+        val lens = lensManager.activeLens
+        if (crop != null && lens != null) {
+            val activeArray = lensManager.getSensorActiveArraySize(lens)
+            val sensorW = activeArray.width().toFloat()
+            val sensorH = activeArray.height().toFloat()
+            u = (crop.left + u * crop.width()) / sensorW
+            v = (crop.top + v * crop.height()) / sensorH
+            CrashLogger.log(TAG, "viewToFrameCoords crop: crop=(${crop.left},${crop.top},${crop.width()},${crop.height()}) sensor=${sensorW}x${sensorH} u=$u v=$v")
+        }
 
         return floatArrayOf(u.coerceIn(0f, 1f), v.coerceIn(0f, 1f))
     }
@@ -1579,6 +1630,13 @@ class MainActivity : AppCompatActivity() {
 
         camera2Manager.onAutoExposureReadout = { iso, shutterNs ->
             mainHandler.post { updateAutoExposureReadout(iso, shutterNs) }
+        }
+
+        camera2Manager.onMaxZoomReady = { maxZoom ->
+            mainHandler.post {
+                previewRenderer.zoomController.setMaxZoom(maxZoom)
+                CrashLogger.log(TAG, "onMaxZoomReady: maxZoom=$maxZoom")
+            }
         }
 
         camera2Manager.startBackgroundThread()
@@ -2098,9 +2156,6 @@ override fun onResume() {
         val deviceOrientation: Int,
         val sensorOrientation: Int,
         val focalLengthMm: Float,
-        val zoomFactor: Float,
-        val zoomCenterX: Float,
-        val zoomCenterY: Float,
         val agxSceneLinearTo709: FloatArray,
         val agxInsetMat: FloatArray,
         val agxOutsetMat: FloatArray,
@@ -2367,13 +2422,13 @@ override fun onResume() {
         display.getRealMetrics(metrics)
         val screenWidth = metrics.widthPixels
         val screenHeight = metrics.heightPixels
-        // Cap preview at 720p max dimension for performance
-        val maxDim = 1280
+        val maxDim = previewResCapMaxDim
         return Pair(maxDim, maxDim * screenHeight / screenWidth)
     }
 
     companion object {
         private const val TAG = "MainActivity"
         private const val REQUEST_CAMERA = 100
+        private const val PREF_PREVIEW_RES_CAP = "preview_res_cap"
     }
 }
