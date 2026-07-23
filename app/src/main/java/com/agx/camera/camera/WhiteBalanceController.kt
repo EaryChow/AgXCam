@@ -3,7 +3,13 @@ package com.agx.camera.camera
 enum class WhiteBalanceMode {
     AUTO,
     KELVIN,
-    GRAY_CARD
+    GRAY_CARD,
+    DAYLIGHT,
+    CLOUDY,
+    INCANDESCENT,
+    FLUORESCENT,
+    TWILIGHT,
+    SHADE
 }
 
 data class KelvinState(

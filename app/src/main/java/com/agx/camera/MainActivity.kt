@@ -77,6 +77,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var disconnectBanner: TextView
     private lateinit var flashButton: ImageView
     private lateinit var wbButton: TextView
+    private lateinit var awbLockButton: ImageView
     private lateinit var settingsButton: ImageView
     private lateinit var frontRearToggle: ImageView
     private lateinit var zoomLabel: TextView
@@ -217,6 +218,7 @@ class MainActivity : AppCompatActivity() {
         warningContainer = findViewById(R.id.warningContainer)
         flashButton = findViewById(R.id.flash_button)
         wbButton = findViewById(R.id.wb_button)
+        awbLockButton = findViewById(R.id.awb_lock_button)
         settingsButton = findViewById(R.id.settings_button)
         frontRearToggle = findViewById(R.id.front_rear_toggle)
         zoomLabel = findViewById(R.id.zoom_label)
@@ -603,6 +605,19 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Tap the preview to sample gray card", Toast.LENGTH_SHORT).show()
             }
             true
+        }
+
+        awbLockButton.setOnClickListener {
+            if (!cameraReady) return@setOnClickListener
+            if (camera2Manager.isAwbLocked) {
+                camera2Manager.unlockAwb()
+                awbLockButton.setImageResource(R.drawable.ic_lock_open)
+                awbLockButton.alpha = 0.6f
+            } else {
+                camera2Manager.lockAwb()
+                awbLockButton.setImageResource(R.drawable.ic_lock_closed)
+                awbLockButton.alpha = 1.0f
+            }
         }
 
         aeAfLockButton.setOnClickListener {
@@ -1196,8 +1211,26 @@ class MainActivity : AppCompatActivity() {
     private fun updateWbUI() {
         wbButton.text = when (currentWbMode) {
             WhiteBalanceMode.AUTO -> "WB"
-            WhiteBalanceMode.KELVIN -> "WB\u00B0K"
-            WhiteBalanceMode.GRAY_CARD -> "WB\u25A1"
+            WhiteBalanceMode.KELVIN -> "\u00B0K"
+            WhiteBalanceMode.GRAY_CARD -> "Gry"
+            WhiteBalanceMode.DAYLIGHT -> "Sun"
+            WhiteBalanceMode.CLOUDY -> "Cld"
+            WhiteBalanceMode.INCANDESCENT -> "Tng"
+            WhiteBalanceMode.FLUORESCENT -> "Flr"
+            WhiteBalanceMode.TWILIGHT -> "Dsk"
+            WhiteBalanceMode.SHADE -> "Shd"
+        }
+        if (currentWbMode == WhiteBalanceMode.AUTO) {
+            awbLockButton.visibility = View.VISIBLE
+            awbLockButton.setImageResource(
+                if (camera2Manager.isAwbLocked) R.drawable.ic_lock_closed else R.drawable.ic_lock_open
+            )
+            awbLockButton.alpha = if (camera2Manager.isAwbLocked) 1.0f else 0.6f
+        } else {
+            awbLockButton.visibility = View.GONE
+            if (camera2Manager.isAwbLocked) {
+                camera2Manager.unlockAwb()
+            }
         }
     }
 
@@ -1293,13 +1326,15 @@ class MainActivity : AppCompatActivity() {
     private var lastEvTapTime = 0L
 
     /** Maps view coordinates to normalized (0..1) coordinates in the camera frame. */
-    private fun viewToFrameCoords(x: Float, y: Float): FloatArray {
+    private fun viewToFrameCoords(x: Float, y: Float): FloatArray? {
         val fw = previewRenderer.currentYuvWidth.toFloat()
         val fh = previewRenderer.currentYuvHeight.toFloat()
         val vw = textureView.width.toFloat()
         val vh = textureView.height.toFloat()
 
         CrashLogger.log(TAG, "viewToFrameCoords: x=$x y=$y fw=$fw fh=$fh vw=$vw vh=$vh")
+
+        if (fw <= 0f || fh <= 0f || vw <= 0f || vh <= 0f) return null
 
         // Undo the renderer's CENTER_INSIDE viewport (letterbox/pillarbox)
         val contentAspect = fw / fh
@@ -1341,7 +1376,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyFocusPoint(viewX: Float, viewY: Float) {
         val lens = lensManager.activeLens ?: return
-        val uv = viewToFrameCoords(viewX, viewY)
+        val uv = viewToFrameCoords(viewX, viewY) ?: return
         autofocusController.setFocusPoint(
             uv[0], uv[1],
             lensManager.getSensorActiveArraySize(lens),
@@ -1392,19 +1427,19 @@ class MainActivity : AppCompatActivity() {
         val kelvinBtn = wbPopup.findViewById<TextView>(R.id.wb_kelvin)
 
         val clickListener = View.OnClickListener { v ->
-            val mode = when (v.id) {
-                R.id.wb_auto -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_AUTO
-                R.id.wb_daylight -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT
-                R.id.wb_cloudy -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT
-                R.id.wb_tungsten -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT
-                R.id.wb_fluorescent -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT
-                R.id.wb_twilight -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_TWILIGHT
-                R.id.wb_shade -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_SHADE
+            val (mode, wbEnum) = when (v.id) {
+                R.id.wb_auto -> Pair(android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_AUTO, WhiteBalanceMode.AUTO)
+                R.id.wb_daylight -> Pair(android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT, WhiteBalanceMode.DAYLIGHT)
+                R.id.wb_cloudy -> Pair(android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT, WhiteBalanceMode.CLOUDY)
+                R.id.wb_tungsten -> Pair(android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT, WhiteBalanceMode.INCANDESCENT)
+                R.id.wb_fluorescent -> Pair(android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT, WhiteBalanceMode.FLUORESCENT)
+                R.id.wb_twilight -> Pair(android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_TWILIGHT, WhiteBalanceMode.TWILIGHT)
+                R.id.wb_shade -> Pair(android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_SHADE, WhiteBalanceMode.SHADE)
                 else -> return@OnClickListener
             }
             if (mode in awbModes) {
                 camera2Manager.setWhiteBalanceMode(mode)
-                currentWbMode = WhiteBalanceMode.AUTO
+                currentWbMode = wbEnum
                 updateWbUI()
                 syncWbSliders()
                 uploadAgxUniforms()
@@ -1897,9 +1932,24 @@ class MainActivity : AppCompatActivity() {
             WhiteBalanceMode.KELVIN -> {
                 val d65xy = Pair(ColorMatrix.D65_X, ColorMatrix.D65_Y)
                 val userXY = WhiteBalanceMath.kelvinToXy(kelvinState.kelvin, kelvinState.tint)
-                WhiteBalanceMath.chromaticAdaptationBradford(d65xy, userXY)
+                val bradford = WhiteBalanceMath.chromaticAdaptationBradford(d65xy, userXY)
+                val m = bradford.m
+                CrashLogger.log(TAG, "uploadAgxUniforms KELVIN: kelvin=${kelvinState.kelvin} tint=${kelvinState.tint} " +
+                    "userXY=(${String.format("%.6f", userXY.first)}, ${String.format("%.6f", userXY.second)}) " +
+                    "d65XY=(${String.format("%.6f", d65xy.first)}, ${String.format("%.6f", d65xy.second)}) " +
+                    "bradford=[${String.format("%.6f", m[0])},${String.format("%.6f", m[1])},${String.format("%.6f", m[2])}, " +
+                    "${String.format("%.6f", m[3])},${String.format("%.6f", m[4])},${String.format("%.6f", m[5])}, " +
+                    "${String.format("%.6f", m[6])},${String.format("%.6f", m[7])},${String.format("%.6f", m[8])}] " +
+                    "awbMode=$currentWbMode")
+                bradford
             }
             WhiteBalanceMode.GRAY_CARD -> ColorMatrix.identity()
+            WhiteBalanceMode.DAYLIGHT -> ColorMatrix.identity()
+            WhiteBalanceMode.CLOUDY -> ColorMatrix.identity()
+            WhiteBalanceMode.INCANDESCENT -> ColorMatrix.identity()
+            WhiteBalanceMode.FLUORESCENT -> ColorMatrix.identity()
+            WhiteBalanceMode.TWILIGHT -> ColorMatrix.identity()
+            WhiteBalanceMode.SHADE -> ColorMatrix.identity()
         }
 
         val insetParams = agxParams.toInsetParams()
@@ -1926,7 +1976,7 @@ class MainActivity : AppCompatActivity() {
         val pixelStride = plane.pixelStride
 
         if (rowStride != width || buffer.capacity() != width * height) {
-            CrashLogger.log(TAG, "extractPlane: size=${width}x${height} rowStride=$rowStride " +
+            Log.d(TAG, "extractPlane: size=${width}x${height} rowStride=$rowStride " +
                 "pixelStride=$pixelStride capacity=${buffer.capacity()}")
         }
 

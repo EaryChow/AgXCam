@@ -65,6 +65,8 @@ class Camera2Manager(private val context: Context) {
 
     // White balance
     private var currentAwbMode = CaptureRequest.CONTROL_AWB_MODE_AUTO
+    var isAwbLocked = false
+        private set
 
     // Focus/Exposure lock
     private var meteringRegions: Array<MeteringRectangle>? = null
@@ -327,7 +329,18 @@ class Camera2Manager(private val context: Context) {
 
     fun setWhiteBalanceMode(mode: Int) {
         currentAwbMode = mode
+        CrashLogger.log(TAG, "setWhiteBalanceMode: mode=$mode (${awbModeName(mode)}) isManualExposure=$isManualExposure")
         if (isManualExposure) return
+        applyPreviewRequest()
+    }
+
+    fun lockAwb() {
+        isAwbLocked = true
+        applyPreviewRequest()
+    }
+
+    fun unlockAwb() {
+        isAwbLocked = false
         applyPreviewRequest()
     }
 
@@ -356,9 +369,14 @@ class Camera2Manager(private val context: Context) {
             addTarget(previewReader!!.surface)
             set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
-            set(CaptureRequest.CONTROL_AWB_MODE, currentAwbMode)
+            val awbToSend = if (currentAwbMode == CaptureRequest.CONTROL_AWB_MODE_OFF) {
+                CaptureRequest.CONTROL_AWB_MODE_AUTO
+            } else {
+                currentAwbMode
+            }
+            set(CaptureRequest.CONTROL_AWB_MODE, awbToSend)
             meteringRegions?.let { set(CaptureRequest.CONTROL_AF_REGIONS, it) }
-            if (focusLocked) set(CaptureRequest.CONTROL_AWB_LOCK, true)
+            if (isAwbLocked) set(CaptureRequest.CONTROL_AWB_LOCK, true)
             set(CaptureRequest.SENSOR_SENSITIVITY, iso)
             set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureTimeNs)
             set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
@@ -483,7 +501,7 @@ class Camera2Manager(private val context: Context) {
                 result: TotalCaptureResult
             ) {
                 val afState = result.get(CaptureResult.CONTROL_AF_STATE) ?: return
-                CrashLogger.log(TAG, "AF scan state: $afState")
+                Log.d(TAG, "AF scan state: $afState")
 
                 if (afState == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED ||
                     afState == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED
@@ -532,7 +550,7 @@ class Camera2Manager(private val context: Context) {
 
         try {
             session.setRepeatingRequest(holdRequest.build(), aeReadoutCallback, backgroundHandler)
-            CrashLogger.log(TAG, "holdRegionFocus: locked with regions=${meteringRegions?.contentToString()}")
+            Log.d(TAG, "holdRegionFocus: locked with regions=${meteringRegions?.contentToString()}")
         } catch (e: CameraAccessException) {
             Log.e(TAG, "holdRegionFocus failed", e)
         }
@@ -613,7 +631,12 @@ class Camera2Manager(private val context: Context) {
         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addTarget(previewReader!!.surface)
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
-            set(CaptureRequest.CONTROL_AWB_MODE, currentAwbMode)
+            val awbToSend = if (currentAwbMode == CaptureRequest.CONTROL_AWB_MODE_OFF) {
+                CaptureRequest.CONTROL_AWB_MODE_AUTO
+            } else {
+                currentAwbMode
+            }
+            set(CaptureRequest.CONTROL_AWB_MODE, awbToSend)
             meteringRegions?.let { setMeteringRegions(it) }
             if (inHoldState) {
                 set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
@@ -623,11 +646,15 @@ class Camera2Manager(private val context: Context) {
             }
             if (focusLocked) {
                 set(CaptureRequest.CONTROL_AE_LOCK, true)
+            }
+            if (isAwbLocked) {
                 set(CaptureRequest.CONTROL_AWB_LOCK, true)
             }
             currentFlashMode.applyToRequest(this, availableAeModes)
             applyCropRegion()
         }
+
+        CrashLogger.log(TAG, "applyPreviewRequest: awb=${awbModeName(currentAwbMode)} af=$afMode hold=$inHoldState locked=$focusLocked awbLocked=$isAwbLocked")
 
         try {
             session.setRepeatingRequest(request.build(), aeReadoutCallback, backgroundHandler)
@@ -732,7 +759,6 @@ class Camera2Manager(private val context: Context) {
                             }
                             setMeteringRegions(arrayOf(meteringRect))
                             set(CaptureRequest.CONTROL_AE_LOCK, true)
-                            set(CaptureRequest.CONTROL_AWB_LOCK, true)
                             if (isManualExposure) {
                                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
                                 set(CaptureRequest.SENSOR_SENSITIVITY, currentManualIso)
@@ -806,7 +832,6 @@ class Camera2Manager(private val context: Context) {
                             }
                             setMeteringRegions(arrayOf(meteringRect))
                             set(CaptureRequest.CONTROL_AE_LOCK, true)
-                            set(CaptureRequest.CONTROL_AWB_LOCK, true)
                             if (isManualExposure) {
                                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
                                 set(CaptureRequest.SENSOR_SENSITIVITY, currentManualIso)
@@ -972,6 +997,18 @@ class Camera2Manager(private val context: Context) {
         if (CaptureRequest.CONTROL_AE_MODE_ON in availableAeModes) return CaptureRequest.CONTROL_AE_MODE_ON
         if (CaptureRequest.CONTROL_AE_MODE_OFF in availableAeModes) return CaptureRequest.CONTROL_AE_MODE_OFF
         return CaptureRequest.CONTROL_AE_MODE_OFF
+    }
+
+    private fun awbModeName(mode: Int): String = when (mode) {
+        CaptureRequest.CONTROL_AWB_MODE_AUTO -> "AUTO"
+        CaptureRequest.CONTROL_AWB_MODE_OFF -> "OFF"
+        CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT -> "DAYLIGHT"
+        CaptureRequest.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT -> "CLOUDY"
+        CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT -> "INCANDESCENT"
+        CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT -> "FLUORESCENT"
+        CaptureRequest.CONTROL_AWB_MODE_TWILIGHT -> "TWILIGHT"
+        CaptureRequest.CONTROL_AWB_MODE_SHADE -> "SHADE"
+        else -> "UNKNOWN($mode)"
     }
 
     private fun CaptureRequest.Builder.setMeteringRegions(regions: Array<MeteringRectangle>?) {
