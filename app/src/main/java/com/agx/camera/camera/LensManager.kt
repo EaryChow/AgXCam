@@ -108,7 +108,7 @@ class LensManager(private val context: Context) {
             val minFocusDist = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
             val hasFlash = chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
 
-            CrashLogger.log(TAG, "enumerate: id=$id facing=$facing level=$level focal=$focal maxAfRegions=$maxAfRegions maxAeRegions=$maxAeRegions afModes=${afModes.toList()} minFocusDist=$minFocusDist hasFlash=$hasFlash")
+            CrashLogger.log(TAG, "enumerate: id=$id facing=$facing level=$level focal=$focal hasRaw=$hasRaw maxAfRegions=$maxAfRegions maxAeRegions=$maxAeRegions afModes=${afModes.toList()} minFocusDist=$minFocusDist hasFlash=$hasFlash")
 
             _lenses.add(LensInfo(id, facing, focal, hasRaw, level, "",
                 jpegOutputSizes = streamMap?.getOutputSizes(android.graphics.ImageFormat.JPEG) ?: emptyArray(),

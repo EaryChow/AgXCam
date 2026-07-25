@@ -1597,7 +1597,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        CrashLogger.log(TAG, "initCamera: primary=${primary.cameraId} ${primary.label} level=${primary.hardwareLevel}")
+        CrashLogger.log(TAG, "initCamera: primary=${primary.cameraId} ${primary.label} level=${primary.hardwareLevel} hasRaw=${primary.hasRawSensor}")
         val previewSize = lensManager.getBestPreviewSize(primary, maxPreviewDimensions.first, maxPreviewDimensions.second)
         buildLensSelectorUI()
 
