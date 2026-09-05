@@ -97,9 +97,15 @@ class LensManager(private val context: Context) {
             val focalLengths = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
             val focal = focalLengths?.firstOrNull() ?: 0.0f
             val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
-            val hasRaw = caps.contains(17) // REQUEST_AVAILABLE_CAPABILITIES_RAW
+            val hasRawFromCap = caps.contains(17) // REQUEST_AVAILABLE_CAPABILITIES_RAW
             val activeArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
             val streamMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+
+            // Fallback: some OEM HALs (e.g. Xiaomi) don't advertise RAW in capabilities
+            // but do support RAW_SENSOR output via stream configuration
+            val hasRaw = hasRawFromCap || (
+                streamMap?.getOutputSizes(android.graphics.ImageFormat.RAW_SENSOR)?.isNotEmpty() == true
+            )
             
             // New detailed characteristics for lens classification
             val maxAfRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
@@ -108,7 +114,12 @@ class LensManager(private val context: Context) {
             val minFocusDist = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
             val hasFlash = chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
 
-            CrashLogger.log(TAG, "enumerate: id=$id facing=$facing level=$level focal=$focal hasRaw=$hasRaw maxAfRegions=$maxAfRegions maxAeRegions=$maxAeRegions afModes=${afModes.toList()} minFocusDist=$minFocusDist hasFlash=$hasFlash")
+            val rawDetectMethod = when {
+                hasRawFromCap -> "capability"
+                hasRaw -> "streamConfig"
+                else -> "none"
+            }
+            CrashLogger.log(TAG, "enumerate: id=$id facing=$facing level=$level focal=$focal hasRaw=$hasRaw rawDetect=$rawDetectMethod maxAfRegions=$maxAfRegions maxAeRegions=$maxAeRegions afModes=${afModes.toList()} minFocusDist=$minFocusDist hasFlash=$hasFlash")
 
             _lenses.add(LensInfo(id, facing, focal, hasRaw, level, "",
                 jpegOutputSizes = streamMap?.getOutputSizes(android.graphics.ImageFormat.JPEG) ?: emptyArray(),
