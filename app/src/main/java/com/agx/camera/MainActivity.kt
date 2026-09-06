@@ -1012,12 +1012,11 @@ class MainActivity : AppCompatActivity() {
                 camera2Manager.close()
                 camera2Manager.stopBackgroundThread()
                 camera2Manager.startBackgroundThread()
-                previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
-                previewRenderer.targetAspectRatio = targetAspect
                 previewRenderer.sensorOrientation = lensManager.getSensorOrientation(lens)
                 previewRenderer.isFrontCamera = lens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
+                preparePreviewPipeline(previewSize, targetAspect)
                 previewRenderer.start()
-                camera2Manager.openCamera(lens, previewSize, photoOutput.resolutionWidth, photoOutput.resolutionHeight)
+                camera2Manager.openCamera(lens, previewSize, photoOutput.resolutionWidth, photoOutput.resolutionHeight, useRaw = developerSwitch.useRawSensor)
                 previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
             }
             override fun onNothingSelected(parent: AdapterView<*>?) {}
@@ -1578,10 +1577,9 @@ class MainActivity : AppCompatActivity() {
         camera2Manager.startBackgroundThread()
         previewRenderer.sensorOrientation = lensManager.getSensorOrientation(lens)
         previewRenderer.isFrontCamera = lens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
-        previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
-        previewRenderer.targetAspectRatio = targetAspect
+        preparePreviewPipeline(previewSize, targetAspect)
         previewRenderer.start()
-        camera2Manager.openCamera(lens, previewSize, targetW, targetH)
+        camera2Manager.openCamera(lens, previewSize, targetW, targetH, useRaw = developerSwitch.useRawSensor)
         previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
     }
 
@@ -2321,13 +2319,12 @@ override fun onResume() {
                 // Stop render thread to recreate FBO with new preview size
                 previewRenderer.stop()
 
-                previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
-                previewRenderer.targetAspectRatio = targetAspect
+                preparePreviewPipeline(previewSize, targetAspect)
                 previewRenderer.start()
                 camera2Manager.startBackgroundThread()
                 previewRenderer.sensorOrientation = lensManager.getSensorOrientation(lens)
                 previewRenderer.isFrontCamera = lens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
-                camera2Manager.openCamera(lens, previewSize, photoOutput.resolutionWidth, photoOutput.resolutionHeight)
+                camera2Manager.openCamera(lens, previewSize, photoOutput.resolutionWidth, photoOutput.resolutionHeight, useRaw = developerSwitch.useRawSensor)
                 previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
             }
         }
