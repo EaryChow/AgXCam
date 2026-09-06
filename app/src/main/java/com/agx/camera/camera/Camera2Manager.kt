@@ -705,20 +705,26 @@ class Camera2Manager(private val context: Context) {
             if (inHoldState) {
                 set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
             }
-            if (currentExposureComp != 0) {
-                set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, currentExposureComp)
-            }
-            if (focusLocked) {
-                set(CaptureRequest.CONTROL_AE_LOCK, true)
+            if (isManualExposure) {
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                set(CaptureRequest.SENSOR_SENSITIVITY, currentManualIso)
+                set(CaptureRequest.SENSOR_EXPOSURE_TIME, currentManualExposureNs)
+            } else {
+                if (currentExposureComp != 0) {
+                    set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, currentExposureComp)
+                }
+                if (focusLocked) {
+                    set(CaptureRequest.CONTROL_AE_LOCK, true)
+                }
+                currentFlashMode.applyToRequest(this, availableAeModes)
             }
             if (isAwbLocked) {
                 set(CaptureRequest.CONTROL_AWB_LOCK, true)
             }
-            currentFlashMode.applyToRequest(this, availableAeModes)
             applyCropRegion()
         }
 
-        CrashLogger.log(TAG, "applyPreviewRequest: awb=${awbModeName(currentAwbMode)} af=$afMode hold=$inHoldState locked=$focusLocked awbLocked=$isAwbLocked")
+        CrashLogger.log(TAG, "applyPreviewRequest: awb=${awbModeName(currentAwbMode)} af=$afMode hold=$inHoldState locked=$focusLocked awbLocked=$isAwbLocked manual=$isManualExposure iso=$currentManualIso shutter=${currentManualExposureNs}")
 
         try {
             session.setRepeatingRequest(request.build(), aeReadoutCallback, backgroundHandler)

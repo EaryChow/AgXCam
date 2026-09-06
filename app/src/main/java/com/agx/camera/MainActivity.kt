@@ -2657,7 +2657,7 @@ override fun onResume() {
 
         amToggleButton.setOnClickListener {
             isManualMode = !isManualMode
-            updateManualModeUI()
+            updateManualModeUI(isManualMode)
         }
 
         isoOverlay.setOnClickListener { togglePopup(isoPopup, isoOverlay, isoPopupShowing) { isoPopupShowing = it } }
@@ -2752,15 +2752,19 @@ override fun onResume() {
         updateManualModeUI()
     }
 
-    private fun updateManualModeUI() {
+    private fun updateManualModeUI(syncToAuto: Boolean = false) {
         amToggleButton.text = if (isManualMode) "M" else "A"
         isoSeekBar.isEnabled = isManualMode
         shutterSeekBar.isEnabled = isManualMode
         isoSeekBar.alpha = if (isManualMode) 1.0f else 0.4f
         shutterSeekBar.alpha = if (isManualMode) 1.0f else 0.4f
         if (isManualMode) {
-            // sync sliders to last auto values
-            syncSlidersToAutoValues()
+            // Only snap sliders to last auto values when the user first enters manual mode;
+            // on session reopens (RAW/YUV toggle, resolution change, resume) keep the
+            // user's manual settings.
+            if (syncToAuto) {
+                syncSlidersToAutoValues()
+            }
             val iso = isoFromProgress(isoSeekBar.progress)
             val expNs = shutterNsFromProgress(shutterSeekBar.progress)
             camera2Manager.setManualExposure(iso, expNs)
