@@ -34,6 +34,7 @@ class NrShaderProgram {
         programId = createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
         if (programId == 0) {
             Log.e(TAG, "Failed to create NR shader program")
+            com.agx.camera.CrashLogger.log(TAG, "Failed to create NR shader program")
             return
         }
 
@@ -54,6 +55,7 @@ class NrShaderProgram {
         uShoulderLoc = GLES20.glGetUniformLocation(programId, "u_shoulder")
 
         Log.d(TAG, "NR shader program created: $programId")
+        com.agx.camera.CrashLogger.log(TAG, "Program created: nr=$programId")
     }
 
     fun draw(
@@ -104,6 +106,8 @@ class NrShaderProgram {
         GLES20.glDisableVertexAttribArray(texHandle)
     }
 
+    fun isReady(): Boolean = programId != 0
+
     fun destroy() {
         if (programId != 0) {
             GLES20.glDeleteProgram(programId)
@@ -122,9 +126,10 @@ class NrShaderProgram {
         )
 
         private const val VERTEX_SHADER = """
-attribute vec2 a_position;
-attribute vec2 a_texCoord;
-varying vec2 v_texCoord;
+#version 300 es
+in vec2 a_position;
+in vec2 a_texCoord;
+out vec2 v_texCoord;
 void main() {
     gl_Position = vec4(a_position, 0.0, 1.0);
     v_texCoord = a_texCoord;
@@ -157,13 +162,13 @@ uniform float u_shoulder;
 
 ${AgxCoreGlsl.CORE_HELPERS}
 
-${AgxCoreGlsl.AGX_FORMATION}
+${AgxCoreGlsl.AGX_FORMATION_NORM}
 
 void main() {
     vec3 center = texture(u_demosaic_tex, v_texCoord).rgb;
 
     if (u_nr_strength <= 0.0) {
-        fragColor = vec4(agxFormation(center), 1.0);
+        fragColor = vec4(agxFormationNorm(center), 1.0);
         return;
     }
 
@@ -181,7 +186,7 @@ void main() {
     }
     vec3 filtered = sum / wsum;
     vec3 result = mix(center, filtered, u_nr_strength);
-    fragColor = vec4(agxFormation(result), 1.0);
+    fragColor = vec4(agxFormationNorm(result), 1.0);
 }
 """
 
@@ -198,7 +203,9 @@ void main() {
             val linkStatus = IntArray(1)
             GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linkStatus, 0)
             if (linkStatus[0] != GLES20.GL_TRUE) {
-                Log.e(TAG, "Program link failed: ${GLES20.glGetProgramInfoLog(program)}")
+                val info = "Program link failed: ${GLES20.glGetProgramInfoLog(program)}"
+                Log.e(TAG, info)
+                com.agx.camera.CrashLogger.log(TAG, info)
                 GLES20.glDeleteProgram(program)
                 return 0
             }
@@ -216,7 +223,9 @@ void main() {
             val compiled = IntArray(1)
             GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
             if (compiled[0] != GLES20.GL_TRUE) {
-                Log.e(TAG, "Shader compile failed: ${GLES20.glGetShaderInfoLog(shader)}")
+                val info = "Shader compile failed: ${GLES20.glGetShaderInfoLog(shader)}"
+                Log.e(TAG, info)
+                com.agx.camera.CrashLogger.log(TAG, info)
                 GLES20.glDeleteShader(shader)
                 return 0
             }

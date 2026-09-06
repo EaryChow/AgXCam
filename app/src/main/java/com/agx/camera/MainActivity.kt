@@ -12,6 +12,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.util.Size
 import android.view.OrientationEventListener
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -40,6 +41,7 @@ import com.agx.camera.io.JpegEncoder
 import com.agx.camera.io.MediaStoreSaver
 import com.agx.camera.thermal.ThermalManager
 import com.agx.camera.CrashLogger
+import java.nio.ByteBuffer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -69,6 +71,10 @@ class MainActivity : AppCompatActivity() {
     private var pendingPauseCleanup = false
     private var errorDialogShowing = false
     private var currentDeviceOrientation = 0
+
+    @Volatile private var rawFrameDelivered = false
+    private var rawFrameLogCount = 0
+    private var rawFallbackRunnable: Runnable? = null
 
     private lateinit var orientationListener: OrientationEventListener
 
@@ -317,6 +323,9 @@ class MainActivity : AppCompatActivity() {
             CrashLogger.log(TAG, "Developer switch toggled: useRaw=$useRaw")
             Log.d(TAG, "Developer switch toggled: useRaw=$useRaw")
 
+            rawFallbackRunnable?.let { mainHandler.removeCallbacks(it) }
+            rawFallbackRunnable = null
+
             // Update front/rear toggle visibility based on RAW front lens support
             updateFrontRearToggleVisibility(useRaw)
 
@@ -342,18 +351,18 @@ class MainActivity : AppCompatActivity() {
 
             val lens = lensManager.activeLens ?: return@DeveloperSwitch
             val previewSize = lensManager.getBestPreviewSize(lens, maxPreviewDimensions.first, maxPreviewDimensions.second)
+
+            // Stop render thread before recreating it (must be fully stopped before start
+            // to avoid two threads sharing the same EGL display/context/surface).
+            previewRenderer.stop()
+
             camera2Manager.close()
             camera2Manager.stopBackgroundThread()
-            previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
-            previewRenderer.targetAspectRatio = 0f
-            if (useRaw) {
-                previewRenderer.enableBayerMode(previewSize.width, previewSize.height)
-            } else {
-                previewRenderer.disableBayerMode()
-            }
-            previewRenderer.start()
             camera2Manager.startBackgroundThread()
-            camera2Manager.openCamera(lens, previewSize, 0, 0)
+
+            camera2Manager.openCamera(lens, previewSize, 0, 0, useRaw = useRaw)
+            preparePreviewPipeline(previewSize, 0f)
+            previewRenderer.start()
             developerSwitch.updateBannerForRawMode(useRaw)
             buildLensSelectorUI()
         }
@@ -534,6 +543,20 @@ class MainActivity : AppCompatActivity() {
                 thumbnailLatch.countDown()
             }
 
+            val rawFrame = if (previewRenderer.useBayerPath) previewRenderer.pullBayerCopy() else null
+            if (rawFrame != null) {
+                CrashLogger.log(TAG, "shutter: RAW snapshot ${rawFrame.width}x${rawFrame.height}")
+                processRawSnapshot(rawFrame, session, thumbnailLatch, thumbnailRef)
+                mainHandler.post {
+                    isCapturing = false
+                    shutterController.onCaptureComplete()
+                    finishingCaptureOverlay.visibility = View.GONE
+                    if (pendingPauseCleanup) {
+                        pendingPauseCleanup = false
+                        performCleanup()
+                    }
+                }
+            } else {
             camera2Manager.captureStill(
                 onCaptureAvailable = { image, result ->
                     processCapture(image, result, session, thumbnailLatch, thumbnailRef)
@@ -560,6 +583,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             )
+            }
         }
 
         textureView.setOnTouchListener { _, event ->
@@ -1603,13 +1627,15 @@ class MainActivity : AppCompatActivity() {
 
         previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
         previewRenderer.targetAspectRatio = 0f
-        previewRenderer.start()
-
         uploadAgxUniforms()
+
+        preparePreviewPipeline(previewSize, 0f)
+        previewRenderer.start()
 
         var previewFrameCount = 0
         camera2Manager.onFrameAvailable = frameHandler@{ image ->
             if (!cameraReady) return@frameHandler
+            if (previewRenderer.useBayerPath) return@frameHandler
             previewFrameCount++
             if (previewFrameCount == 1) {
                 CrashLogger.log(TAG, "onFrameAvailable: first frame ${image.width}x${image.height}")
@@ -1636,11 +1662,106 @@ class MainActivity : AppCompatActivity() {
             previewRenderer.setYuvFrame(yCopy, uCopy, vCopy, w, h)
         }
 
+        camera2Manager.onRawFrameAvailable = rawHandler@{ image ->
+            if (!cameraReady) return@rawHandler
+            if (!previewRenderer.useBayerPath) return@rawHandler
+            val rawW = image.width
+            val rawH = image.height
+            if (rawW <= 0 || rawH <= 0) return@rawHandler
+            val plane = image.planes.getOrNull(0) ?: return@rawHandler
+            if (plane.pixelStride != 2) return@rawHandler
+
+            rawFrameDelivered = true
+            rawFallbackRunnable?.let { mainHandler.removeCallbacks(it) }
+            rawFallbackRunnable = null
+
+            val stride = plane.rowStride
+            val dest = acquireRawBuffer(rawW, rawH)
+            val src = plane.buffer
+
+            if (rawFrameLogCount == 0 || rawFrameLogCount % 150 == 0) {
+                var sampleMin = 0xFFFF
+                var sampleMax = 0
+                var sampleCount = 0
+                var r = 0
+                while (r < rawH) {
+                    var c = 0
+                    while (c < rawW) {
+                        val v = (src.get(r * stride + c * 2).toInt() and 0xFF) or
+                            ((src.get(r * stride + c * 2 + 1).toInt() and 0xFF) shl 8)
+                        if (v < sampleMin) sampleMin = v
+                        if (v > sampleMax) sampleMax = v
+                        sampleCount++
+                        c += 64
+                    }
+                    r += 64
+                }
+                CrashLogger.log(
+                    TAG, "onRawFrameAvailable: #$rawFrameLogCount ${rawW}x${rawH} " +
+                        "stride=$stride pixelStride=${plane.pixelStride} " +
+                        "samples=$sampleCount min=$sampleMin max=$sampleMax"
+                )
+                Log.d(TAG, "onRawFrameAvailable: ${rawW}x${rawH} min=$sampleMin max=$sampleMax")
+            }
+            rawFrameLogCount++
+
+            var offset = 0
+            for (row in 0 until rawH) {
+                src.position(row * stride)
+                src.limit(row * stride + rawW * 2)
+                dest.position(offset)
+                dest.put(src)
+                offset += rawW * 2
+            }
+            dest.position(0)
+            val ccGains = camera2Manager.latestColorCorrectionGains
+            val ccMat = camera2Manager.latestColorCorrectionMatrix
+            if (ccGains != null && ccGains[1] > 0f && ccGains[2] > 0f) {
+                val gMean = (ccGains[1] + ccGains[2]) * 0.5f
+                if (gMean > 0f) {
+                    previewRenderer.wbGainR = (ccGains[0] / gMean).coerceIn(0.3f, 8f)
+                    previewRenderer.wbGainG = 1f
+                    previewRenderer.wbGainB = (ccGains[3] / gMean).coerceIn(0.3f, 8f)
+                }
+                previewRenderer.ccMatrix = ccMat
+                if (wbEstimateFrame++ % 60 == 0) {
+                    CrashLogger.log(
+                        TAG, "hal cc: frame=$wbEstimateFrame " +
+                            "gainsR=${String.format("%.3f", previewRenderer.wbGainR)} " +
+                            "gainsB=${String.format("%.3f", previewRenderer.wbGainB)} " +
+                            "raw=[${ccGains.joinToString { String.format("%.3f", it) }}] " +
+                            "mat=[${ccMat?.joinToString { String.format("%.4f", it) }}]"
+                    )
+                }
+            } else {
+                previewRenderer.ccMatrix = null
+                if (wbEstimateFrame++ % 15 == 0) {
+                    estimateAutoWhiteBalance(dest, rawW, rawH)
+                }
+            }
+            previewRenderer.setBayerFrame(dest, rawW, rawH, rawW)
+        }
+
         camera2Manager.onSessionReady = { width, height ->
             CrashLogger.log(TAG, "onSessionReady: ${width}x${height}")
             Log.d(TAG, "Camera session ready: ${width}x${height}")
             cameraReady = true
             openingCamera = false
+
+            if (previewRenderer.useBayerPath) {
+                rawFrameDelivered = false
+                rawFallbackRunnable?.let { mainHandler.removeCallbacks(it) }
+                rawFallbackRunnable = Runnable {
+                    rawFallbackRunnable = null
+                    if (previewRenderer.useBayerPath && cameraReady && !rawFrameDelivered) {
+                        CrashLogger.log(TAG, "RAW fallback: no RAW frames within timeout, reverting to YUV")
+                        Log.w(TAG, "No RAW frames received, reverting to YUV fallback")
+                        developerSwitch.revertToggle()
+                    }
+                }
+                mainHandler.postDelayed(rawFallbackRunnable!!, 2500)
+            }
+
             mainHandler.post {
                 lensSwitchOverlay.visibility = View.GONE
                 val lens = lensManager.activeLens
@@ -1713,7 +1834,7 @@ class MainActivity : AppCompatActivity() {
             previewRenderer.sensorOrientation = lensManager.getSensorOrientation(primary)
             previewRenderer.isFrontCamera = primary.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
             CrashLogger.log(TAG, "initCamera: calling openCamera sensorOrientation=${previewRenderer.sensorOrientation} isFront=${previewRenderer.isFrontCamera}")
-            camera2Manager.openCamera(primary, previewSize, 0, 0)
+            camera2Manager.openCamera(primary, previewSize, 0, 0, useRaw = developerSwitch.useRawSensor)
             previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
             CrashLogger.log(TAG, "initCamera: openCamera returned, captureSize=${camera2Manager.captureSize.width}x${camera2Manager.captureSize.height}")
         } catch (e: Exception) {
@@ -1728,6 +1849,155 @@ class MainActivity : AppCompatActivity() {
         }
 
         developerSwitch.setRawSensorAvailable(lensManager.hasAnyRawLens())
+    }
+
+    private fun rawSizeForLens(lens: LensInfo): Size? =
+        if (lens.hasRawSensor) camera2Manager.resolveRawSize(lens.cameraId) else null
+
+    private fun applyRawMetadata(lens: LensInfo) {
+        try {
+            val cm = getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
+            val chars = cm.getCameraCharacteristics(lens.cameraId)
+            val meta = RawMetadataParser(chars)
+            previewRenderer.bayerColorMap = meta.bayerColorMap
+            previewRenderer.bayerBlackLevelPattern = meta.blackLevelPattern
+            previewRenderer.agxWhiteLevel = meta.whiteLevel.toFloat()
+            previewRenderer.agxBlackLevel = meta.blackLevelAverage
+            val sensorGains = meta.sensorWhiteBalanceGains
+            previewRenderer.wbGainR = sensorGains[0]
+            previewRenderer.wbGainG = sensorGains[1]
+            previewRenderer.wbGainB = sensorGains[2]
+            wbEstimateFrame = 0
+            CrashLogger.log(TAG, "applyRawMetadata: ${meta.sensorWidth}x${meta.sensorHeight} white=${meta.whiteLevel} " +
+                "blackAvg=${meta.blackLevelAverage} pattern=${meta.bayerPattern.label} " +
+                "wbGains=[${String.format("%.2f", sensorGains[0])}, ${String.format("%.2f", sensorGains[1])}, ${String.format("%.2f", sensorGains[2])}]")
+            Log.d(TAG, "applyRawMetadata: ${meta.sensorWidth}x${meta.sensorHeight} white=${meta.whiteLevel} black=${meta.blackLevelAverage}")
+        } catch (e: Exception) {
+            Log.w(TAG, "applyRawMetadata failed: ${e.message}", e)
+            resetRawMetadata()
+        }
+    }
+
+    private fun resetRawMetadata() {
+        previewRenderer.bayerColorMap = intArrayOf(0, 1, 1, 2)
+        previewRenderer.bayerBlackLevelPattern = intArrayOf(64, 64, 64, 64)
+        previewRenderer.agxWhiteLevel = 1023f
+        previewRenderer.agxBlackLevel = 64f
+        previewRenderer.wbGainR = 1f
+        previewRenderer.wbGainG = 1f
+        previewRenderer.wbGainB = 1f
+    }
+
+    private fun preparePreviewPipeline(previewSize: Size, targetAspect: Float) {
+        previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
+        previewRenderer.targetAspectRatio = targetAspect
+        val lens = lensManager.activeLens
+        val raw = lens?.let { rawSizeForLens(it) }
+        if (developerSwitch.useRawSensor && raw != null) {
+            applyRawMetadata(lens!!)
+            previewRenderer.enableBayerMode(raw.width, raw.height)
+            rawFrameDelivered = false
+            rawFrameLogCount = 0
+        } else {
+            resetRawMetadata()
+            previewRenderer.disableBayerMode()
+        }
+    }
+
+    private val rawBuffers = mutableListOf<ByteBuffer>()
+    private var rawBufferFrame = 0
+    private var wbEstimateFrame = 0
+
+    private fun acquireRawBuffer(width: Int, height: Int): ByteBuffer {
+        val needed = width * height * 2
+        if (rawBuffers.isNotEmpty() && rawBuffers[0].capacity() != needed) {
+            rawBuffers.clear()
+        }
+        while (rawBuffers.size < RAW_BUFFER_POOL) {
+            rawBuffers.add(ByteBuffer.allocateDirect(needed))
+        }
+        val dest = rawBuffers[rawBufferFrame % RAW_BUFFER_POOL]
+        rawBufferFrame++
+        dest.clear()
+        return dest
+    }
+
+    private fun estimateAutoWhiteBalance(buffer: java.nio.ByteBuffer, w: Int, h: Int) {
+        val step = 32
+        val colorMap = previewRenderer.bayerColorMap
+        val black = previewRenderer.bayerBlackLevelPattern
+        val cnt = IntArray(4)
+        val sum = DoubleArray(4)
+        for (p in 0 until 4) {
+            val startR = p / 2
+            val startC = p % 2
+            var r = startR
+            while (r < h) {
+                var c = startC
+                while (c < w) {
+                    val idx = (r * w + c) * 2
+                    val v = (buffer.get(idx).toInt() and 0xFF) or
+                        ((buffer.get(idx + 1).toInt() and 0xFF) shl 8)
+                    sum[p] += v
+                    cnt[p]++
+                    c += step
+                }
+                r += step
+            }
+        }
+
+        var rPhase = 0
+        var bPhase = 3
+        for (p in 0 until 4) {
+            when (colorMap.getOrElse(p) { 1 }) {
+                0 -> rPhase = p
+                2 -> bPhase = p
+            }
+        }
+
+        val avg = DoubleArray(4)
+        for (i in 0 until 4) {
+            avg[i] = if (cnt[i] > 0) sum[i] / cnt[i] - black[i] else 0.0
+        }
+        var gSum = 0.0
+        var gCount = 0
+        for (p in 0 until 4) {
+            if (colorMap.getOrElse(p) { 1 } == 1) {
+                gSum += avg[p]
+                gCount++
+            }
+        }
+        val gAvg = if (gCount > 0) gSum / gCount else (avg[1] + avg[2]) / 2.0
+        val logNow = wbEstimateFrame % 90 == 0 || wbEstimateFrame <= 3
+        if (gAvg <= 1.0 || avg[rPhase] <= 1.0 || avg[bPhase] <= 1.0) {
+            if (logNow) {
+                CrashLogger.log(
+                    TAG, "wb estimate: skip frame=$wbEstimateFrame " +
+                        "gAvg=${String.format("%.1f", gAvg)} rAvg=${String.format("%.1f", avg[rPhase])} " +
+                        "bAvg=${String.format("%.1f", avg[bPhase])} " +
+                        "cnt=[${cnt[0]},${cnt[1]},${cnt[2]},${cnt[3]}]"
+                )
+            }
+            return
+        }
+
+        val targetR = (gAvg / avg[rPhase]).toFloat().coerceIn(0.5f, 8f)
+        val targetB = (gAvg / avg[bPhase]).toFloat().coerceIn(0.5f, 8f)
+
+        val a = 0.4f
+        previewRenderer.wbGainR = previewRenderer.wbGainR + a * (targetR - previewRenderer.wbGainR)
+        previewRenderer.wbGainB = previewRenderer.wbGainB + a * (targetB - previewRenderer.wbGainB)
+
+        if (logNow) {
+            CrashLogger.log(
+                TAG, "wb estimate: frame=$wbEstimateFrame " +
+                    "rAvg=${String.format("%.1f", avg[rPhase])} gAvg=${String.format("%.1f", gAvg)} " +
+                    "bAvg=${String.format("%.1f", avg[bPhase])} " +
+                    "gains=${String.format("%.2f", previewRenderer.wbGainR)}," +
+                    "${String.format("%.2f", previewRenderer.wbGainG)}," +
+                    "${String.format("%.2f", previewRenderer.wbGainB)}"
+            )
+        }
     }
 
     private fun restartCamera() {
@@ -1750,13 +2020,12 @@ class MainActivity : AppCompatActivity() {
         // Stop render thread to recreate FBO with new preview size
         previewRenderer.stop()
 
-        previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
-        previewRenderer.targetAspectRatio = targetAspect
-        previewRenderer.start()
         camera2Manager.startBackgroundThread()
         previewRenderer.sensorOrientation = lensManager.getSensorOrientation(lens)
         previewRenderer.isFrontCamera = lens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
-        camera2Manager.openCamera(lens, previewSize, photoOutput.resolutionWidth, photoOutput.resolutionHeight)
+        preparePreviewPipeline(previewSize, targetAspect)
+        previewRenderer.start()
+        camera2Manager.openCamera(lens, previewSize, photoOutput.resolutionWidth, photoOutput.resolutionHeight, useRaw = developerSwitch.useRawSensor)
         previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
     }
 
@@ -1822,12 +2091,11 @@ class MainActivity : AppCompatActivity() {
 
         camera2Manager.stopBackgroundThread()
         camera2Manager.startBackgroundThread()
-        previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
-        previewRenderer.targetAspectRatio = targetAspect
-        previewRenderer.start()
         previewRenderer.sensorOrientation = lensManager.getSensorOrientation(targetLens)
         previewRenderer.isFrontCamera = targetLens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
-        camera2Manager.openCamera(targetLens, previewSize, photoOutput.resolutionWidth, photoOutput.resolutionHeight)
+        preparePreviewPipeline(previewSize, targetAspect)
+        previewRenderer.start()
+        camera2Manager.openCamera(targetLens, previewSize, photoOutput.resolutionWidth, photoOutput.resolutionHeight, useRaw = developerSwitch.useRawSensor)
         previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
 
         onLensSwitched(targetLens.cameraId, lensManager.getLensProfile(targetLens.cameraId))
@@ -1909,11 +2177,12 @@ class MainActivity : AppCompatActivity() {
             camera2Manager.close()
             camera2Manager.stopBackgroundThread()
             previewRenderer.stop()
-            previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
-            previewRenderer.targetAspectRatio = 0f
+            previewRenderer.sensorOrientation = lensManager.getSensorOrientation(active)
+            previewRenderer.isFrontCamera = active.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
+            preparePreviewPipeline(previewSize, 0f)
             previewRenderer.start()
             camera2Manager.startBackgroundThread()
-            camera2Manager.openCamera(active, previewSize, photoOutput.resolutionWidth, photoOutput.resolutionHeight)
+            camera2Manager.openCamera(active, previewSize, photoOutput.resolutionWidth, photoOutput.resolutionHeight, useRaw = developerSwitch.useRawSensor)
             previewRenderer.setCaptureSize(camera2Manager.captureSize.width, camera2Manager.captureSize.height)
             return
         }
@@ -2205,21 +2474,7 @@ override fun onResume() {
                         }
                     } else null
 
-                tempFile = java.io.File(cacheDir, "capture_${System.nanoTime()}.jpg")
-                tempFile.writeBytes(jpegData)
-
-                ExifWriter.writeExif(tempFile, metadata, thumbnailJpeg)
-
-                val finalJpegData = tempFile.readBytes()
-
-                val savedUri = mediaStoreSaver.saveJpeg(finalJpegData, metadata)
-                mainHandler.post {
-                    if (savedUri != null) {
-                        Toast.makeText(this, "Photo saved", Toast.LENGTH_SHORT).show()
-                    } else {
-                        Toast.makeText(this, "Failed to save photo", Toast.LENGTH_SHORT).show()
-                    }
-                }
+                saveCaptureJpeg(jpegData, thumbnailJpeg, session, metadata)
             } catch (e: Exception) {
                 Log.e(TAG, "Capture processing failed", e)
                 mainHandler.post {
@@ -2228,6 +2483,116 @@ override fun onResume() {
             } finally {
                 image.close()
                 tempFile?.delete()
+            }
+        }.start()
+    }
+
+    /** Encodes the given RGB bitmap through the AGX tone curve and demosaic pipeline. */
+    private fun encodeCaptureBitmap(bitmap: Bitmap, session: CaptureSession): Pair<ByteArray, CaptureMetadata> {
+        val activeLens = lensManager.activeLens ?: lensManager.selectPrimary()
+        val chars = activeLens?.let { lensManager.getCharacteristicsForLens(it) }
+        val wallClockOffsetMs = System.currentTimeMillis() - (SystemClock.elapsedRealtimeNanos() / 1_000_000)
+        val timestampSource = chars?.get(
+            android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE
+        ) ?: android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN
+        val captureWallClockMs = if (timestampSource == android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME) {
+            SystemClock.elapsedRealtimeNanos() / 1_000_000 + wallClockOffsetMs
+        } else {
+            System.currentTimeMillis()
+        }
+        val (rawIso, rawShutterNs) = camera2Manager.lastExposureForExif()
+        val isFront = session.isFrontCamera
+        val exifRotation = if (isFront) {
+            (session.sensorOrientation - session.deviceOrientation + 360) % 360
+        } else {
+            (session.sensorOrientation + session.deviceOrientation) % 360
+        }
+        val exifOrientation = when (exifRotation) {
+            90 -> 6
+            180 -> 3
+            270 -> 8
+            else -> 1
+        }
+        val metadata = CaptureMetadata(
+            sensorOrientation = session.sensorOrientation,
+            exifOrientation = exifOrientation,
+            focalLengthMm = session.focalLengthMm,
+            iso = rawIso,
+            exposureTimeNs = rawShutterNs,
+            flashMode = session.flashMode,
+            aeState = null,
+            captureWallClockMs = captureWallClockMs
+        )
+        return Pair(JpegEncoder.encodeToJpeg(bitmap, session.jpegQuality), metadata)
+    }
+
+    private fun saveCaptureJpeg(jpegData: ByteArray, thumbnailJpeg: ByteArray?, session: CaptureSession, metadata: CaptureMetadata) {
+        var tempFile: java.io.File? = null
+        try {
+            tempFile = java.io.File(cacheDir, "capture_${System.nanoTime()}.jpg")
+            tempFile.writeBytes(jpegData)
+            ExifWriter.writeExif(tempFile, metadata, thumbnailJpeg)
+            val finalJpegData = tempFile.readBytes()
+            val savedUri = mediaStoreSaver.saveJpeg(finalJpegData, metadata)
+            mainHandler.post {
+                if (savedUri != null) {
+                    Toast.makeText(this, "Photo saved", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "Failed to save photo", Toast.LENGTH_SHORT).show()
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Save capture failed", e)
+            mainHandler.post {
+                Toast.makeText(this, "Capture failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        } finally {
+            tempFile?.delete()
+        }
+    }
+
+    private fun processRawSnapshot(
+        frame: com.agx.camera.gpu.PreviewRenderer.RawFrameCopy,
+        session: CaptureSession,
+        thumbnailLatch: CountDownLatch,
+        thumbnailRef: java.util.concurrent.atomic.AtomicReference<Bitmap?>
+    ) {
+        val gpuBitmapRef = java.util.concurrent.atomic.AtomicReference<Bitmap?>(null)
+        val gpuLatch = java.util.concurrent.CountDownLatch(1)
+        val targetW = if (session.resolutionWidth > 0) session.resolutionWidth else frame.width
+        val targetH = if (session.resolutionHeight > 0) session.resolutionHeight else frame.height
+        Thread {
+            try {
+                previewRenderer.submitRawCaptureFrame(
+                    frame.buffer, frame.width, frame.height, frame.width,
+                    targetW, targetH, session, gpuBitmapRef, gpuLatch
+                )
+                val gpuReady = gpuLatch.await(8000, TimeUnit.MILLISECONDS)
+                val bitmap = if (gpuReady) gpuBitmapRef.get() else null
+                if (bitmap == null) {
+                    Log.e(TAG, "RAW capture render failed or timed out (ready=$gpuReady)")
+                    mainHandler.post {
+                        Toast.makeText(this, "RAW capture failed: render timeout", Toast.LENGTH_SHORT).show()
+                    }
+                    return@Thread
+                }
+                val (jpegData, metadata) = encodeCaptureBitmap(bitmap, session)
+                bitmap.recycle()
+
+                val thumbnailReady = thumbnailLatch.await(2000, TimeUnit.MILLISECONDS)
+                val thumbnailBitmap = if (thumbnailReady) thumbnailRef.get() else null
+                val thumbnailJpeg = if (thumbnailBitmap != null) {
+                    ExifWriter.generateThumbnailJpeg(thumbnailBitmap, 0).also {
+                        thumbnailBitmap.recycle()
+                    }
+                } else null
+
+                saveCaptureJpeg(jpegData, thumbnailJpeg, session, metadata)
+            } catch (e: Exception) {
+                Log.e(TAG, "RAW capture processing failed", e)
+                mainHandler.post {
+                    Toast.makeText(this, "RAW capture failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
             }
         }.start()
     }
@@ -2524,5 +2889,6 @@ override fun onResume() {
         private const val REQUEST_CAMERA = 100
         private const val PREF_PREVIEW_RES_CAP = "preview_res_cap"
         private const val PREF_FOCUS_TIMEOUT = "focus_indicator_timeout"
+        private const val RAW_BUFFER_POOL = 3
     }
 }

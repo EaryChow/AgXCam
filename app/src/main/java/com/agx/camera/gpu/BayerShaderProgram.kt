@@ -49,6 +49,11 @@ class BayerShaderProgram {
     private var dUBlackLevelPatternLoc = 0
     private var dUBayerColorMapLoc = 0
     private var dUBitDepthLoc = 0
+    private var dUBoxAaLoc = 0
+    private var dUWbGainsLoc = 0
+    private var dUColorMatLoc = 0
+    private var dUWhiteLevelLoc = 0
+    private var dUBlackLevelLoc = 0
 
     private var sensorWidth = 0
     private var sensorHeight = 0
@@ -65,12 +70,14 @@ class BayerShaderProgram {
         programId = createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
         if (programId == 0) {
             Log.e(TAG, "Failed to create Bayer shader program")
+            com.agx.camera.CrashLogger.log(TAG, "Failed to create Bayer shader program")
             return
         }
 
         demosaicProgramId = createProgram(VERTEX_SHADER, DEMOSAIC_FRAGMENT_SHADER)
         if (demosaicProgramId == 0) {
             Log.e(TAG, "Failed to create demosaic shader program")
+            com.agx.camera.CrashLogger.log(TAG, "Failed to create demosaic shader program")
             return
         }
 
@@ -107,6 +114,11 @@ class BayerShaderProgram {
         dUBlackLevelPatternLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_black_level_pattern")
         dUBayerColorMapLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_bayer_color_map")
         dUBitDepthLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_bit_depth")
+        dUBoxAaLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_box_aa")
+        dUWbGainsLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_wb_gains")
+        dUColorMatLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_color_mat")
+        dUWhiteLevelLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_white_level")
+        dUBlackLevelLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_black_level")
 
         val textures = IntArray(2)
         GLES20.glGenTextures(2, textures, 0)
@@ -126,6 +138,7 @@ class BayerShaderProgram {
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
         Log.d(TAG, "Bayer shader program created: $programId, sensor: ${sensorWidth}x${sensorHeight}")
+        com.agx.camera.CrashLogger.log(TAG, "Programs created: bayer=$programId demosaic=$demosaicProgramId")
     }
 
     fun uploadBayer(buffer: ByteBuffer, width: Int, height: Int, stridePixels: Int) {
@@ -242,7 +255,11 @@ class BayerShaderProgram {
         transformMatrix: FloatArray,
         blackLevelPattern: IntArray,
         bayerColorMap: IntArray,
-        bitDepth: Int
+        bitDepth: Int,
+        whiteLevel: Float, blackLevel: Float,
+        boxAA: Int = 4,
+        wbGains: FloatArray = floatArrayOf(1f, 1f, 1f),
+        colorMat: FloatArray? = null
     ) {
         GLES20.glUseProgram(demosaicProgramId)
 
@@ -265,6 +282,11 @@ class BayerShaderProgram {
             bayerColorMap[0], bayerColorMap[1],
             bayerColorMap[2], bayerColorMap[3])
         GLES20.glUniform1i(dUBitDepthLoc, bitDepth)
+        GLES20.glUniform1i(dUBoxAaLoc, boxAA)
+        GLES20.glUniform3f(dUWbGainsLoc, wbGains[0], wbGains[1], wbGains[2])
+        GLES20.glUniformMatrix3fv(dUColorMatLoc, 1, true, colorMat ?: COLOR_IDENTITY_9, 0)
+        GLES20.glUniform1f(dUWhiteLevelLoc, whiteLevel)
+        GLES20.glUniform1f(dUBlackLevelLoc, blackLevel)
 
         val posHandle = GLES20.glGetAttribLocation(demosaicProgramId, "a_position")
         val texHandle = GLES20.glGetAttribLocation(demosaicProgramId, "a_texCoord")
@@ -280,6 +302,8 @@ class BayerShaderProgram {
         GLES20.glDisableVertexAttribArray(posHandle)
         GLES20.glDisableVertexAttribArray(texHandle)
     }
+
+    fun isReady(): Boolean = programId != 0 && demosaicProgramId != 0 && bayerTextureId != 0
 
     fun destroy() {
         if (programId != 0) {
@@ -299,6 +323,12 @@ class BayerShaderProgram {
     companion object {
         private const val TAG = "BayerShaderProgram"
 
+        private val COLOR_IDENTITY_9 = floatArrayOf(
+            1f, 0f, 0f,
+            0f, 1f, 0f,
+            0f, 0f, 1f
+        )
+
         private val QUAD_COORDS = floatArrayOf(
             -1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f
         )
@@ -307,9 +337,10 @@ class BayerShaderProgram {
         )
 
         private const val VERTEX_SHADER = """
-attribute vec2 a_position;
-attribute vec2 a_texCoord;
-varying vec2 v_texCoord;
+#version 300 es
+in vec2 a_position;
+in vec2 a_texCoord;
+out vec2 v_texCoord;
 uniform mat4 u_transformMatrix;
 void main() {
     gl_Position = vec4(a_position, 0.0, 1.0);
@@ -423,21 +454,18 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
     float nSW = sampleBayerRaw(nSW_coord) * lsGain(lsSW);
     float nSE = sampleBayerRaw(nSE_coord) * lsGain(lsSE);
 
-    float gradH = abs(nW - nE);
-    float gradV = abs(nN - nS);
-
     float center = sampleBayerRaw(sensorCoord) * gain;
     float r = 0.0, g = 0.0, b = 0.0;
 
     if (color == 0) {
         r = center;
         float diag = (nNW + nNE + nSW + nSE) * 0.25;
-        g = (gradH > gradV) ? (nW + nE) * 0.5 : diag;
+        g = (nW + nE + nN + nS) * 0.25;
         b = diag;
     } else if (color == 2) {
         b = center;
         float diag = (nNW + nNE + nSW + nSE) * 0.25;
-        g = (gradH > gradV) ? (nW + nE) * 0.5 : diag;
+        g = (nW + nE + nN + nS) * 0.25;
         r = diag;
     } else {
         g = center;
@@ -505,9 +533,16 @@ uniform sampler2D u_lens_shading_map;
 uniform vec2 u_outputResolution;
 uniform vec2 u_sensorSize;
 
+uniform mat3 u_709_to_2020;
+
 uniform ivec4 u_black_level_pattern;
 uniform ivec4 u_bayer_color_map;
 uniform int u_bit_depth;
+uniform int u_box_aa;
+uniform float u_white_level;
+uniform float u_black_level;
+uniform vec3 u_wb_gains;
+uniform mat3 u_color_mat;
 
 ${AgxCoreGlsl.CORE_HELPERS}
 
@@ -547,8 +582,7 @@ float lsGain(vec2 lsNeighborUV) {
     return texture(u_lens_shading_map, vec2(c) / u_sensorSize)[safePhase(c.x, c.y)];
 }
 
-vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
-    ivec2 sensorCoord = ivec2(sensorUV);
+vec3 demosaicAt(ivec2 sensorCoord, vec2 lsSensorUV) {
     int phase = safePhase(sensorCoord.x, sensorCoord.y);
     int color = u_bayer_color_map[phase];
 
@@ -582,21 +616,18 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
     float nSW = sampleBayerRaw(nSW_coord) * lsGain(lsSW);
     float nSE = sampleBayerRaw(nSE_coord) * lsGain(lsSE);
 
-    float gradH = abs(nW - nE);
-    float gradV = abs(nN - nS);
-
     float center = sampleBayerRaw(sensorCoord) * gain;
     float r = 0.0, g = 0.0, b = 0.0;
 
     if (color == 0) {
         r = center;
         float diag = (nNW + nNE + nSW + nSE) * 0.25;
-        g = (gradH > gradV) ? (nW + nE) * 0.5 : diag;
+        g = (nW + nE + nN + nS) * 0.25;
         b = diag;
     } else if (color == 2) {
         b = center;
         float diag = (nNW + nNE + nSW + nSE) * 0.25;
-        g = (gradH > gradV) ? (nW + nE) * 0.5 : diag;
+        g = (nW + nE + nN + nS) * 0.25;
         r = diag;
     } else {
         g = center;
@@ -613,6 +644,22 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
     return vec3(r, g, b);
 }
 
+vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
+    if (u_box_aa <= 1) {
+        return demosaicAt(ivec2(clampSensor(sensorUV)), lsSensorUV);
+    }
+    vec2 base = floor(sensorUV) - vec2(1.0);
+    vec3 sum = vec3(0.0);
+    for (int dy = 0; dy < 4; dy++) {
+        for (int dx = 0; dx < 4; dx++) {
+            ivec2 c = clamp(ivec2(base) + ivec2(dx, dy), ivec2(0), ivec2(u_sensorSize) - ivec2(1));
+            vec2 lsC = lsSensorUV + vec2(float(dx) - 1.0, float(dy) - 1.0);
+            sum += demosaicAt(c, lsC);
+        }
+    }
+    return sum * (1.0 / 16.0);
+}
+
 void main() {
     vec2 uv = v_texCoord;
     vec2 lsSensorUV = uv * u_sensorSize;
@@ -622,6 +669,9 @@ void main() {
     lsSensorUV = clamp(lsSensorUV, vec2(0.0), u_sensorSize - vec2(1.0));
 
     vec3 linearRGB = demosaicBilinear(u_bayerTex, sensorUV, lsSensorUV);
+    linearRGB *= u_wb_gains;
+    linearRGB = u_color_mat * linearRGB;
+    linearRGB = linearRGB / max(u_white_level - u_black_level, 1.0);
     fragColor = vec4(linearRGB, 1.0);
 }
 """
@@ -639,7 +689,9 @@ void main() {
             val linkStatus = IntArray(1)
             GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linkStatus, 0)
             if (linkStatus[0] != GLES20.GL_TRUE) {
-                Log.e(TAG, "Program link failed: ${GLES20.glGetProgramInfoLog(program)}")
+                val info = "Program link failed: ${GLES20.glGetProgramInfoLog(program)}"
+                Log.e(TAG, info)
+                com.agx.camera.CrashLogger.log(TAG, info)
                 GLES20.glDeleteProgram(program)
                 return 0
             }
@@ -657,7 +709,9 @@ void main() {
             val compiled = IntArray(1)
             GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
             if (compiled[0] != GLES20.GL_TRUE) {
-                Log.e(TAG, "Shader compile failed: ${GLES20.glGetShaderInfoLog(shader)}")
+                val info = "Shader compile failed: ${GLES20.glGetShaderInfoLog(shader)}"
+                Log.e(TAG, info)
+                com.agx.camera.CrashLogger.log(TAG, info)
                 GLES20.glDeleteShader(shader)
                 return 0
             }

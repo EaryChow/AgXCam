@@ -104,4 +104,24 @@ vec3 agxFormation(vec3 sensorLinear) {
     return rgb;
 }
 """
+
+    // Same as AGX_FORMATION but expects input already normalized to 0..1
+    // (i.e. divided by (u_white_level - u_black_level) upstream).
+    const val AGX_FORMATION_NORM = """
+vec3 agxFormationNorm(vec3 normalizedLinear) {
+    vec3 rgb = normalizedLinear;
+    rgb = u_scene_linear_to_709 * rgb;
+    rgb = compensateLowSide(rgb);
+    rgb = u_insetmat * rgb;
+    rgb = lin2log(rgb, u_log_min, u_log_max);
+    rgb.r = sigmoid(rgb.r, u_shoulder, u_toe, u_contrast, u_log_midgray, u_display_midgray);
+    rgb.g = sigmoid(rgb.g, u_shoulder, u_toe, u_contrast, u_log_midgray, u_display_midgray);
+    rgb.b = sigmoid(rgb.b, u_shoulder, u_toe, u_contrast, u_log_midgray, u_display_midgray);
+    rgb = spowf3(rgb, 2.4);
+    rgb = u_outsetmat * rgb;
+    rgb = clamp(rgb, 0.0, 1.0);
+    rgb = srgbOETF(rgb);
+    return rgb;
+}
+"""
 }

@@ -24,6 +24,8 @@ class DeveloperSwitch(
     private var banner: TextView? = null
     private var prefs: SharedPreferences? = null
 
+    @Volatile private var programmaticToggle = false
+
     fun init(
         containerLayout: LinearLayout,
         toggleSwitch: Switch,
@@ -35,6 +37,7 @@ class DeveloperSwitch(
 
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         useRawSensor = prefs?.getBoolean(PREF_RAW_TOGGLE, false) ?: false
+        toggleSwitch.isChecked = useRawSensor
 
         if (BuildConfig.DEBUG) {
             containerLayout.visibility = LinearLayout.VISIBLE
@@ -44,6 +47,7 @@ class DeveloperSwitch(
         }
 
         toggleSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (programmaticToggle) return@setOnCheckedChangeListener
             useRawSensor = isChecked
             prefs?.edit()?.putBoolean(PREF_RAW_TOGGLE, isChecked)?.apply()
             Log.d(TAG, "RAW_SENSOR toggle: $isChecked")
@@ -56,14 +60,17 @@ class DeveloperSwitch(
         toggle?.let { sw ->
             sw.isEnabled = available
             if (!available) {
+                programmaticToggle = true
                 sw.isChecked = false
+                programmaticToggle = false
                 useRawSensor = false
+                prefs?.edit()?.putBoolean(PREF_RAW_TOGGLE, false)?.apply()
             }
         }
         banner?.let { tv ->
             if (available) {
                 tv.text = if (useRawSensor) "RAW_SENSOR mode active" else "YUV fallback mode"
-                tv.setTextColor(0xFF00AAFF.toInt())
+                tv.setTextColor(if (useRawSensor) 0xFF00CC00.toInt() else 0xFF00AAFF.toInt())
             } else {
                 tv.text = "RAW sensor access unavailable for this device"
                 tv.setTextColor(0xFFFFAA00.toInt())
@@ -92,8 +99,20 @@ class DeveloperSwitch(
 
     fun revertToggle() {
         useRawSensor = false
-        toggle?.isChecked = false
         prefs?.edit()?.putBoolean(PREF_RAW_TOGGLE, false)?.apply()
+        val t = toggle
+        if (t != null) {
+            if (t.isChecked) {
+                programmaticToggle = false
+                t.isChecked = false
+            } else {
+                // Switch already off (e.g. stale-pref state); fire the switch callback directly
+                // so the pipeline is rebuilt for YUV fallback.
+                onToggle(false)
+            }
+        } else {
+            onToggle(false)
+        }
     }
 
     companion object {

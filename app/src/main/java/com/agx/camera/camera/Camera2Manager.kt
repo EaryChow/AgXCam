@@ -24,6 +24,9 @@ class Camera2Manager(private val context: Context) {
     private var captureSession: CameraCaptureSession? = null
     private var previewReader: ImageReader? = null
     private var captureReader: ImageReader? = null
+    private var rawReader: ImageReader? = null
+    var rawSize: Size = Size(0, 0)
+        private set
 
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
@@ -38,11 +41,20 @@ class Camera2Manager(private val context: Context) {
     private var availableAeModes: IntArray = intArrayOf()
 
     var onFrameAvailable: ((Image) -> Unit)? = null
+    var onRawFrameAvailable: ((Image) -> Unit)? = null
     var onSessionReady: ((Int, Int) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
     var onDisconnected: (() -> Unit)? = null
     var onAutoExposureReadout: ((Int, Long) -> Unit)? = null
     var onMaxZoomReady: ((Float) -> Unit)? = null
+
+    @Volatile
+    var latestColorCorrectionMatrix: FloatArray? = null
+
+    @Volatile
+    var latestColorCorrectionGains: FloatArray? = null
+
+    private var ccLogCount = 0
 
     private var sessionRetryCount = 0
     private val maxSessionRetries = 1
@@ -51,6 +63,15 @@ class Camera2Manager(private val context: Context) {
         val image = reader.acquireLatestImage() ?: return@OnImageAvailableListener
         try {
             onFrameAvailable?.invoke(image)
+        } finally {
+            image.close()
+        }
+    }
+
+    private val rawListener = ImageReader.OnImageAvailableListener { reader ->
+        val image = reader.acquireLatestImage() ?: return@OnImageAvailableListener
+        try {
+            onRawFrameAvailable?.invoke(image)
         } finally {
             image.close()
         }
@@ -90,6 +111,10 @@ class Camera2Manager(private val context: Context) {
     private var lastAutoShutterNs = 33_333_333L
     private var lastAeReadoutTime = 0L
 
+    fun lastExposureForExif(): Pair<Int, Long> =
+        if (isManualExposure) Pair(currentManualIso, currentManualExposureNs)
+        else Pair(lastAutoIso, lastAutoShutterNs)
+
     val currentFlashModeForExif: FlashMode get() = currentFlashMode
 
     // Zoom (SCALER_CROP_REGION)
@@ -113,12 +138,14 @@ class Camera2Manager(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    fun openCamera(lens: LensInfo, previewSize: Size, targetCaptureWidth: Int = 0, targetCaptureHeight: Int = 0, onError: ((String) -> Unit)? = null) {
+    fun openCamera(lens: LensInfo, previewSize: Size, targetCaptureWidth: Int = 0, targetCaptureHeight: Int = 0, useRaw: Boolean = false, onError: ((String) -> Unit)? = null) {
         currentLens = lens
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
 
-        Log.d(TAG, "Opening camera ${lens.cameraId}, preview size: ${previewSize.width}x${previewSize.height}, target capture: ${targetCaptureWidth}x${targetCaptureHeight}")
-        CrashLogger.log(TAG, "openCamera id=${lens.cameraId} preview=${previewSize.width}x${previewSize.height} level=${lens.hardwareLevel} raw=${lens.hasRawSensor}")
+        Log.d(TAG, "Opening camera ${lens.cameraId}, preview size: ${previewSize.width}x${previewSize.height}, target capture: ${targetCaptureWidth}x${targetCaptureHeight}, useRaw: $useRaw")
+        CrashLogger.log(TAG, "openCamera id=${lens.cameraId} preview=${previewSize.width}x${previewSize.height} level=${lens.hardwareLevel} raw=${lens.hasRawSensor} useRawStream=$useRaw")
+
+        rawSize = Size(0, 0)
 
         try {
             previewReader = ImageReader.newInstance(
@@ -182,6 +209,25 @@ class Camera2Manager(private val context: Context) {
                 captureSize.width, captureSize.height,
                 ImageFormat.YUV_420_888, 1
             )
+
+            if (useRaw && lens.hasRawSensor) {
+                val rawSizes = map?.getOutputSizes(ImageFormat.RAW_SENSOR) ?: emptyArray()
+                val selected = rawSizes.maxByOrNull { it.width.toLong() * it.height.toLong() }
+                if (selected != null) {
+                    rawSize = selected
+                    rawReader = ImageReader.newInstance(
+                        rawSize.width, rawSize.height,
+                        ImageFormat.RAW_SENSOR, 4
+                    ).apply {
+                        setOnImageAvailableListener(rawListener, backgroundHandler)
+                    }
+                    Log.d(TAG, "RAW stream created: ${rawSize.width}x${rawSize.height}")
+                    CrashLogger.log(TAG, "RAW stream ${rawSize.width}x${rawSize.height}")
+                } else {
+                    Log.w(TAG, "RAW preview requested but no RAW_SENSOR output sizes available")
+                    CrashLogger.log(TAG, "RAW requested but no RAW_SENSOR sizes")
+                }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set up camera streams: ${e.message}", e)
             CrashLogger.logException(TAG, e)
@@ -282,7 +328,8 @@ class Camera2Manager(private val context: Context) {
 
     private fun createSession(camera: CameraDevice, previewSize: Size) {
         val surfaces = mutableListOf(previewReader!!.surface, captureReader!!.surface)
-        CrashLogger.log(TAG, "createSession surfaces=${surfaces.size}")
+        rawReader?.let { surfaces.add(it.surface) }
+        CrashLogger.log(TAG, "createSession surfaces=${surfaces.size} raw=${rawReader != null}")
 
         @Suppress("DEPRECATION")
         try {
@@ -320,6 +367,23 @@ class Camera2Manager(private val context: Context) {
     private fun startPreview() = applyPreviewRequest()
 
     private fun startPreviewWithEv() = applyPreviewRequest()
+
+    fun resolveRawSize(cameraId: String): Size? {
+        val cm = context.getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
+        return try {
+            val map = cm.getCameraCharacteristics(cameraId)
+                .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            map?.getOutputSizes(ImageFormat.RAW_SENSOR)?.maxByOrNull { it.width.toLong() * it.height.toLong() }
+        } catch (e: Exception) {
+            Log.w(TAG, "resolveRawSize failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun CaptureRequest.Builder.addPreviewTargets() {
+        addTarget(previewReader!!.surface)
+        rawReader?.let { addTarget(it.surface) }
+    }
 
     fun setFlashMode(mode: FlashMode) {
         currentFlashMode = mode
@@ -366,7 +430,7 @@ class Camera2Manager(private val context: Context) {
         )
 
         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-            addTarget(previewReader!!.surface)
+            addPreviewTargets()
             set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
             val awbToSend = if (currentAwbMode == CaptureRequest.CONTROL_AWB_MODE_OFF) {
@@ -477,7 +541,7 @@ class Camera2Manager(private val context: Context) {
 
         fun buildPreviewRequest(withTrigger: Boolean): CaptureRequest.Builder {
             return camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                addTarget(previewReader!!.surface)
+                addPreviewTargets()
                 set(CaptureRequest.CONTROL_AF_MODE, afMode)
                 setMeteringRegions(meteringRegions)
                 if (withTrigger) {
@@ -532,7 +596,7 @@ class Camera2Manager(private val context: Context) {
 
         // Switch to repeating request with AF_TRIGGER_CANCEL, no AE_LOCK
         val holdRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-            addTarget(previewReader!!.surface)
+            addPreviewTargets()
             if (deviceMaxAfRegions > 0) {
                 set(CaptureRequest.CONTROL_AF_MODE, safeAfMode(CaptureRequest.CONTROL_AF_MODE_AUTO))
                 set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
@@ -567,7 +631,7 @@ class Camera2Manager(private val context: Context) {
         }
 
         val cancelRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-            addTarget(previewReader!!.surface)
+            addPreviewTargets()
             set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
             if (isManualExposure) {
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
@@ -629,7 +693,7 @@ class Camera2Manager(private val context: Context) {
         }
 
         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-            addTarget(previewReader!!.surface)
+            addPreviewTargets()
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
             val awbToSend = if (currentAwbMode == CaptureRequest.CONTROL_AWB_MODE_OFF) {
                 CaptureRequest.CONTROL_AWB_MODE_AUTO
@@ -722,7 +786,7 @@ class Camera2Manager(private val context: Context) {
         CrashLogger.log(TAG, "startAfAeLock afMode=$afMode rect=(${meteringRect.x},${meteringRect.y},${meteringRect.width},${meteringRect.height})")
 
         val triggerRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-            addTarget(previewReader!!.surface)
+            addPreviewTargets()
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
             setMeteringRegions(arrayOf(meteringRect))
             if (deviceMaxAfRegions > 0) {
@@ -751,7 +815,7 @@ class Camera2Manager(private val context: Context) {
                             Log.e(TAG, "stopRepeating failed: ${e.message}", e)
                         }
                         val lockRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                            addTarget(previewReader!!.surface)
+                            addPreviewTargets()
                             set(CaptureRequest.CONTROL_AF_MODE, afMode)
                             if (deviceMaxAfRegions > 0) {
                                 set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRect))
@@ -793,7 +857,7 @@ class Camera2Manager(private val context: Context) {
         CrashLogger.log(TAG, "lockAeAf afMode=$afMode rect=(${meteringRect.x},${meteringRect.y},${meteringRect.width},${meteringRect.height})")
 
         val triggerRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-            addTarget(previewReader!!.surface)
+            addPreviewTargets()
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
             setMeteringRegions(arrayOf(meteringRect))
             if (deviceMaxAfRegions > 0) {
@@ -824,7 +888,7 @@ class Camera2Manager(private val context: Context) {
                             Log.e(TAG, "stopRepeating failed: ${e.message}", e)
                         }
                         val lockRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                            addTarget(previewReader!!.surface)
+                            addPreviewTargets()
                             set(CaptureRequest.CONTROL_AF_MODE, afMode)
                             if (deviceMaxAfRegions > 0) {
                                 set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRect))
@@ -956,6 +1020,11 @@ class Camera2Manager(private val context: Context) {
         } catch (_: Exception) {}
         captureReader = null
 
+        try {
+            rawReader?.close()
+        } catch (_: Exception) {}
+        rawReader = null
+
         availableAfModes = intArrayOf()
         availableAeModes = intArrayOf()
     }
@@ -980,6 +1049,11 @@ class Camera2Manager(private val context: Context) {
             captureReader?.close()
         } catch (_: Exception) {}
         captureReader = null
+
+        try {
+            rawReader?.close()
+        } catch (_: Exception) {}
+        rawReader = null
 
         availableAfModes = intArrayOf()
         availableAeModes = intArrayOf()
@@ -1018,6 +1092,20 @@ class Camera2Manager(private val context: Context) {
 
     private val aeReadoutCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+            val cct = result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)
+            latestColorCorrectionMatrix = cct?.let { colorSpaceToRowMajor(it) }
+            val ccg = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
+            latestColorCorrectionGains = ccg?.let {
+                floatArrayOf(it.red, it.greenEven, it.greenOdd, it.blue)
+            }
+            ccLogCount++
+            if (ccLogCount % 60 == 0) {
+                CrashLogger.log(TAG,
+                    "cc: gains=[${latestColorCorrectionGains?.joinToString { String.format("%.3f", it) }}] " +
+                    "mat=[${latestColorCorrectionMatrix?.joinToString { String.format("%.4f", it) }}]"
+                )
+            }
+
             val now = SystemClock.elapsedRealtime()
             if (now - lastAeReadoutTime < 500) return
             lastAeReadoutTime = now
@@ -1048,5 +1136,23 @@ class Camera2Manager(private val context: Context) {
 
     companion object {
         private const val TAG = "Camera2Manager"
+
+        private val COLOR_IDENTITY_9 = floatArrayOf(
+            1f, 0f, 0f,
+            0f, 1f, 0f,
+            0f, 0f, 1f
+        )
+
+        private fun colorSpaceToRowMajor(cst: android.hardware.camera2.params.ColorSpaceTransform): FloatArray {
+            val matrix = FloatArray(9)
+            for (row in 0 until 3) {
+                for (col in 0 until 3) {
+                    val r = cst.getElement(col, row)
+                    if (r.denominator == 0) return COLOR_IDENTITY_9.clone()
+                    matrix[row * 3 + col] = r.numerator.toFloat() / r.denominator.toFloat()
+                }
+            }
+            return matrix
+        }
     }
 }

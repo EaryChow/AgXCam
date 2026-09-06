@@ -28,6 +28,16 @@ class RawMetadataParser(
     val calibrationTransform1: FloatArray
     val calibrationTransform2: FloatArray
 
+    val neutralColorPoint: FloatArray
+
+    val sensorWhiteBalanceGains: FloatArray
+        get() {
+            if (neutralColorPoint[1] <= 0f) return floatArrayOf(1f, 1f, 1f)
+            val gainR = (neutralColorPoint[1] / neutralColorPoint[0]).coerceIn(0.3f, 8f)
+            val gainB = (neutralColorPoint[1] / neutralColorPoint[2]).coerceIn(0.3f, 8f)
+            return floatArrayOf(gainR, 1f, gainB)
+        }
+
     init {
         val activeArray = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
             ?: throw IllegalStateException("SENSOR_INFO_ACTIVE_ARRAY_SIZE unavailable")
@@ -67,6 +77,8 @@ class RawMetadataParser(
         calibrationTransform2 = parseCalibrationTransform(
             characteristics, "SENSOR_CALIBRATION_TRANSFORM2", 2
         )
+
+        neutralColorPoint = parseNeutralColorPoint(characteristics)
 
         Log.d(TAG, "RawMetadata: ${sensorWidth}x${sensorHeight}, white=$whiteLevel, " +
                 "pattern=$bayerPattern, bitDepth=$bitDepth, " +
@@ -152,6 +164,25 @@ class RawMetadataParser(
                 whiteLevel <= 4095 -> 12
                 whiteLevel <= 16383 -> 14
                 else -> 16
+            }
+        }
+
+        private fun parseNeutralColorPoint(chars: CameraCharacteristics): FloatArray {
+            return try {
+                val keyField = CameraCharacteristics::class.java.getField("SENSOR_NEUTRAL_COLOR_POINT")
+                @Suppress("UNCHECKED_CAST")
+                val key = keyField.get(null) as CameraCharacteristics.Key<Array<Rational>>
+                val ncp: Array<Rational>? = chars.get(key)
+                if (ncp == null || ncp.size < 3) return floatArrayOf(1f, 1f, 1f)
+                val r = ncp[0].toFloat()
+                val g = ncp[1].toFloat()
+                val b = ncp[2].toFloat()
+                if (r <= 0f || g <= 0f || b <= 0f) return floatArrayOf(1f, 1f, 1f)
+                Log.d(TAG, "Loaded SENSOR_NEUTRAL_COLOR_POINT: R=$r G=$g B=$b")
+                floatArrayOf(r, g, b)
+            } catch (e: Exception) {
+                Log.w(TAG, "SENSOR_NEUTRAL_COLOR_POINT not available: ${e.message}")
+                floatArrayOf(1f, 1f, 1f)
             }
         }
 
