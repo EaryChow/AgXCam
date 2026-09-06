@@ -75,31 +75,89 @@ class LensManager(private val context: Context) {
             return false
         }
 
+        CrashLogger.log(TAG, "enumerate: raw cameraIdList=${cameraIds.joinToString()}")
+
         val logicalMultiCameraId = findLogicalMultiCamera()
 
         for (id in cameraIds) {
             val chars = try {
                 cameraManager.getCameraCharacteristics(id)
             } catch (e: Exception) {
+                CrashLogger.log(TAG, "enumerate: id=$id characteristics FAILED: ${e.message}")
                 Log.w(TAG, "Failed to get characteristics for camera $id: ${e.message}")
                 continue
             }
 
-            val facing = chars.get(CameraCharacteristics.LENS_FACING) ?: continue
+            val facing = chars.get(CameraCharacteristics.LENS_FACING)
             val level = chars.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)
                 ?: CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY
 
+            if (facing == null) {
+                CrashLogger.log(TAG, "enumerate: id=$id skipping: LENS_FACING == null")
+                continue
+            }
             if (level < CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LIMITED) {
+                CrashLogger.log(TAG, "enumerate: id=$id skipping: level=$level < LIMITED")
                 Log.w(TAG, "Camera $id hardware level $level < LIMITED, skipping")
                 continue
             }
 
             val focalLengths = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-            val focal = focalLengths?.firstOrNull() ?: 0.0f
+            val allFocalLengths = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.toList() ?: emptyList()
+            val focal = allFocalLengths.firstOrNull() ?: 0.0f
             val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
-            val hasRawFromCap = caps.contains(17) // REQUEST_AVAILABLE_CAPABILITIES_RAW
+            val capNames = caps.joinToString(",") {
+                when (it) {
+                    0 -> "BACKWARD_COMPATIBLE"; 1 -> "MANUAL_SENSOR"; 2 -> "MANUAL_POST_PROCESSING"
+                    3 -> "RAW"; 4 -> "PRIVATE_REPROCESSING"; 5 -> "READ_SENSOR_SETTINGS"
+                    6 -> "BURST_CAPTURE"; 7 -> "DEPTH_OUTPUT"; 8 -> "CONSTRAINED_HIGH_SPEED_VIDEO"
+                    9 -> "MOTION_TRACKING"; 10 -> "LOGICAL_MULTI_CAMERA"; 11 -> "MONOCHROME"; 12 -> "SECURE_IMAGE_DATA"
+                    13 -> "SYSTEM_CAMERA"; 14 -> "OFFLINE_PROCESSING"; 15 -> "ULTRA_HIGH_RESOLUTION_SENSOR"
+                    16 -> "BASIC_MANUAL"; 17 -> "CROSS_STREAM"; 18 -> "FULL_QUALITY"; 19 -> "FRONT_MONOCHROME"
+                    20 -> "ALGORITHM"; 21 -> "PRIVATE_REPROCESSING_STREAM_SUPPORT"; 22 -> "FLASH"; else -> "UNKNOWN($it)"
+                }
+            }
+            val hasRawFromCap = caps.contains(17)
             val activeArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
             val streamMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+
+            val logicalPhysicalIds = try {
+                chars.get(
+                    CameraCharacteristics.Key("android.logicalMultiCameraPhysicalIds", Array<String>::class.java)
+                )
+            } catch (e: Exception) {
+                CrashLogger.log(TAG, "enumerate: id=$id logicalPhysicalIds read failed: ${e.message}")
+                null
+            }
+
+            val physicalIds = try {
+                val m = CameraCharacteristics::class.java.getDeclaredMethod("getPhysicalCameraIds")
+                m.isAccessible = true
+                m.invoke(chars)?.toString()
+            } catch (e: Exception) {
+                "err"
+            }
+
+            val multiKeys = mutableListOf<String>()
+            val allKeysF = try {
+                val f = CameraCharacteristics::class.java.getDeclaredField("mProperties")
+                f.isAccessible = true
+                f.get(chars)
+            } catch (e: Exception) { null }
+            if (allKeysF != null) {
+                try {
+                    val keysM = allKeysF.javaClass.getMethod("getKeys")
+                    keysM.isAccessible = true
+                    val keysArr = (keysM.invoke(allKeysF) as Array<*>)
+                    keysArr.forEach { k ->
+                        val s = k?.toString() ?: ""
+                        if (s.contains("logical", ignoreCase = true) ||
+                            s.contains("physical", ignoreCase = true) ||
+                            s.contains("multi", ignoreCase = true))
+                            multiKeys.add(s)
+                    }
+                } catch (e: Exception) { /* ignore */ }
+            }
 
             // Fallback: some OEM HALs (e.g. Xiaomi) don't advertise RAW in capabilities
             // but do support RAW_SENSOR output via stream configuration
@@ -119,7 +177,8 @@ class LensManager(private val context: Context) {
                 hasRaw -> "streamConfig"
                 else -> "none"
             }
-            CrashLogger.log(TAG, "enumerate: id=$id facing=$facing level=$level focal=$focal hasRaw=$hasRaw rawDetect=$rawDetectMethod maxAfRegions=$maxAfRegions maxAeRegions=$maxAeRegions afModes=${afModes.toList()} minFocusDist=$minFocusDist hasFlash=$hasFlash")
+            CrashLogger.log(TAG, "enumerate: id=$id facing=$facing level=$level focal=$focal focalLens=$allFocalLengths logicalPhysical=${logicalPhysicalIds?.joinToString() ?: "-"} physicalCameraIds=$physicalIds caps=$capNames")
+            CrashLogger.log(TAG, "enumerate: id=$id hasRaw=$hasRaw rawDetect=$rawDetectMethod maxAfRegions=$maxAfRegions maxAeRegions=$maxAeRegions afModes=${afModes.toList()} minFocusDist=$minFocusDist hasFlash=$hasFlash multiKeys=$multiKeys")
 
             _lenses.add(LensInfo(id, facing, focal, hasRaw, level, "",
                 jpegOutputSizes = streamMap?.getOutputSizes(android.graphics.ImageFormat.JPEG) ?: emptyArray(),
@@ -128,6 +187,26 @@ class LensManager(private val context: Context) {
                 maxDigitalZoom = (chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1.0f)
             ))
             hasSupportedLens = true
+        }
+
+        // Discover hidden cameras: physical sub-cameras of any logical camera
+        // (e.g. ids 2,3,4,5 under back logical id 0 on Xiaomi) plus brute-probed
+        // numeric ids that answer getCameraCharacteristics but are absent from
+        // cameraIdList. Mirrors MotionCam's "auto seek" behavior.
+        val discovered = mutableListOf<String>()
+        for (lens in _lenses.toList()) {
+            try {
+                val chars = cameraManager.getCameraCharacteristics(lens.cameraId)
+                discovered += chars.physicalCameraIds
+            } catch (e: Exception) { /* not a logical multi-camera */ }
+        }
+        val knownSet = cameraIds.toSet()
+        for (probe in 0..12) {
+            if (probe.toString() in knownSet) continue
+            discovered += probe.toString()
+        }
+        for (id in discovered.distinct()) {
+            addDiscoveredLens(id)
         }
 
         assignLabels(logicalMultiCameraId)
@@ -169,6 +248,62 @@ class LensManager(private val context: Context) {
         CrashLogger.log(TAG, "  labels=$lensLabels")
 
         return hasSupportedLens
+    }
+
+    private fun addDiscoveredLens(id: String): Boolean {
+        if (_lenses.any { it.cameraId == id }) {
+            CrashLogger.log(TAG, "enumerate: discovered id=$id already present, skipping")
+            return false
+        }
+        val chars = try {
+            cameraManager.getCameraCharacteristics(id)
+        } catch (e: Exception) {
+            CrashLogger.log(TAG, "enumerate: discovered id=$id not present: ${e.message}")
+            return false
+        }
+        val facing = chars.get(CameraCharacteristics.LENS_FACING)
+        val level = chars.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)
+            ?: CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY
+        if (facing == null) {
+            CrashLogger.log(TAG, "enumerate: discovered id=$id skipping: LENS_FACING == null")
+            return false
+        }
+        if (level < CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LIMITED) {
+            CrashLogger.log(TAG, "enumerate: discovered id=$id skipping: level=$level < LIMITED")
+            return false
+        }
+        val focal = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: 0.0f
+        val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+        val streamMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val hasRaw = caps.contains(17) || (
+            streamMap?.getOutputSizes(ImageFormat.RAW_SENSOR)?.isNotEmpty() == true
+        )
+        val activeArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+        val activeW = activeArray?.width() ?: 0
+        val activeH = activeArray?.height() ?: 0
+
+        // Dedupe: OEMs (e.g. Xiaomi) expose the same physical sensor multiple times
+        // (logical camera + physical sub-camera + hidden clones). Same facing, focal
+        // length and active-array size => same lens.
+        val duplicateOf = _lenses.firstOrNull { existing ->
+            existing.facing == facing &&
+            Math.abs(existing.focalLengthMm - focal) < 0.05f &&
+            existing.sensorActiveWidth == activeW &&
+            existing.sensorActiveHeight == activeH
+        }
+        if (duplicateOf != null) {
+            CrashLogger.log(TAG, "enumerate: discovered id=$id duplicates existing id=${duplicateOf.cameraId} (focal=$focal size=${activeW}x$activeH), skipping")
+            return false
+        }
+
+        CrashLogger.log(TAG, "enumerate: add discovered id=$id facing=$facing level=$level focal=$focal hasRaw=$hasRaw")
+        _lenses.add(LensInfo(id, facing, focal, hasRaw, level, "",
+            jpegOutputSizes = streamMap?.getOutputSizes(ImageFormat.JPEG) ?: emptyArray(),
+            sensorActiveWidth = activeW,
+            sensorActiveHeight = activeH,
+            maxDigitalZoom = chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1.0f
+        ))
+        return true
     }
 
     private fun findLogicalMultiCamera(): String? {
