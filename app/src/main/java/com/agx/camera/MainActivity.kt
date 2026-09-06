@@ -115,10 +115,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var shutterOverlay: TextView
     private lateinit var shutterPopup: View
     private lateinit var shutterSeekBar: SeekBar
+    private lateinit var evPpOverlay: TextView
+    private lateinit var evPpPopup: View
+    private lateinit var evPpSeekBar: SeekBar
     private lateinit var evPopup: LinearLayout
     private lateinit var evSeekBar: SeekBar
     private lateinit var evSliderContainer: FrameLayout
     private lateinit var evSeekBarVertical: SeekBar
+
+    private var postProcessingEv = 1.5f
 
     private var isManualMode = false
     private var lastAutoIso = 200
@@ -127,6 +132,7 @@ class MainActivity : AppCompatActivity() {
     private var lastShutterTapTime = 0L
     private var isoPopupShowing = false
     private var shutterPopupShowing = false
+    private var evPpPopupShowing = false
     private var evPopupShowing = false
     private val focusIndicatorHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val focusIndicatorHideRunnable = Runnable { hideFocusIndicator() }
@@ -295,6 +301,9 @@ class MainActivity : AppCompatActivity() {
         shutterOverlay = findViewById(R.id.shutter_overlay)
         shutterPopup = findViewById(R.id.shutter_popup)
         shutterSeekBar = findViewById(R.id.shutter_seekbar)
+        evPpOverlay = findViewById(R.id.ev_pp_overlay)
+        evPpPopup = findViewById(R.id.ev_pp_popup)
+        evPpSeekBar = findViewById(R.id.ev_pp_seekbar)
         evPopup = findViewById(R.id.ev_popup)
         evSeekBar = findViewById(R.id.ev_seekbar)
         evSliderContainer = findViewById(R.id.ev_slider_container)
@@ -2676,6 +2685,9 @@ override fun onResume() {
         shutterOverlay = findViewById(R.id.shutter_overlay)
         shutterPopup = findViewById(R.id.shutter_popup)
         shutterSeekBar = findViewById(R.id.shutter_seekbar)
+        evPpOverlay = findViewById(R.id.ev_pp_overlay)
+        evPpPopup = findViewById(R.id.ev_pp_popup)
+        evPpSeekBar = findViewById(R.id.ev_pp_seekbar)
         evPopup = findViewById(R.id.ev_popup)
         evSeekBar = findViewById(R.id.ev_seekbar)
 
@@ -2686,6 +2698,41 @@ override fun onResume() {
 
         isoOverlay.setOnClickListener { togglePopup(isoPopup, isoOverlay, isoPopupShowing) { isoPopupShowing = it } }
         shutterOverlay.setOnClickListener { togglePopup(shutterPopup, shutterOverlay, shutterPopupShowing) { shutterPopupShowing = it } }
+        evPpOverlay.setOnClickListener { togglePopup(evPpPopup, evPpOverlay, evPpPopupShowing) { evPpPopupShowing = it } }
+        // Double-tap on EV overlay to reset to default (+1.5)
+        var lastEvPpOverlayTapTime = 0L
+        evPpOverlay.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_DOWN) {
+                val now = System.currentTimeMillis()
+                if (now - lastEvPpOverlayTapTime < 300) {
+                    evPpSeekBar.progress = 1150
+                    setPostProcessingEv(1150)
+                }
+                lastEvPpOverlayTapTime = now
+            }
+            false
+        }
+
+        evPpSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) setPostProcessingEv(progress)
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar) {}
+        })
+        // Double-tap to reset to default (+1.5)
+        var lastEvPpTapTime = 0L
+        evPpSeekBar.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_DOWN) {
+                val now = System.currentTimeMillis()
+                if (now - lastEvPpTapTime < 300) {
+                    evPpSeekBar.progress = 1150
+                    setPostProcessingEv(1150)
+                }
+                lastEvPpTapTime = now
+            }
+            false
+        }
 
         // Double-tap to reset to auto values
         isoOverlay.setOnTouchListener { _, event ->
@@ -2878,9 +2925,11 @@ override fun onResume() {
     private fun dismissAllPopups() {
         isoPopup.visibility = View.GONE
         shutterPopup.visibility = View.GONE
+        evPpPopup.visibility = View.GONE
         evPopup.visibility = View.GONE
         isoPopupShowing = false
         shutterPopupShowing = false
+        evPpPopupShowing = false
         evPopupShowing = false
     }
 
@@ -2920,6 +2969,13 @@ override fun onResume() {
         val steps = ((max - min) / step).toInt()
         val value = min + Math.round(progress / 100.0 * steps).toInt()
         camera2Manager.setExposureCompensation(value)
+    }
+
+    private fun setPostProcessingEv(progress: Int) {
+        postProcessingEv = (progress - 1000) / 100f
+        previewRenderer.exposureEv = postProcessingEv
+        evPpOverlay.text = String.format("EV %+.1f", postProcessingEv)
+        previewRenderer.requestRender()
     }
 
     private fun getMaxPreviewDimensions(): Pair<Int, Int> {

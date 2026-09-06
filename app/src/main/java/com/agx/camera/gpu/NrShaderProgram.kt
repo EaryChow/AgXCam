@@ -11,6 +11,7 @@ class NrShaderProgram {
     private var programId = 0
     private var uDemosaicTexLoc = 0
     private var uNrStrengthLoc = 0
+    private var uExposureLoc = 0
     private var uSceneLinearTo709Loc = 0
     private var uInsetmatLoc = 0
     private var uOutsetmatLoc = 0
@@ -40,6 +41,7 @@ class NrShaderProgram {
 
         uDemosaicTexLoc = GLES20.glGetUniformLocation(programId, "u_demosaic_tex")
         uNrStrengthLoc = GLES20.glGetUniformLocation(programId, "u_nr_strength")
+        uExposureLoc = GLES20.glGetUniformLocation(programId, "u_exposure")
         uSceneLinearTo709Loc = GLES20.glGetUniformLocation(programId, "u_scene_linear_to_709")
         uInsetmatLoc = GLES20.glGetUniformLocation(programId, "u_insetmat")
         uOutsetmatLoc = GLES20.glGetUniformLocation(programId, "u_outsetmat")
@@ -61,6 +63,7 @@ class NrShaderProgram {
     fun draw(
         demosaicTextureId: Int,
         nrStrength: Float,
+        exposure: Float,
         sceneLinearTo709: FloatArray,
         insetMat: FloatArray,
         outsetMat: FloatArray,
@@ -77,6 +80,7 @@ class NrShaderProgram {
         GLES20.glUniform1i(uDemosaicTexLoc, 0)
 
         GLES20.glUniform1f(uNrStrengthLoc, nrStrength)
+        GLES20.glUniform1f(uExposureLoc, exposure)
         GLES20.glUniformMatrix3fv(uSceneLinearTo709Loc, 1, true, sceneLinearTo709, 0)
         GLES20.glUniformMatrix3fv(uInsetmatLoc, 1, true, insetMat, 0)
         GLES20.glUniformMatrix3fv(uOutsetmatLoc, 1, true, outsetMat, 0)
@@ -145,6 +149,7 @@ out vec4 fragColor;
 
 uniform sampler2D u_demosaic_tex;
 uniform float u_nr_strength;
+uniform float u_exposure;
 
 uniform mat3 u_scene_linear_to_709;
 uniform mat3 u_insetmat;

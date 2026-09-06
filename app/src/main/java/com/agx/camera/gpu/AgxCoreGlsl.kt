@@ -90,7 +90,7 @@ vec3 srgbEOTF(vec3 srgb) {
     const val AGX_FORMATION = """
 vec3 agxFormation(vec3 sensorLinear) {
     vec3 rgb = sensorLinear / (u_white_level - u_black_level);
-    rgb = u_scene_linear_to_709 * rgb;
+    rgb = u_scene_linear_to_709 * rgb * exp2(u_exposure);
     rgb = compensateLowSide(rgb);
     rgb = u_insetmat * rgb;
     rgb = lin2log(rgb, u_log_min, u_log_max);
@@ -110,7 +110,7 @@ vec3 agxFormation(vec3 sensorLinear) {
     const val AGX_FORMATION_NORM = """
 vec3 agxFormationNorm(vec3 normalizedLinear) {
     vec3 rgb = normalizedLinear;
-    rgb = u_scene_linear_to_709 * rgb;
+    rgb = u_scene_linear_to_709 * rgb * exp2(u_exposure);
     rgb = compensateLowSide(rgb);
     rgb = u_insetmat * rgb;
     rgb = lin2log(rgb, u_log_min, u_log_max);

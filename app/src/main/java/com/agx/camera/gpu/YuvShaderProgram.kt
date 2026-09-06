@@ -25,6 +25,7 @@ class YuvShaderProgram {
     private var u709To2020Loc = 0
     private var uWhiteLevelLoc = 0
     private var uBlackLevelLoc = 0
+    private var uExposureLoc = 0
     private var uLogMinLoc = 0
     private var uLogMaxLoc = 0
     private var uLogMidgrayLoc = 0
@@ -57,6 +58,7 @@ class YuvShaderProgram {
         u709To2020Loc = GLES20.glGetUniformLocation(programId, "u_709_to_2020")
         uWhiteLevelLoc = GLES20.glGetUniformLocation(programId, "u_white_level")
         uBlackLevelLoc = GLES20.glGetUniformLocation(programId, "u_black_level")
+        uExposureLoc = GLES20.glGetUniformLocation(programId, "u_exposure")
         uLogMinLoc = GLES20.glGetUniformLocation(programId, "u_log_min")
         uLogMaxLoc = GLES20.glGetUniformLocation(programId, "u_log_max")
         uLogMidgrayLoc = GLES20.glGetUniformLocation(programId, "u_log_midgray")
@@ -118,6 +120,7 @@ class YuvShaderProgram {
     fun draw(
         outputWidth: Int, outputHeight: Int,
         transformMatrix: FloatArray,
+        exposure: Float,
         sceneLinearTo709: FloatArray,
         insetMat: FloatArray,
         outsetMat: FloatArray,
@@ -145,6 +148,7 @@ class YuvShaderProgram {
         GLES20.glUniformMatrix4fv(uTransformMatrixLoc, 1, false, transformMatrix, 0)
 
         GLES20.glUniformMatrix3fv(uSceneLinearTo709Loc, 1, true, sceneLinearTo709, 0)
+        GLES20.glUniform1f(uExposureLoc, exposure)
         GLES20.glUniformMatrix3fv(uInsetmatLoc, 1, true, insetMat, 0)
         GLES20.glUniformMatrix3fv(uOutsetmatLoc, 1, true, outsetMat, 0)
         GLES20.glUniformMatrix3fv(u709To2020Loc, 1, true, toRec2020, 0)
@@ -220,6 +224,7 @@ uniform mat3 u_outsetmat;
 uniform mat3 u_709_to_2020;
 uniform float u_white_level;
 uniform float u_black_level;
+uniform float u_exposure;
 uniform float u_log_min;
 uniform float u_log_max;
 uniform float u_log_midgray;
@@ -232,7 +237,7 @@ ${AgxCoreGlsl.CORE_HELPERS}
 
 vec3 agxFormationYuv(vec3 rgb) {
     rgb = compensateLowSide(rgb);
-    rgb = u_scene_linear_to_709 * rgb;
+    rgb = u_scene_linear_to_709 * rgb * exp2(u_exposure);
     rgb = u_insetmat * rgb;
     rgb = lin2log(rgb, u_log_min, u_log_max);
     rgb.r = sigmoid(rgb.r, u_shoulder, u_toe, u_contrast, u_log_midgray, u_display_midgray);

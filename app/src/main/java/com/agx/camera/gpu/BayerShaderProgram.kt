@@ -42,6 +42,7 @@ class BayerShaderProgram {
     private var uBayerColorMapLoc = 0
     private var uBitDepthLoc = 0
     private var uNrStrengthLoc = 0
+    private var uExposureLoc = 0
 
     private var dUTextureLoc = 0
     private var dULensShadingMapLoc = 0
@@ -117,6 +118,7 @@ class BayerShaderProgram {
         uBayerColorMapLoc = GLES20.glGetUniformLocation(programId, "u_bayer_color_map")
         uBitDepthLoc = GLES20.glGetUniformLocation(programId, "u_bit_depth")
         uNrStrengthLoc = GLES20.glGetUniformLocation(programId, "u_nr_strength")
+        uExposureLoc = GLES20.glGetUniformLocation(programId, "u_exposure")
 
         dUTextureLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_bayerTex")
         dULensShadingMapLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_lens_shading_map")
@@ -206,6 +208,7 @@ class BayerShaderProgram {
     fun draw(
         outputWidth: Int, outputHeight: Int,
         transformMatrix: FloatArray,
+        exposure: Float,
         sceneLinearTo709: FloatArray,
         insetMat: FloatArray,
         outsetMat: FloatArray,
@@ -236,6 +239,7 @@ class BayerShaderProgram {
         GLES20.glUniform2f(uCropSizeLoc, cropSizeX, cropSizeY)
 
         GLES20.glUniformMatrix3fv(uSceneLinearTo709Loc, 1, true, sceneLinearTo709, 0)
+        GLES20.glUniform1f(uExposureLoc, exposure)
         GLES20.glUniformMatrix3fv(uInsetmatLoc, 1, true, insetMat, 0)
         GLES20.glUniformMatrix3fv(uOutsetmatLoc, 1, true, outsetMat, 0)
         GLES20.glUniformMatrix3fv(u709To2020Loc, 1, true, toRec2020, 0)
@@ -395,6 +399,7 @@ uniform mat3 u_outsetmat;
 uniform mat3 u_709_to_2020;
 uniform float u_white_level;
 uniform float u_black_level;
+uniform float u_exposure;
 uniform float u_log_min;
 uniform float u_log_max;
 uniform float u_log_midgray;

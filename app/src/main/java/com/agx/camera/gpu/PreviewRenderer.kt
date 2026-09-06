@@ -102,6 +102,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     var agxContrast = 2.4f
     var agxToe = 1.5f
     var agxShoulder = 1.5f
+    var exposureEv = 1.5f
 
     fun setPreviewSize(width: Int, height: Int) {
         fboWidth = width
@@ -357,6 +358,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         yuvShader.draw(
             fboWidth, fboHeight,
             computePreviewTransform(),
+            exposureEv,
             agxSceneLinearTo709,
             agxInsetMat,
             agxOutsetMat,
@@ -428,6 +430,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         nrShader.draw(
             demosaicFboTextureId,
             bayerNrStrength,
+            exposureEv,
             agxSceneLinearTo709,
             agxInsetMat,
             agxOutsetMat,
@@ -602,6 +605,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     yuvShader.draw(
                         captureFboWidth, captureFboHeight,
                         captureMatrix,
+                        exposureEv,
                         captureReq.agxSceneLinearTo709, captureReq.agxInsetMat, captureReq.agxOutsetMat, captureReq.agxToRec2020,
                         captureReq.agxWhiteLevel, captureReq.agxBlackLevel,
                         captureReq.agxLogMin, captureReq.agxLogMax,
@@ -681,6 +685,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     nrShader.draw(
                         rawDemosaicFboTextureId,
                         0f,
+                        exposureEv,
                         rawCaptureReq.agxSceneLinearTo709,
                         rawCaptureReq.agxInsetMat,
                         rawCaptureReq.agxOutsetMat,

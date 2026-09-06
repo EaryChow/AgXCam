@@ -342,6 +342,20 @@
                     android:clickable="true"
                     android:focusable="true" />
 
+                <TextView
+                    android:id="@+id/ev_pp_overlay"
+                    android:layout_width="wrap_content"
+                    android:layout_height="28dp"
+                    android:layout_marginStart="4dp"
+                    android:background="#CC000000"
+                    android:gravity="center"
+                    android:paddingHorizontal="8dp"
+                    android:text="EV +1.5"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="10sp"
+                    android:clickable="true"
+                    android:focusable="true" />
+
                 <View
                     android:layout_width="0dp"
                     android:layout_height="0dp"
@@ -441,6 +455,35 @@
             android:min="0"
             android:max="100"
             android:progress="50"
+            android:rotation="-90"
+            android:thumb="@drawable/seekbar_circle_thumb"
+            android:progressDrawable="@android:color/transparent"
+            android:splitTrack="false"
+            android:padding="0dp" />
+    </FrameLayout>
+
+    <!-- Post-Processing EV Popup — thin vertical line + dot, sibling of ISO/shutter -->
+    <FrameLayout
+        android:id="@+id/ev_pp_popup"
+        android:layout_width="48dp"
+        android:layout_height="240dp"
+        android:visibility="gone">
+
+        <View
+            android:id="@+id/ev_pp_line"
+            android:layout_width="1dp"
+            android:layout_height="120dp"
+            android:layout_gravity="center"
+            android:background="#44FFFFFF" />
+
+        <SeekBar
+            android:id="@+id/ev_pp_seekbar"
+            android:layout_width="120dp"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:min="0"
+            android:max="2000"
+            android:progress="1150"
             android:rotation="-90"
             android:thumb="@drawable/seekbar_circle_thumb"
             android:progressDrawable="@android:color/transparent"
