@@ -192,7 +192,7 @@ class LensManager(private val context: Context) {
         // Discover hidden cameras: physical sub-cameras of any logical camera
         // (e.g. ids 2,3,4,5 under back logical id 0 on Xiaomi) plus brute-probed
         // numeric ids that answer getCameraCharacteristics but are absent from
-        // cameraIdList. Mirrors MotionCam's "auto seek" behavior.
+        // cameraIdList.
         val discovered = mutableListOf<String>()
         for (lens in _lenses.toList()) {
             try {

@@ -124,6 +124,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     val currentVPlane: ByteBuffer? get() = vPlane
     val currentYuvWidth: Int get() = yuvWidth
     val currentYuvHeight: Int get() = yuvHeight
+    val currentBayerWidth: Int get() = bayerWidth
+    val currentBayerHeight: Int get() = bayerHeight
 
     var onFirstFrameRendered: (() -> Unit)? = null
     var onFrameRendered: ((Long) -> Unit)? = null

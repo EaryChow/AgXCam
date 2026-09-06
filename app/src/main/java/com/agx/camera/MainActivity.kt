@@ -679,11 +679,13 @@ class MainActivity : AppCompatActivity() {
             zoomRow.visibility = if (show) View.VISIBLE else View.GONE
             zoomSlider.visibility = if (show) View.VISIBLE else View.GONE
             zoomLabel.visibility = if (show) View.VISIBLE else View.GONE
-            // Keep focus region glued to indicator across zoom changes
+            // Keep focus region glued to indicator across zoom changes without
+            // restarting the AF scan (digital zoom keeps the focus distance)
             if (!autofocusController.isLocked && focusIndicator.visibility == View.VISIBLE) {
                 applyFocusPoint(
                     focusIndicator.x + focusIndicator.width / 2f,
-                    focusIndicator.y + focusIndicator.height / 2f
+                    focusIndicator.y + focusIndicator.height / 2f,
+                    triggerScan = false
                 )
             }
         }
@@ -1352,8 +1354,16 @@ class MainActivity : AppCompatActivity() {
 
     /** Maps view coordinates to normalized (0..1) coordinates in the camera frame. */
     private fun viewToFrameCoords(x: Float, y: Float): FloatArray? {
-        val fw = previewRenderer.currentYuvWidth.toFloat()
-        val fh = previewRenderer.currentYuvHeight.toFloat()
+        val fw: Float
+        val fh: Float
+        if (previewRenderer.useBayerPath) {
+            // RAW display is the full sensor frame (GPU-cropped), not the YUV plane
+            fw = previewRenderer.currentBayerWidth.toFloat()
+            fh = previewRenderer.currentBayerHeight.toFloat()
+        } else {
+            fw = previewRenderer.currentYuvWidth.toFloat()
+            fh = previewRenderer.currentYuvHeight.toFloat()
+        }
         val vw = textureView.width.toFloat()
         val vh = textureView.height.toFloat()
 
@@ -1399,14 +1409,14 @@ class MainActivity : AppCompatActivity() {
         return floatArrayOf(u.coerceIn(0f, 1f), v.coerceIn(0f, 1f))
     }
 
-    private fun applyFocusPoint(viewX: Float, viewY: Float) {
+    private fun applyFocusPoint(viewX: Float, viewY: Float, triggerScan: Boolean = true) {
         val lens = lensManager.activeLens ?: return
         val uv = viewToFrameCoords(viewX, viewY) ?: return
         autofocusController.setFocusPoint(
             uv[0], uv[1],
             lensManager.getSensorActiveArraySize(lens),
-            lensManager.getSensorOrientation(lens),
-            previewRenderer.isFrontCamera
+            previewRenderer.isFrontCamera,
+            triggerScan
         )
     }
 
