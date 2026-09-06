@@ -325,6 +325,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
     private var renderFrameCount = 0
     private var bayerRenderCount = 0
+    private var lastBayerCropLog: String? = null
 
     private fun renderYuvFrame(viewW: Int, viewH: Int) {
         val y = yPlane
@@ -371,6 +372,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             clearAndSwap(viewW, viewH)
             return
         }
+
+        applyBayerCrop()
 
         bayerRenderCount++
         if (bayerRenderCount == 1 || bayerRenderCount % 300 == 0) {
@@ -442,6 +445,27 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 fboWidth / 2, fboHeight / 2
             )
             CrashLogger.log(TAG, "nr probe: center=$px region=$reg")
+        }
+    }
+
+    private fun applyBayerCrop() {
+        if (bayerWidth <= 0 || bayerHeight <= 0) return
+        val zoom = zoomController.zoomFactor.coerceIn(1.0f, zoomController.maxZoom)
+        if (zoom <= 1.0f) {
+            bayerShader.setCropRegion(0f, 0f, bayerWidth.toFloat(), bayerHeight.toFloat())
+            return
+        }
+        val cropW = (bayerWidth / zoom).toInt().coerceAtLeast(2)
+        val cropH = (bayerHeight / zoom).toInt().coerceAtLeast(2)
+        val centerX = (zoomController.zoomCenterX * bayerWidth).toInt()
+        val centerY = (zoomController.zoomCenterY * bayerHeight).toInt()
+        val left = (centerX - cropW / 2).coerceIn(0, bayerWidth - cropW)
+        val top = (centerY - cropH / 2).coerceIn(0, bayerHeight - cropH)
+        bayerShader.setCropRegion(left.toFloat(), top.toFloat(), cropW.toFloat(), cropH.toFloat())
+        val tag = "zoom=$zoom origin=${left},${top} size=${cropW}x$cropH"
+        if (tag != lastBayerCropLog) {
+            lastBayerCropLog = tag
+            CrashLogger.log(TAG, "bayerCrop: $tag")
         }
     }
 
@@ -611,9 +635,13 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             }
 
             if (rawCaptureReq != null) {
-                ensureCaptureFbo()
-                if (captureFboId != 0) {
-                    ensureRawDemosaicFbo(captureFboWidth, captureFboHeight)
+                val outW = rawCaptureReq.targetW.takeIf { it in 1..rawCaptureReq.rawW } ?: rawCaptureReq.rawW
+                val outH = rawCaptureReq.targetH.takeIf { it in 1..rawCaptureReq.rawH } ?: rawCaptureReq.rawH
+
+                ensureRawDemosaicFbo(outW, outH)
+                ensureDownscaleFbo(outW, outH)
+                if (rawDemosaicFboId != 0 && downscaleFboId != 0) {
+                    applyBayerCrop()
 
                     val captureMatrix = FloatArray(16).also { android.opengl.Matrix.setIdentityM(it, 0) }
                     android.opengl.Matrix.translateM(captureMatrix, 0, 0.5f, 0.5f, 0f)
@@ -637,14 +665,14 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         bayerColorMap,
                         bayerBitDepth,
                         rawCaptureReq.agxWhiteLevel, rawCaptureReq.agxBlackLevel,
-                        boxAA = 0,
+                        boxAA = if (outW < rawCaptureReq.rawW || outH < rawCaptureReq.rawH) 4 else 0,
                         wbGains = floatArrayOf(wbGainR, wbGainG, wbGainB),
                         colorMat = ccMatrix
                     )
                     logGlError("raw after drawDemosaic", bayerRenderCount)
 
-                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, captureFboId)
-                    GLES20.glViewport(0, 0, captureFboWidth, captureFboHeight)
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, downscaleFboId)
+                    GLES20.glViewport(0, 0, downscaleFboWidth, downscaleFboHeight)
                     GLES20.glClearColor(0f, 0f, 0f, 1f)
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
@@ -662,29 +690,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     )
                     logGlError("raw after nrShader.draw", bayerRenderCount)
 
-                    val readW: Int
-                    val readH: Int
-                    val readTexId: Int
-
-                    if (rawCaptureReq.targetW < captureFboWidth && rawCaptureReq.targetH < captureFboHeight &&
-                        rawCaptureReq.targetW > 0 && rawCaptureReq.targetH > 0) {
-                        ensureDownscaleFbo(rawCaptureReq.targetW, rawCaptureReq.targetH)
-                        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, downscaleFboId)
-                        GLES20.glViewport(0, 0, downscaleFboWidth, downscaleFboHeight)
-                        blitShader.draw(captureFboTextureId)
-                        readW = downscaleFboWidth
-                        readH = downscaleFboHeight
-                        readTexId = downscaleFboTextureId
-                    } else {
-                        readW = captureFboWidth
-                        readH = captureFboHeight
-                        readTexId = captureFboTextureId
-                    }
-
-                    val bitmap = JpegEncoder.readFboToBitmapFlipped(readTexId, readW, readH)
+                    val bitmap = JpegEncoder.readFboToBitmapFlipped(downscaleFboTextureId, outW, outH)
                     rawCaptureReq.resultRef.set(bitmap)
                 } else {
-                    Log.e(TAG, "Capture FBO not available for raw")
+                    Log.e(TAG, "RAW render FBO not available")
                 }
                 rawCaptureReq.latch.countDown()
             }

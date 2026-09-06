@@ -21,6 +21,8 @@ class BayerShaderProgram {
     private var uOutputResolutionLoc = 0
     private var uTransformMatrixLoc = 0
     private var uSensorSizeLoc = 0
+    private var uCropOriginLoc = 0
+    private var uCropSizeLoc = 0
 
     private var uSceneLinearTo709Loc = 0
     private var uInsetmatLoc = 0
@@ -46,6 +48,8 @@ class BayerShaderProgram {
     private var dUOutputResolutionLoc = 0
     private var dUTransformMatrixLoc = 0
     private var dUSensorSizeLoc = 0
+    private var dUCropOriginLoc = 0
+    private var dUCropSizeLoc = 0
     private var dUBlackLevelPatternLoc = 0
     private var dUBayerColorMapLoc = 0
     private var dUBitDepthLoc = 0
@@ -57,6 +61,10 @@ class BayerShaderProgram {
 
     private var sensorWidth = 0
     private var sensorHeight = 0
+    private var cropOriginX = 0f
+    private var cropOriginY = 0f
+    private var cropSizeX = 1f
+    private var cropSizeY = 1f
 
     private val quadVertices: FloatBuffer = ByteBuffer.allocateDirect(QUAD_COORDS.size * 4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer().put(QUAD_COORDS).also { it.position(0) }
@@ -66,6 +74,8 @@ class BayerShaderProgram {
     fun create(sensorW: Int, sensorH: Int) {
         sensorWidth = sensorW
         sensorHeight = sensorH
+        cropSizeX = sensorW.toFloat()
+        cropSizeY = sensorH.toFloat()
 
         programId = createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
         if (programId == 0) {
@@ -86,6 +96,8 @@ class BayerShaderProgram {
         uOutputResolutionLoc = GLES20.glGetUniformLocation(programId, "u_outputResolution")
         uTransformMatrixLoc = GLES20.glGetUniformLocation(programId, "u_transformMatrix")
         uSensorSizeLoc = GLES20.glGetUniformLocation(programId, "u_sensorSize")
+        uCropOriginLoc = GLES20.glGetUniformLocation(programId, "u_cropOrigin")
+        uCropSizeLoc = GLES20.glGetUniformLocation(programId, "u_cropSize")
 
         uSceneLinearTo709Loc = GLES20.glGetUniformLocation(programId, "u_scene_linear_to_709")
         uInsetmatLoc = GLES20.glGetUniformLocation(programId, "u_insetmat")
@@ -111,6 +123,8 @@ class BayerShaderProgram {
         dUOutputResolutionLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_outputResolution")
         dUTransformMatrixLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_transformMatrix")
         dUSensorSizeLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_sensorSize")
+        dUCropOriginLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_cropOrigin")
+        dUCropSizeLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_cropSize")
         dUBlackLevelPatternLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_black_level_pattern")
         dUBayerColorMapLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_bayer_color_map")
         dUBitDepthLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_bit_depth")
@@ -139,6 +153,13 @@ class BayerShaderProgram {
 
         Log.d(TAG, "Bayer shader program created: $programId, sensor: ${sensorWidth}x${sensorHeight}")
         com.agx.camera.CrashLogger.log(TAG, "Programs created: bayer=$programId demosaic=$demosaicProgramId")
+    }
+
+    fun setCropRegion(originX: Float, originY: Float, sizeX: Float, sizeY: Float) {
+        cropOriginX = originX
+        cropOriginY = originY
+        cropSizeX = sizeX
+        cropSizeY = sizeY
     }
 
     fun uploadBayer(buffer: ByteBuffer, width: Int, height: Int, stridePixels: Int) {
@@ -211,6 +232,8 @@ class BayerShaderProgram {
         GLES20.glUniform2f(uOutputResolutionLoc, outputWidth.toFloat(), outputHeight.toFloat())
         GLES20.glUniformMatrix4fv(uTransformMatrixLoc, 1, false, transformMatrix, 0)
         GLES20.glUniform2f(uSensorSizeLoc, sensorWidth.toFloat(), sensorHeight.toFloat())
+        GLES20.glUniform2f(uCropOriginLoc, cropOriginX, cropOriginY)
+        GLES20.glUniform2f(uCropSizeLoc, cropSizeX, cropSizeY)
 
         GLES20.glUniformMatrix3fv(uSceneLinearTo709Loc, 1, true, sceneLinearTo709, 0)
         GLES20.glUniformMatrix3fv(uInsetmatLoc, 1, true, insetMat, 0)
@@ -274,6 +297,8 @@ class BayerShaderProgram {
         GLES20.glUniform2f(dUOutputResolutionLoc, outputWidth.toFloat(), outputHeight.toFloat())
         GLES20.glUniformMatrix4fv(dUTransformMatrixLoc, 1, false, transformMatrix, 0)
         GLES20.glUniform2f(dUSensorSizeLoc, sensorWidth.toFloat(), sensorHeight.toFloat())
+        GLES20.glUniform2f(dUCropOriginLoc, cropOriginX, cropOriginY)
+        GLES20.glUniform2f(dUCropSizeLoc, cropSizeX, cropSizeY)
 
         GLES20.glUniform4i(dUBlackLevelPatternLoc,
             blackLevelPattern[0], blackLevelPattern[1],
@@ -361,6 +386,8 @@ uniform usampler2D u_bayerTex;
 uniform sampler2D u_lens_shading_map;
 uniform vec2 u_outputResolution;
 uniform vec2 u_sensorSize;
+uniform vec2 u_cropOrigin;
+uniform vec2 u_cropSize;
 
 uniform mat3 u_scene_linear_to_709;
 uniform mat3 u_insetmat;
@@ -506,9 +533,9 @@ ${AgxCoreGlsl.AGX_FORMATION}
 
 void main() {
     vec2 uv = v_texCoord;
-    vec2 lsSensorUV = uv * u_sensorSize;
+    vec2 lsSensorUV = u_cropOrigin + uv * u_cropSize;
 
-    vec2 sensorUV = uv * u_sensorSize;
+    vec2 sensorUV = u_cropOrigin + uv * u_cropSize;
     sensorUV = clamp(sensorUV, vec2(0.0), u_sensorSize - vec2(1.0));
     lsSensorUV = clamp(lsSensorUV, vec2(0.0), u_sensorSize - vec2(1.0));
 
@@ -532,6 +559,8 @@ uniform usampler2D u_bayerTex;
 uniform sampler2D u_lens_shading_map;
 uniform vec2 u_outputResolution;
 uniform vec2 u_sensorSize;
+uniform vec2 u_cropOrigin;
+uniform vec2 u_cropSize;
 
 uniform mat3 u_709_to_2020;
 
@@ -662,9 +691,9 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
 
 void main() {
     vec2 uv = v_texCoord;
-    vec2 lsSensorUV = uv * u_sensorSize;
+    vec2 lsSensorUV = u_cropOrigin + uv * u_cropSize;
 
-    vec2 sensorUV = uv * u_sensorSize;
+    vec2 sensorUV = u_cropOrigin + uv * u_cropSize;
     sensorUV = clamp(sensorUV, vec2(0.0), u_sensorSize - vec2(1.0));
     lsSensorUV = clamp(lsSensorUV, vec2(0.0), u_sensorSize - vec2(1.0));
 
