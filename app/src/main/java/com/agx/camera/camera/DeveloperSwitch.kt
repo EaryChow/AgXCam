@@ -72,11 +72,22 @@ class DeveloperSwitch(
                 tv.text = if (useRawSensor) "RAW_SENSOR mode active" else "YUV fallback mode"
                 tv.setTextColor(if (useRawSensor) 0xFF00CC00.toInt() else 0xFF00AAFF.toInt())
             } else {
-                tv.text = "RAW sensor access unavailable for this device"
+                tv.text = "RAW sensor stream not supported by this device, YUV fallback mode active"
                 tv.setTextColor(0xFFFFAA00.toInt())
             }
             tv.visibility = TextView.VISIBLE
         }
+    }
+
+    fun forceEnableRaw() {
+        useRawSensor = true
+        programmaticToggle = true
+        toggle?.isChecked = true
+        programmaticToggle = false
+        prefs?.edit()?.putBoolean(PREF_RAW_TOGGLE, true)?.apply()
+        Log.d(TAG, "RAW_SENSOR auto-enabled at launch")
+        com.agx.camera.CrashLogger.log(TAG, "RAW_SENSOR auto-enabled at launch")
+        updateBannerForRawMode(true)
     }
 
     fun updateBannerForRawMode(active: Boolean) {
@@ -95,6 +106,17 @@ class DeveloperSwitch(
             tv.setTextColor(0xFFFF4444.toInt())
             tv.visibility = TextView.VISIBLE
         }
+    }
+
+    fun forceDisableRaw() {
+        useRawSensor = false
+        programmaticToggle = true
+        toggle?.isChecked = false
+        programmaticToggle = false
+        prefs?.edit()?.putBoolean(PREF_RAW_TOGGLE, false)?.apply()
+        Log.d(TAG, "RAW_SENSOR disabled programmatically")
+        com.agx.camera.CrashLogger.log(TAG, "RAW_SENSOR disabled programmatically")
+        updateBannerForRawMode(false)
     }
 
     fun revertToggle() {

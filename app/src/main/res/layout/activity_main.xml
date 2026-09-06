@@ -101,9 +101,24 @@
         android:textSize="11sp"
         android:visibility="gone" />
 
-    <!-- Warning Toast Container -->
-    <TextView
-        android:id="@+id/disconnect_banner"
+<TextView
+            android:id="@+id/raw_unsupported_warning"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|end"
+            android:layout_marginTop="8dp"
+            android:layout_marginEnd="8dp"
+            android:background="#99000000"
+            android:paddingHorizontal="10dp"
+            android:paddingVertical="6dp"
+            android:text="RAW sensor stream not supported by this device - YUV fallback mode"
+            android:textColor="#FFFF4444"
+            android:textSize="11sp"
+            android:visibility="gone" />
+
+        <!-- Warning Toast Container -->
+        <TextView
+            android:id="@+id/disconnect_banner"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="top|center_horizontal"

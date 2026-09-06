@@ -69,6 +69,7 @@ class DevSwitchGrayOutTest {
     @Test
     fun setRawSensorAvailable_false_unchecksToggle() {
         devSwitch.init(mockContainer, mockToggle, mockBanner)
+        clearInvocations(mockToggle)
         devSwitch.setRawSensorAvailable(true)
         devSwitch.setRawSensorAvailable(false)
 
@@ -88,7 +89,7 @@ class DevSwitchGrayOutTest {
         devSwitch.init(mockContainer, mockToggle, mockBanner)
         devSwitch.setRawSensorAvailable(false)
 
-        verify(mockBanner).text = "RAW sensor access unavailable for this device"
+        verify(mockBanner).text = "RAW sensor stream not supported by this device, YUV fallback mode active"
         verify(mockBanner).setTextColor(0xFFFFAA00.toInt())
         verify(mockBanner).visibility = TextView.VISIBLE
     }

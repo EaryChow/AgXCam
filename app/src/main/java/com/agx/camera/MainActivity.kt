@@ -80,6 +80,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var textureView: TextureView
     private lateinit var devBanner: TextView
+    private lateinit var rawUnsupportedWarning: TextView
     private lateinit var disconnectBanner: TextView
     private lateinit var flashButton: ImageView
     private lateinit var wbButton: TextView
@@ -220,6 +221,7 @@ class MainActivity : AppCompatActivity() {
 
         textureView = findViewById(R.id.preview_texture)
         devBanner = findViewById(R.id.dev_banner)
+        rawUnsupportedWarning = findViewById(R.id.raw_unsupported_warning)
         disconnectBanner = findViewById(R.id.disconnect_banner)
         warningContainer = findViewById(R.id.warningContainer)
         flashButton = findViewById(R.id.flash_button)
@@ -1614,7 +1616,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val primary = lensManager.selectPrimary() ?: run {
+        var primary = lensManager.selectPrimary() ?: run {
             CrashLogger.log(TAG, "initCamera: selectPrimary returned null")
             openingCamera = false
             Log.e(TAG, "No primary lens found")
@@ -1622,6 +1624,29 @@ class MainActivity : AppCompatActivity() {
         }
 
         CrashLogger.log(TAG, "initCamera: primary=${primary.cameraId} ${primary.label} level=${primary.hardwareLevel} hasRaw=${primary.hasRawSensor}")
+
+        val rawAvailable = lensManager.hasAnyRawLens()
+        developerSwitch.setRawSensorAvailable(rawAvailable)
+        if (!rawAvailable) {
+            CrashLogger.log(TAG, "initCamera: RAW sensor stream not supported by this device, using YUV fallback mode")
+            rawUnsupportedWarning.visibility = View.VISIBLE
+        } else if (!developerSwitch.useRawSensor) {
+            CrashLogger.log(TAG, "initCamera: RAW sensor stream available, auto-enabling RAW mode")
+            developerSwitch.forceEnableRaw()
+        }
+        if (developerSwitch.useRawSensor && !primary.hasRawSensor) {
+            val rawLens = lensManager.getClosestRawLens(primary)
+            if (rawLens != null) {
+                CrashLogger.log(TAG, "initCamera: primary lacks RAW, switching to RAW lens ${rawLens.cameraId}")
+                lensManager.switchLens(rawLens) {}
+                primary = rawLens
+            } else {
+                CrashLogger.log(TAG, "initCamera: no RAW lens usable, falling back to YUV")
+                developerSwitch.forceDisableRaw()
+                developerSwitch.showErrorBanner("No RAW-capable lens found")
+            }
+        }
+
         val previewSize = lensManager.getBestPreviewSize(primary, maxPreviewDimensions.first, maxPreviewDimensions.second)
         buildLensSelectorUI()
 
@@ -1847,8 +1872,6 @@ class MainActivity : AppCompatActivity() {
             }
             return
         }
-
-        developerSwitch.setRawSensorAvailable(lensManager.hasAnyRawLens())
     }
 
     private fun rawSizeForLens(lens: LensInfo): Size? =

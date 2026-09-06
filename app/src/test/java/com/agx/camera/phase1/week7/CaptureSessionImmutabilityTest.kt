@@ -15,9 +15,6 @@ class CaptureSessionImmutabilityTest {
         deviceOrientation = 0,
         sensorOrientation = 90,
         focalLengthMm = 6.7f,
-        zoomFactor = 1.0f,
-        zoomCenterX = 0.5f,
-        zoomCenterY = 0.5f,
         agxSceneLinearTo709 = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f),
         agxInsetMat = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f),
         agxOutsetMat = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f),
@@ -77,9 +74,6 @@ class CaptureSessionImmutabilityTest {
         assertEquals(0, session.deviceOrientation)
         assertEquals(90, session.sensorOrientation)
         assertEquals(6.7f, session.focalLengthMm, 0.001f)
-        assertEquals(1.0f, session.zoomFactor, 0.001f)
-        assertEquals(0.5f, session.zoomCenterX, 0.001f)
-        assertEquals(0.5f, session.zoomCenterY, 0.001f)
         assertEquals(1.0f, session.agxWhiteLevel, 0.001f)
         assertEquals(0.0f, session.agxBlackLevel, 0.001f)
         assertEquals(-6.0f, session.agxLogMin, 0.001f)
