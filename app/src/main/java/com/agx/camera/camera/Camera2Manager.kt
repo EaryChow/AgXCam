@@ -92,10 +92,13 @@ class Camera2Manager(private val context: Context) {
     // Focus/Exposure lock
     private var meteringRegions: Array<MeteringRectangle>? = null
     private var focusLocked = false
+    // Latest auto-focus lens distance (diopters), used to freeze focus on lock
+    private var lastAutoFocusDistance: Float? = null
 
     // Device region capabilities (set on session open)
     private var deviceMaxAfRegions = 0
     private var deviceMaxAeRegions = 0
+    private var deviceMinFocusDistance = 0f
 
     // Manual exposure
     var isManualExposure = false
@@ -165,6 +168,7 @@ class Camera2Manager(private val context: Context) {
             val maxAeRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0
             deviceMaxAfRegions = maxAfRegions
             deviceMaxAeRegions = maxAeRegions
+            deviceMinFocusDistance = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
             CrashLogger.log(TAG, "max AF regions=$maxAfRegions, max AE regions=$maxAeRegions")
 
             populateAeExposureRange(chars)
@@ -421,13 +425,17 @@ class Camera2Manager(private val context: Context) {
         val camera = cameraDevice ?: return
         val session = captureSession ?: return
 
-        CrashLogger.log(TAG, "setManualExposure iso=$iso exposureTimeNs=$exposureTimeNs")
-
-        // Focus behaves the same in manual mode: continuous + regions when unlocked, hold when locked
+        // Focus behaves the same in manual mode: auto when unlocked, frozen when locked
+        val frozenLens = if (focusLocked && deviceMinFocusDistance > 0f) {
+            lastAutoFocusDistance?.coerceIn(0f, deviceMinFocusDistance)
+        } else null
+        val useManualHold = focusLocked && frozenLens != null
         val afMode = safeAfMode(
-            if (focusLocked) CaptureRequest.CONTROL_AF_MODE_AUTO
+            if (useManualHold) CaptureRequest.CONTROL_AF_MODE_OFF
             else CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
         )
+
+        CrashLogger.log(TAG, "setManualExposure iso=$iso exposureTimeNs=$exposureTimeNs frozenLens=${frozenLens ?: "no"} af=$afMode")
 
         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addPreviewTargets()
@@ -440,6 +448,9 @@ class Camera2Manager(private val context: Context) {
             }
             set(CaptureRequest.CONTROL_AWB_MODE, awbToSend)
             meteringRegions?.let { set(CaptureRequest.CONTROL_AF_REGIONS, it) }
+            if (useManualHold) {
+                set(CaptureRequest.LENS_FOCUS_DISTANCE, frozenLens)
+            }
             if (isAwbLocked) set(CaptureRequest.CONTROL_AWB_LOCK, true)
             set(CaptureRequest.SENSOR_SENSITIVITY, iso)
             set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureTimeNs)
@@ -759,14 +770,27 @@ class Camera2Manager(private val context: Context) {
         applyPreviewRequest() // back to continuous picture, no regions
     }
 
-    // Lock focus and exposure at current metering region
+    // Lock focus (manual focus hold) and AE. The HAL reports afState
+    // FOCUSED_LOCKED while still moving the lens on this device, so a
+    // trigger-based lock is not reliable: freeze the last auto-focus lens
+    // distance by switching to AF_MODE_OFF + LENS_FOCUS_DISTANCE, and switch
+    // back to auto focus on unlock.
     fun lockFocusAndExposure() {
         if (meteringRegions == null) return
         focusLocked = true
+        // A tap-scan may still be mid-flight. Invalidate its re-arm chain so the
+        // manual-focus lock request below is the one that survives.
+        ++focusGeneration
+        pendingReArmRunnable?.let { run ->
+            backgroundHandler?.removeCallbacks(run)
+            pendingReArmRunnable = null
+        }
+        scanRequestRect = null
+        isAfScanning = false
         applyPreviewRequest()
     }
 
-    // Unlock focus and exposure, resume continuous AF
+    // Unlock focus and exposure, resume auto/region AF
     fun unlockFocusAndExposure() {
         focusLocked = false
         applyPreviewRequest()
@@ -784,12 +808,21 @@ class Camera2Manager(private val context: Context) {
         val camera = cameraDevice ?: run { CrashLogger.log(TAG, "applyPreviewRequest: cameraDevice null"); return }
         val session = captureSession ?: run { CrashLogger.log(TAG, "applyPreviewRequest: session null"); return }
 
+        val frozenLens = if (focusLocked && deviceMinFocusDistance > 0f) {
+            lastAutoFocusDistance?.coerceIn(0f, deviceMinFocusDistance)
+        } else null
+        // Only drop into manual focus when we can actually pin a distance;
+        // otherwise fall back to an AUTO hold so the lens position is untouched.
+        val useManualHold = focusLocked && frozenLens != null
         val inHoldState = !focusLocked && meteringRegions != null && !isAfScanning
 
         val afMode = if (deviceMaxAfRegions > 0) {
             safeAfMode(
-                if (focusLocked || inHoldState) CaptureRequest.CONTROL_AF_MODE_AUTO
-                else CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                when {
+                    useManualHold -> CaptureRequest.CONTROL_AF_MODE_OFF
+                    focusLocked || inHoldState -> CaptureRequest.CONTROL_AF_MODE_AUTO
+                    else -> CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                }
             )
         } else {
             CaptureRequest.CONTROL_AF_MODE_OFF
@@ -805,6 +838,11 @@ class Camera2Manager(private val context: Context) {
             }
             set(CaptureRequest.CONTROL_AWB_MODE, awbToSend)
             meteringRegions?.let { setMeteringRegions(it) }
+            if (useManualHold) {
+                // Manual focus hold: copy the last auto-focus lens position so the
+                // HAL has no reason to move the lens. Clamp to the device's range.
+                set(CaptureRequest.LENS_FOCUS_DISTANCE, frozenLens)
+            }
             if (inHoldState) {
                 set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
             }
@@ -827,7 +865,7 @@ class Camera2Manager(private val context: Context) {
             applyPreviewCrop()
         }
 
-        CrashLogger.log(TAG, "applyPreviewRequest: awb=${awbModeName(currentAwbMode)} af=$afMode hold=$inHoldState locked=$focusLocked awbLocked=$isAwbLocked manual=$isManualExposure iso=$currentManualIso shutter=${currentManualExposureNs}")
+        CrashLogger.log(TAG, "applyPreviewRequest: awb=${awbModeName(currentAwbMode)} af=$afMode hold=$inHoldState locked=$focusLocked frozenLens=${frozenLens ?: "no"} awbLocked=$isAwbLocked manual=$isManualExposure iso=$currentManualIso shutter=${currentManualExposureNs}")
 
         try {
             session.setRepeatingRequest(request.build(), aeReadoutCallback, backgroundHandler)
@@ -1203,6 +1241,10 @@ class Camera2Manager(private val context: Context) {
         override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
             val afState = result.get(CaptureResult.CONTROL_AF_STATE)
             val lensFocusD = result.get(CaptureResult.LENS_FOCUS_DISTANCE)
+            if (lensFocusD != null && afState != CaptureResult.CONTROL_AF_STATE_PASSIVE_SCAN &&
+                afState != CaptureResult.CONTROL_AF_STATE_ACTIVE_SCAN) {
+                lastAutoFocusDistance = lensFocusD
+            }
             finishScanIfTerminal(request, afState, result)
             val cct = result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)
             latestColorCorrectionMatrix = cct?.let { colorSpaceToRowMajor(it) }

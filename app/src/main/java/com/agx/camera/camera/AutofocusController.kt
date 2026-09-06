@@ -35,6 +35,9 @@ class AutofocusController(
 
     fun unlock() {
         isLocked = false
+        // Clear the manager-side lock state first, otherwise the preview re-arm
+        // keeps AUTO + AE_LOCK and the fresh region scan below gets overridden.
+        cameraManager.unlockFocusAndExposure()
         cameraManager.setMeteringRegion(currentRect) // resume region AF at same point
     }
 
