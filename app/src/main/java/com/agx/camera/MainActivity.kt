@@ -2234,12 +2234,12 @@ class MainActivity : AppCompatActivity() {
                 bradford
             }
             WhiteBalanceMode.GRAY_CARD -> ColorMatrix.identity()
-            WhiteBalanceMode.DAYLIGHT -> ColorMatrix.identity()
-            WhiteBalanceMode.CLOUDY -> ColorMatrix.identity()
-            WhiteBalanceMode.INCANDESCENT -> ColorMatrix.identity()
-            WhiteBalanceMode.FLUORESCENT -> ColorMatrix.identity()
-            WhiteBalanceMode.TWILIGHT -> ColorMatrix.identity()
-            WhiteBalanceMode.SHADE -> ColorMatrix.identity()
+            WhiteBalanceMode.DAYLIGHT -> presetSceneLinearTo709("DAYLIGHT", 5500f)
+            WhiteBalanceMode.CLOUDY -> presetSceneLinearTo709("CLOUDY", 6500f)
+            WhiteBalanceMode.INCANDESCENT -> presetSceneLinearTo709("INCANDESCENT", 2850f)
+            WhiteBalanceMode.FLUORESCENT -> presetSceneLinearTo709("FLUORESCENT", 4100f)
+            WhiteBalanceMode.TWILIGHT -> presetSceneLinearTo709("TWILIGHT", 8000f)
+            WhiteBalanceMode.SHADE -> presetSceneLinearTo709("SHADE", 7500f)
         }
 
         val insetParams = agxParams.toInsetParams()
@@ -2258,6 +2258,20 @@ class MainActivity : AppCompatActivity() {
         previewRenderer.agxContrast = agxParams.contrast
         previewRenderer.agxToe = agxParams.toe
         previewRenderer.agxShoulder = agxParams.shoulder
+    }
+
+    private fun presetSceneLinearTo709(name: String, kelvin: Float): ColorMatrix.Mat3 {
+        if (!previewRenderer.useBayerPath) return ColorMatrix.identity()
+        val d65xy = Pair(ColorMatrix.D65_X, ColorMatrix.D65_Y)
+        val userXY = WhiteBalanceMath.kelvinToXy(kelvin)
+        val m = WhiteBalanceMath.chromaticAdaptationBradford(d65xy, userXY)
+        CrashLogger.log(TAG, "uploadAgxUniforms WB preset: mode=$name kelvin=$kelvin raw-path " +
+            "userXY=(${String.format("%.6f", userXY.first)}, ${String.format("%.6f", userXY.second)}) " +
+            "bradford=[${String.format("%.6f", m.m[0])},${String.format("%.6f", m.m[1])},${String.format("%.6f", m.m[2])}, " +
+            "${String.format("%.6f", m.m[3])},${String.format("%.6f", m.m[4])},${String.format("%.6f", m.m[5])}, " +
+            "${String.format("%.6f", m.m[6])},${String.format("%.6f", m.m[7])},${String.format("%.6f", m.m[8])}] " +
+            "awbMode=$currentWbMode")
+        return m
     }
 
     private fun extractPlane(plane: android.media.Image.Plane, width: Int, height: Int): java.nio.ByteBuffer {
