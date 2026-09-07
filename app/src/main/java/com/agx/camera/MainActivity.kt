@@ -1383,13 +1383,17 @@ class MainActivity : AppCompatActivity() {
     private fun viewToFrameCoords(x: Float, y: Float): FloatArray? {
         val fw: Float
         val fh: Float
+        val contentAspect: Float
         if (previewRenderer.useBayerPath) {
-            // RAW display is the full sensor frame (GPU-cropped), not the YUV plane
+            // RAW display is the full sensor frame center-cropped to the preview
+            // aspect by the GPU; the displayed strip aspect is the FBO aspect.
             fw = previewRenderer.currentBayerWidth.toFloat()
             fh = previewRenderer.currentBayerHeight.toFloat()
+            contentAspect = previewRenderer.currentContentAspect
         } else {
             fw = previewRenderer.currentYuvWidth.toFloat()
             fh = previewRenderer.currentYuvHeight.toFloat()
+            contentAspect = fw / fh
         }
         val vw = textureView.width.toFloat()
         val vh = textureView.height.toFloat()
@@ -1398,8 +1402,8 @@ class MainActivity : AppCompatActivity() {
 
         if (fw <= 0f || fh <= 0f || vw <= 0f || vh <= 0f) return null
 
-        // Undo the renderer's CENTER_INSIDE viewport (letterbox/pillarbox)
-        val contentAspect = fw / fh
+        // Undo the renderer's CENTER_INSIDE viewport (letterbox/pillarbox) over
+        // the DISPLAYED content aspect
         val viewAspect = vw / vh
         var vpW: Float
         var vpH: Float
@@ -1420,6 +1424,20 @@ class MainActivity : AppCompatActivity() {
         var v = ((y - vpY) / vpH).coerceIn(0f, 1f)
 
         CrashLogger.log(TAG, "viewToFrameCoords: vpX=$vpX vpY=$vpY vpW=$vpW vpH=$vpH u=$u v=$v")
+
+        // In bayer mode the GPU center-crops the taller/wider sensor to the
+        // preview aspect (scale X or Y < 1). Reverse that crop so u,v span the
+        // full sensor frame before the zoom-crop dilution below.
+        if (previewRenderer.useBayerPath && contentAspect > 0f) {
+            val sensorAspect = fw / fh
+            if (sensorAspect > contentAspect) {
+                val sx = contentAspect / sensorAspect
+                u = 0.5f + (u - 0.5f) * sx
+            } else if (sensorAspect < contentAspect) {
+                val sy = sensorAspect / contentAspect
+                v = 0.5f + (v - 0.5f) * sy
+            }
+        }
 
         // Map viewport coords to full sensor coordinates via crop region
         val crop = camera2Manager.computeCropRegion()

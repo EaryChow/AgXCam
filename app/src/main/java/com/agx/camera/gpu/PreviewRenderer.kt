@@ -128,6 +128,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     val currentBayerWidth: Int get() = bayerWidth
     val currentBayerHeight: Int get() = bayerHeight
 
+    // Aspect of the content actually displayed (the FBO, which is pre-cropped to
+    // the preview aspect). Used to reverse the CENTER_INSIDE viewport + aspect
+    // crop when mapping taps back to sensor coordinates.
+    val currentContentAspect: Float
+        get() = if (fboWidth > 0 && fboHeight > 0) fboWidth.toFloat() / fboHeight.toFloat() else 0f
+
     var onFirstFrameRendered: (() -> Unit)? = null
     var onFrameRendered: ((Long) -> Unit)? = null
     var onDegradedModeChanged: ((String?) -> Unit)? = null
@@ -140,22 +146,27 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
     @Volatile var sensorOrientation: Int = 0
     @Volatile var isFrontCamera: Boolean = false
-    @Volatile var targetAspectRatio: Float = 0f // 0 = use FBO aspect, otherwise crop to this aspect
+    @Volatile var targetAspectRatio: Float = 0f // kept for metadata/debugging; cropping is driven by the FBO preview aspect
 
-    private fun computeCropScale(): Pair<Float, Float> {
-        if (targetAspectRatio <= 0f) return Pair(1f, 1f)
+    // Center-crop scale so the SOURCE content (sensor/sensor crop for the bayer
+    // path, YUV frame for the yuv path) is sampled at the FBO's aspect instead of
+    // being stretched to fill it. The FBO aspect is the preview aspect chosen for
+    // the requested ratio, so this crops the wider/taller source to that aspect.
+    private fun computeCropScale(sourceW: Int, sourceH: Int): Pair<Float, Float> {
+        if (sourceW <= 0 || sourceH <= 0 || fboWidth <= 0 || fboHeight <= 0) return Pair(1f, 1f)
+        val sourceAspect = sourceW.toFloat() / sourceH.toFloat()
         val fboAspect = fboWidth.toFloat() / fboHeight.toFloat()
-        return if (targetAspectRatio > fboAspect) {
-            // Target is wider than FBO → crop vertical (scale Y < 1)
-            Pair(1f, fboAspect / targetAspectRatio)
+        return if (sourceAspect > fboAspect) {
+            // Source is wider than the output aspect → crop horizontal (scale X < 1)
+            Pair(fboAspect / sourceAspect, 1f)
         } else {
-            // Target is taller than FBO → crop horizontal (scale X < 1)
-            Pair(targetAspectRatio / fboAspect, 1f)
+            // Source is taller than the output aspect → crop vertical (scale Y < 1)
+            Pair(1f, sourceAspect / fboAspect)
         }
     }
 
-    private fun computePreviewTransform(): FloatArray {
-        val (cropScaleX, cropScaleY) = computeCropScale()
+    private fun computePreviewTransform(sourceW: Int, sourceH: Int): FloatArray {
+        val (cropScaleX, cropScaleY) = computeCropScale(sourceW, sourceH)
         val matrix = FloatArray(16)
         android.opengl.Matrix.setIdentityM(matrix, 0)
 
@@ -170,6 +181,29 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             android.opengl.Matrix.scaleM(matrix, 0, 1f, -1f, 1f)
         }
 
+        android.opengl.Matrix.translateM(matrix, 0, -0.5f, -0.5f, 0f)
+        return matrix
+    }
+
+    // Build the RAW-capture demosaic matrix: the usual Y-flip plus a center crop
+    // so the full sensor is framed at the OUTPUT aspect (matching the preview),
+    // instead of being stretched into it.
+    private fun buildRawCaptureMatrix(sourceW: Int, sourceH: Int, outW: Int, outH: Int): FloatArray {
+        val matrix = FloatArray(16).also { android.opengl.Matrix.setIdentityM(it, 0) }
+        var cropScaleX = 1f
+        var cropScaleY = 1f
+        if (sourceW > 0 && sourceH > 0 && outW > 0 && outH > 0) {
+            val sourceAspect = sourceW.toFloat() / sourceH.toFloat()
+            val outAspect = outW.toFloat() / outH.toFloat()
+            if (sourceAspect > outAspect) {
+                cropScaleX = outAspect / sourceAspect
+            } else {
+                cropScaleY = sourceAspect / outAspect
+            }
+        }
+        android.opengl.Matrix.translateM(matrix, 0, 0.5f, 0.5f, 0f)
+        android.opengl.Matrix.scaleM(matrix, 0, cropScaleX, cropScaleY, 1f)
+        android.opengl.Matrix.scaleM(matrix, 0, 1f, -1f, 1f)
         android.opengl.Matrix.translateM(matrix, 0, -0.5f, -0.5f, 0f)
         return matrix
     }
@@ -357,7 +391,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
         yuvShader.draw(
             fboWidth, fboHeight,
-            computePreviewTransform(),
+            computePreviewTransform(w, h),
             exposureEv,
             agxSceneLinearTo709,
             agxInsetMat,
@@ -401,7 +435,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
         bayerShader.drawDemosaic(
             demosaicFboWidth, demosaicFboHeight,
-            computePreviewTransform(),
+            computePreviewTransform(bayerWidth, bayerHeight),
             bayerBlackLevelPattern,
             bayerColorMap,
             bayerBitDepth,
@@ -649,10 +683,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 if (rawDemosaicFboId != 0 && downscaleFboId != 0) {
                     applyBayerCrop()
 
-                    val captureMatrix = FloatArray(16).also { android.opengl.Matrix.setIdentityM(it, 0) }
-                    android.opengl.Matrix.translateM(captureMatrix, 0, 0.5f, 0.5f, 0f)
-                    android.opengl.Matrix.scaleM(captureMatrix, 0, 1f, -1f, 1f)
-                    android.opengl.Matrix.translateM(captureMatrix, 0, -0.5f, -0.5f, 0f)
+                    val captureMatrix = buildRawCaptureMatrix(
+                        rawCaptureReq.rawW, rawCaptureReq.rawH, outW, outH
+                    )
 
                     GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, rawDemosaicFboId)
                     GLES20.glViewport(0, 0, rawDemosaicFboWidth, rawDemosaicFboHeight)
@@ -722,8 +755,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
             val contentW = fboWidth
             val contentH = fboHeight
-            // Use target aspect ratio if set (from resolution spinner), otherwise use FBO native aspect
-            val contentAspect = if (targetAspectRatio > 0f) targetAspectRatio else contentW.toFloat() / contentH.toFloat()
+            // The FBO is already cropped to the preview aspect, so the content
+            // aspect IS the FBO aspect. Letterbox (CENTER_INSIDE) against that.
+            val contentAspect = contentW.toFloat() / contentH.toFloat()
             val viewAspect = viewW.toFloat() / viewH.toFloat()
             val vpW: Int
             val vpH: Int
