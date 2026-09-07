@@ -1044,12 +1044,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         demosaicFboTextureId = texBuf[0]
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, demosaicFboTextureId)
         GLES20.glTexImage2D(
-            GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+            GLES20.GL_TEXTURE_2D, 0, GLES30.GL_RGBA32F,
             width, height, 0,
-            GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null
+            GLES20.GL_RGBA, GLES20.GL_FLOAT, null
         )
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
@@ -1069,7 +1069,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         }
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-        CrashLogger.log(TAG, "Demosaic FBO created: ${width}x${height}")
+        CrashLogger.log(TAG, "Demosaic FBO created RGBA32F: ${width}x${height}")
     }
 
     private fun ensureRawDemosaicFbo(width: Int, height: Int) {
@@ -1089,12 +1089,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         rawDemosaicFboTextureId = texBuf[0]
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, rawDemosaicFboTextureId)
         GLES20.glTexImage2D(
-            GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+            GLES20.GL_TEXTURE_2D, 0, GLES30.GL_RGBA32F,
             width, height, 0,
-            GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null
+            GLES20.GL_RGBA, GLES20.GL_FLOAT, null
         )
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
@@ -1114,7 +1114,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         }
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-        CrashLogger.log(TAG, "Raw demosaic FBO created: ${width}x${height}")
+        CrashLogger.log(TAG, "Raw demosaic FBO created RGBA32F: ${width}x${height}")
     }
 
     private fun destroyEgl() {
