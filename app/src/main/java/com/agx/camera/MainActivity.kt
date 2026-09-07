@@ -2321,6 +2321,7 @@ class MainActivity : AppCompatActivity() {
         previewRenderer.agxContrast = agxParams.contrast
         previewRenderer.agxToe = agxParams.toe
         previewRenderer.agxShoulder = agxParams.shoulder
+        previewRenderer.bayerNrStrength = agxParams.nrStrength
     }
 
     private fun presetSceneLinearTo709(name: String, kelvin: Float): ColorMatrix.Mat3 {
