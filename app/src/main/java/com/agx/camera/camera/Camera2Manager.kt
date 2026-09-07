@@ -27,10 +27,12 @@ class Camera2Manager(private val context: Context) {
     private var captureReader: ImageReader? = null
     private var rawReader: ImageReader? = null
 
-    // RAW mode keeps ONLY the RAW stream in the session (preview and capture are
-    // served from the RAW buffer). The HAL's concurrent YUV
-    // streams wedge frame delivery on the main lens of Xiaomi 15U when a very
-    // close object is in front of the camera, so they are omitted entirely.
+    // When RAW mode is active the capture stream is omitted from the session
+    // (still captures come from the RAW reader); the YUV preview surface is
+    // kept so the HAL has a valid stream combination and AF behaves normally.
+    // The HAL's concurrent full-res YUV capture stream wedged frame delivery on
+    // the main lens of Xiaomi 15U when a close object was in front of the
+    // camera, so only the full-res YUV capture is dropped.
     private var sessionRawOnly = false
     var rawSize: Size = Size(0, 0)
         private set
@@ -347,6 +349,11 @@ class Camera2Manager(private val context: Context) {
             if (rawSurface == null) {
                 sessionRawOnly = false
             } else {
+                // HALs (especially aux lenses) require at least one YUV preview
+                // stream alongside the RAW reader; a RAW-only session causes
+                // endConfigure failures on some lenses.  The preview content is
+                // still served from the RAW buffer on the GPU side.
+                surfaces.add(previewReader!!.surface)
                 surfaces.add(rawSurface)
             }
         }
@@ -407,7 +414,7 @@ class Camera2Manager(private val context: Context) {
     }
 
     private fun CaptureRequest.Builder.addPreviewTargets() {
-        if (!sessionRawOnly) addTarget(previewReader!!.surface)
+        addTarget(previewReader!!.surface)
         rawReader?.let { addTarget(it.surface) }
     }
 
@@ -595,6 +602,8 @@ class Camera2Manager(private val context: Context) {
         val session = captureSession ?: return
 
         meteringRegions = arrayOf(rect)
+        CrashLogger.log(TAG,
+            "triggerRegionFocus: sending region=$rect AF_MODE_AUTO trigger=AF_TRIGGER_START rawOnly=$sessionRawOnly")
 
         isAfScanning = true
         val generation = ++focusGeneration
@@ -620,8 +629,13 @@ class Camera2Manager(private val context: Context) {
                         isAfScanning = false
                         val afState = result.get(CaptureResult.CONTROL_AF_STATE)
                         val lensFocusD = result.get(CaptureResult.LENS_FOCUS_DISTANCE)
+                        val afMode = result.get(CaptureResult.CONTROL_AF_MODE)
+                        val outRegions = result.get(CaptureResult.CONTROL_AF_REGIONS)
+                        val inRegions = request.get(CaptureRequest.CONTROL_AF_REGIONS)
                         CrashLogger.log(TAG,
-                            "triggerRegionFocus: trigger result afState=$afState lensFocus=$lensFocusD")
+                            "triggerRegionFocus: trigger result afState=$afState lensFocus=$lensFocusD " +
+                            "inMode=${request.get(CaptureRequest.CONTROL_AF_MODE)} outMode=$afMode " +
+                            "inRegions=$inRegions outRegions=$outRegions")
                     }
                 }, backgroundHandler
             )
@@ -990,7 +1004,7 @@ class Camera2Manager(private val context: Context) {
         val preview = previewReader?.surface
         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
             addTarget(reader.surface)
-            if (preview != null && !sessionRawOnly) addTarget(preview)
+            if (preview != null) addTarget(preview)
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
             set(CaptureRequest.CONTROL_AE_MODE, aeMode)
             if (isManualExposure) {
