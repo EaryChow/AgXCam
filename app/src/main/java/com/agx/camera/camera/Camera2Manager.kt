@@ -427,7 +427,6 @@ class Camera2Manager(private val context: Context) {
     fun setWhiteBalanceMode(mode: Int) {
         currentAwbMode = mode
         CrashLogger.log(TAG, "setWhiteBalanceMode: mode=$mode (${awbModeName(mode)}) isManualExposure=$isManualExposure")
-        if (isManualExposure) return
         applyPreviewRequest()
     }
 
