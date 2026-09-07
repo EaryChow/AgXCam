@@ -13,6 +13,7 @@ import android.os.HandlerThread
 import android.os.SystemClock
 import android.util.Log
 import android.util.Size
+import android.view.Surface
 import com.agx.camera.CrashLogger
 import java.lang.reflect.Field
 import java.util.concurrent.CountDownLatch
@@ -25,6 +26,12 @@ class Camera2Manager(private val context: Context) {
     private var previewReader: ImageReader? = null
     private var captureReader: ImageReader? = null
     private var rawReader: ImageReader? = null
+
+    // RAW mode keeps ONLY the RAW stream in the session (preview and capture are
+    // served from the RAW buffer). The HAL's concurrent YUV
+    // streams wedge frame delivery on the main lens of Xiaomi 15U when a very
+    // close object is in front of the camera, so they are omitted entirely.
+    private var sessionRawOnly = false
     var rawSize: Size = Size(0, 0)
         private set
 
@@ -240,6 +247,9 @@ class Camera2Manager(private val context: Context) {
             return
         }
 
+        sessionRawOnly = useRaw && rawReader != null
+        CrashLogger.log(TAG, "session raw-only=$sessionRawOnly")
+
         sessionRetryCount = 0
 
         try {
@@ -331,9 +341,21 @@ class Camera2Manager(private val context: Context) {
     }
 
     private fun createSession(camera: CameraDevice, previewSize: Size) {
-        val surfaces = mutableListOf(previewReader!!.surface, captureReader!!.surface)
-        rawReader?.let { surfaces.add(it.surface) }
-        CrashLogger.log(TAG, "createSession surfaces=${surfaces.size} raw=${rawReader != null}")
+        val surfaces = mutableListOf<Surface>()
+        if (sessionRawOnly) {
+            val rawSurface = rawReader?.surface
+            if (rawSurface == null) {
+                sessionRawOnly = false
+            } else {
+                surfaces.add(rawSurface)
+            }
+        }
+        if (surfaces.isEmpty()) {
+            surfaces.add(previewReader!!.surface)
+            surfaces.add(captureReader!!.surface)
+            rawReader?.let { surfaces.add(it.surface) }
+        }
+        CrashLogger.log(TAG, "createSession surfaces=${surfaces.size} raw=${rawReader != null} rawOnly=$sessionRawOnly")
 
         @Suppress("DEPRECATION")
         try {
@@ -385,7 +407,7 @@ class Camera2Manager(private val context: Context) {
     }
 
     private fun CaptureRequest.Builder.addPreviewTargets() {
-        addTarget(previewReader!!.surface)
+        if (!sessionRawOnly) addTarget(previewReader!!.surface)
         rawReader?.let { addTarget(it.surface) }
     }
 
@@ -447,7 +469,6 @@ class Camera2Manager(private val context: Context) {
                 currentAwbMode
             }
             set(CaptureRequest.CONTROL_AWB_MODE, awbToSend)
-            meteringRegions?.let { set(CaptureRequest.CONTROL_AF_REGIONS, it) }
             if (useManualHold) {
                 set(CaptureRequest.LENS_FOCUS_DISTANCE, frozenLens)
             }
@@ -525,17 +546,11 @@ class Camera2Manager(private val context: Context) {
 
     private var isAfScanning = false
     private var focusGeneration = 0
-    private var pendingReArmRunnable: Runnable? = null
-    private var scanRequestRect: MeteringRectangle? = null
 
     fun setMeteringRegion(rect: MeteringRectangle?) {
         if (rect == null) {
             meteringRegions = null
             isAfScanning = false
-            pendingReArmRunnable?.let { run ->
-                backgroundHandler?.removeCallbacks(run)
-                pendingReArmRunnable = null
-            }
             applyPreviewRequest()
             return
         }
@@ -554,87 +569,40 @@ class Camera2Manager(private val context: Context) {
     }
 
     /**
-     * Retarget the metering region (e.g. while zooming) without starting a new
-     * AF scan. Digital zoom keeps the same focus distance, so we only update the
-     * region on the repeating request.
+     * Retarget the stored metering region (e.g. while zooming) for the next
+     * tap-trigger. Digital zoom keeps the same focus distance, so no scan is
+     * started and the repeating request is never touched.
      */
     fun updateMeteringRegion(rect: MeteringRectangle) {
         meteringRegions = arrayOf(rect)
-        if (!isAfScanning) {
-            applyPreviewRequest()
-        }
     }
 
     /**
-     * Tap-to-focus: stop the repeating request, fire a single one-shot capture
-     * carrying the AF trigger (START) plus AE pre-capture START, then keep
-     * repeating the region with the trigger ABSENT until the HAL reports a
-     * terminal AF state (FOCUSED_LOCKED / NOT_FOCUSED_LOCKED); only then re-arm
-     * the repeating request with TRIGGER_IDLE.
+     * Tap-to-focus, classic Camera2 sample style: the repeating preview request
+     * stays plain CONTINUOUS_PICTURE with NO metering regions, and a tap only
+     * fires a single one-shot capture carrying the region plus
+     * AF_TRIGGER_START + AE_PRECAPTURE_TRIGGER_START. The HAL scans, converges,
+     * and the repeating stream just keeps producing frames.
      *
-     * Sending IDLE while the scan is still ACTIVE_SCAN aborts the sweep
-     * mid-flight and the lens freezes at whatever distance the sweep had
-     * reached, which is why re-arming on the first one-shot result landed on
-     * the foreground rather than the tapped background.
+     * Previously the region lived on the repeating request (AF_MODE_AUTO +
+     * regions). On this device that leaves the HAL driving its own close-focus
+     * sweeps when a close object enters the region, and after a few such sweeps
+     * the main lens wedges frame delivery entirely. Regions are therefore only
+     * ever present in the per-tap one-shot.
      */
     private fun triggerRegionFocus(rect: MeteringRectangle) {
         val camera = cameraDevice ?: return
         val session = captureSession ?: return
 
         meteringRegions = arrayOf(rect)
+
         isAfScanning = true
         val generation = ++focusGeneration
 
-        pendingReArmRunnable?.let { run ->
-            backgroundHandler?.removeCallbacks(run)
-            pendingReArmRunnable = null
-        }
-
-        fun reArm() {
-            if (generation != focusGeneration || !isAfScanning) return
-            isAfScanning = false
-            scanRequestRect = null
-            pendingReArmRunnable?.let { run ->
-                backgroundHandler?.removeCallbacks(run)
-                pendingReArmRunnable = null
-            }
-            try {
-                session.setRepeatingRequest(
-                    buildRegionRequest(
-                        camera, rect,
-                        CaptureRequest.CONTROL_AF_TRIGGER_IDLE,
-                        CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_IDLE
-                    ).build(),
-                    aeReadoutCallback, backgroundHandler
-                )
-                CrashLogger.log(TAG, "triggerRegionFocus: re-armed repeating region=$rect")
-            } catch (e: CameraAccessException) {
-                Log.e(TAG, "triggerRegionFocus reArm failed", e)
-                CrashLogger.logException(TAG, e)
-            }
-        }
-
-        fun armScanRepeat() {
-            if (generation != focusGeneration || !isAfScanning) return
-            scanRequestRect = rect
-            try {
-                session.setRepeatingRequest(
-                    buildRegionRequest(camera, rect, null, null).build(),
-                    aeReadoutCallback, backgroundHandler
-                )
-                CrashLogger.log(TAG, "triggerRegionFocus: scan repeat armed (trigger ABSENT) region=$rect")
-            } catch (e: CameraAccessException) {
-                Log.e(TAG, "triggerRegionFocus armScanRepeat failed", e)
-                reArm()
-            }
-        }
-
-        try {
-            session.stopRepeating()
-        } catch (e: CameraAccessException) {
-            Log.e(TAG, "triggerRegionFocus stopRepeating failed", e)
-        }
-
+        // One-shot AF trigger only. The repeating preview request stays plain
+        // CONTINUOUS_PICTURE with no regions, so nothing is ever torn down and
+        // the HAL is never left in region-AUTO mode (which drives its own
+        // close-focus sweeps that wedge frame delivery on the main lens).
         try {
             session.capture(
                 buildRegionRequest(
@@ -648,37 +616,27 @@ class Camera2Manager(private val context: Context) {
                         request: CaptureRequest,
                         result: TotalCaptureResult
                     ) {
+                        if (generation != focusGeneration) return
+                        isAfScanning = false
                         val afState = result.get(CaptureResult.CONTROL_AF_STATE)
                         val lensFocusD = result.get(CaptureResult.LENS_FOCUS_DISTANCE)
-                        val lensRange = result.get(CaptureResult.LENS_FOCUS_RANGE)
                         CrashLogger.log(TAG,
-                            "triggerRegionFocus one-shot: afState=$afState " +
-                            "lensFocus=$lensFocusD lensRange=${lensRange?.toString()} " +
-                            "aeState=${result.get(CaptureResult.CONTROL_AE_STATE)}")
-                        if (afState == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED ||
-                            afState == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED ||
-                            afState == CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED
-                        ) {
-                            reArm()
-                        } else {
-                            armScanRepeat()
-                        }
+                            "triggerRegionFocus: trigger result afState=$afState lensFocus=$lensFocusD")
                     }
                 }, backgroundHandler
             )
         } catch (e: CameraAccessException) {
-            Log.e(TAG, "triggerRegionFocus capture failed", e)
+            Log.e(TAG, "triggerRegionFocus trigger capture failed", e)
             CrashLogger.logException(TAG, e)
-            reArm()
+            isAfScanning = false
         }
 
-        // Safety net: if the scan never terminates, re-arm the repeating request
-        val safety = Runnable {
-            CrashLogger.log(TAG, "triggerRegionFocus: timeout, re-arming")
-            reArm()
-        }
-        pendingReArmRunnable = safety
-        backgroundHandler?.postDelayed(safety, 2000L)
+        // If the one-shot trigger result never arrives (pathological HAL), just
+        // clear the scanning flag after a bounded delay; the repeating request
+        // stays armed either way, so the preview is never torn down.
+        backgroundHandler?.postDelayed({
+            if (generation == focusGeneration) isAfScanning = false
+        }, 2000)
     }
 
     /**
@@ -715,57 +673,10 @@ class Camera2Manager(private val context: Context) {
         }
     }
 
-    /**
-     * Called from the repeating-request callback while an AF scan is running;
-     * once the HAL reaches a terminal state we can safely re-arm with IDLE.
-     * The result's region must match the currently armed scan, otherwise the
-     * terminal state belongs to a previous (stale) request and must not kill
-     * the active scan.
-     */
-    private fun finishScanIfTerminal(request: CaptureRequest, afState: Int?, result: TotalCaptureResult) {
-        if (!isAfScanning) return
-        if (afState != CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED &&
-            afState != CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED
-        ) return
-        val scanRect = scanRequestRect ?: return
-        val requestRect = request.get(CaptureRequest.CONTROL_AF_REGIONS)?.firstOrNull() ?: return
-        if (requestRect != scanRect) return
-        val camera = cameraDevice ?: run { isAfScanning = false; return }
-        val session = captureSession ?: run { isAfScanning = false; return }
-        val lensFocusD = result.get(CaptureResult.LENS_FOCUS_DISTANCE)
-        val lensRange = result.get(CaptureResult.LENS_FOCUS_RANGE)
-        isAfScanning = false
-        scanRequestRect = null
-        pendingReArmRunnable?.let { run ->
-            backgroundHandler?.removeCallbacks(run)
-            pendingReArmRunnable = null
-        }
-        try {
-            session.setRepeatingRequest(
-                buildRegionRequest(
-                    camera, scanRect,
-                    CaptureRequest.CONTROL_AF_TRIGGER_IDLE,
-                    CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_IDLE
-                ).build(),
-                aeReadoutCallback, backgroundHandler
-            )
-            CrashLogger.log(TAG,
-                "triggerRegionFocus: scan terminal afState=$afState lensFocus=$lensFocusD " +
-                "lensRange=${lensRange?.toString()} re-armed IDLE region=$scanRect")
-        } catch (e: CameraAccessException) {
-            Log.e(TAG, "triggerRegionFocus finishScan failed", e)
-            CrashLogger.logException(TAG, e)
-        }
-    }
-
     // Call this from your unlock button or when switching lenses
     fun unlockFocus() {
         meteringRegions = null
         isAfScanning = false
-        pendingReArmRunnable?.let { run ->
-            backgroundHandler?.removeCallbacks(run)
-            pendingReArmRunnable = null
-        }
         focusLocked = false
         applyPreviewRequest() // back to continuous picture, no regions
     }
@@ -778,14 +689,9 @@ class Camera2Manager(private val context: Context) {
     fun lockFocusAndExposure() {
         if (meteringRegions == null) return
         focusLocked = true
-        // A tap-scan may still be mid-flight. Invalidate its re-arm chain so the
-        // manual-focus lock request below is the one that survives.
+        // A tap-scan may still be mid-flight. Invalidate its trigger callback so
+        // the manual-focus lock request below is the one that survives.
         ++focusGeneration
-        pendingReArmRunnable?.let { run ->
-            backgroundHandler?.removeCallbacks(run)
-            pendingReArmRunnable = null
-        }
-        scanRequestRect = null
         isAfScanning = false
         applyPreviewRequest()
     }
@@ -801,9 +707,8 @@ class Camera2Manager(private val context: Context) {
             setManualExposure(currentManualIso, currentManualExposureNs)
             return
         }
-        // An AF scan is mid-flight (its own repeating request is armed); the
-        // preview re-arm (e.g. from the zoom glue) must not tear it down by
-        // switching to CONTINUOUS_PICTURE/CANCEL mid-scan.
+        // A tap-trigger one-shot is mid-flight; don't re-arm the repeating request
+        // mid-scan (switching AF mode can abort the scan).
         if (isAfScanning) return
         val camera = cameraDevice ?: run { CrashLogger.log(TAG, "applyPreviewRequest: cameraDevice null"); return }
         val session = captureSession ?: run { CrashLogger.log(TAG, "applyPreviewRequest: session null"); return }
@@ -811,18 +716,13 @@ class Camera2Manager(private val context: Context) {
         val frozenLens = if (focusLocked && deviceMinFocusDistance > 0f) {
             lastAutoFocusDistance?.coerceIn(0f, deviceMinFocusDistance)
         } else null
-        // Only drop into manual focus when we can actually pin a distance;
-        // otherwise fall back to an AUTO hold so the lens position is untouched.
+        // Only drop into manual focus when we can actually pin a distance.
         val useManualHold = focusLocked && frozenLens != null
-        val inHoldState = !focusLocked && meteringRegions != null && !isAfScanning
 
         val afMode = if (deviceMaxAfRegions > 0) {
             safeAfMode(
-                when {
-                    useManualHold -> CaptureRequest.CONTROL_AF_MODE_OFF
-                    focusLocked || inHoldState -> CaptureRequest.CONTROL_AF_MODE_AUTO
-                    else -> CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
-                }
+                if (useManualHold) CaptureRequest.CONTROL_AF_MODE_OFF
+                else CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
             )
         } else {
             CaptureRequest.CONTROL_AF_MODE_OFF
@@ -837,14 +737,10 @@ class Camera2Manager(private val context: Context) {
                 currentAwbMode
             }
             set(CaptureRequest.CONTROL_AWB_MODE, awbToSend)
-            meteringRegions?.let { setMeteringRegions(it) }
             if (useManualHold) {
                 // Manual focus hold: copy the last auto-focus lens position so the
                 // HAL has no reason to move the lens. Clamp to the device's range.
                 set(CaptureRequest.LENS_FOCUS_DISTANCE, frozenLens)
-            }
-            if (inHoldState) {
-                set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
             }
             if (isManualExposure) {
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
@@ -865,7 +761,7 @@ class Camera2Manager(private val context: Context) {
             applyPreviewCrop()
         }
 
-        CrashLogger.log(TAG, "applyPreviewRequest: awb=${awbModeName(currentAwbMode)} af=$afMode hold=$inHoldState locked=$focusLocked frozenLens=${frozenLens ?: "no"} awbLocked=$isAwbLocked manual=$isManualExposure iso=$currentManualIso shutter=${currentManualExposureNs}")
+        CrashLogger.log(TAG, "applyPreviewRequest: awb=${awbModeName(currentAwbMode)} af=$afMode locked=$focusLocked frozenLens=${frozenLens ?: "no"} awbLocked=$isAwbLocked manual=$isManualExposure iso=$currentManualIso shutter=${currentManualExposureNs}")
 
         try {
             session.setRepeatingRequest(request.build(), aeReadoutCallback, backgroundHandler)
@@ -1094,7 +990,7 @@ class Camera2Manager(private val context: Context) {
         val preview = previewReader?.surface
         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
             addTarget(reader.surface)
-            if (preview != null) addTarget(preview)
+            if (preview != null && !sessionRawOnly) addTarget(preview)
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
             set(CaptureRequest.CONTROL_AE_MODE, aeMode)
             if (isManualExposure) {
@@ -1245,7 +1141,6 @@ class Camera2Manager(private val context: Context) {
                 afState != CaptureResult.CONTROL_AF_STATE_ACTIVE_SCAN) {
                 lastAutoFocusDistance = lensFocusD
             }
-            finishScanIfTerminal(request, afState, result)
             val cct = result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)
             latestColorCorrectionMatrix = cct?.let { colorSpaceToRowMajor(it) }
             val ccg = result.get(CaptureResult.COLOR_CORRECTION_GAINS)

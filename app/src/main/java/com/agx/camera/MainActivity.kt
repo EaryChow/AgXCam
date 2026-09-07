@@ -72,6 +72,24 @@ class MainActivity : AppCompatActivity() {
     private var errorDialogShowing = false
     private var currentDeviceOrientation = 0
 
+    private var lastFrameArrivalTime = 0L
+    private var lastStallRestartTime = 0L
+    private val stallWatchdogRunnable = object : Runnable {
+        override fun run() {
+            val now = SystemClock.elapsedRealtime()
+            if (cameraReady && !openingCamera && !isCapturing &&
+                lastFrameArrivalTime > 0 && now - lastFrameArrivalTime > 2000 &&
+                now - lastStallRestartTime > 4000
+            ) {
+                CrashLogger.log(TAG, "STALL watchdog: no frames for ${now - lastFrameArrivalTime}ms, restarting camera")
+                lastStallRestartTime = now
+                lastFrameArrivalTime = 0L
+                restartCamera()
+            }
+            mainHandler.postDelayed(this, 1000)
+        }
+    }
+
     @Volatile private var rawFrameDelivered = false
     private var rawFrameLogCount = 0
     private var rawFallbackRunnable: Runnable? = null
@@ -1677,6 +1695,7 @@ class MainActivity : AppCompatActivity() {
         var previewFrameCount = 0
         camera2Manager.onFrameAvailable = frameHandler@{ image ->
             if (!cameraReady) return@frameHandler
+            lastFrameArrivalTime = SystemClock.elapsedRealtime()
             if (previewRenderer.useBayerPath) return@frameHandler
             previewFrameCount++
             if (previewFrameCount == 1) {
@@ -1706,6 +1725,7 @@ class MainActivity : AppCompatActivity() {
 
         camera2Manager.onRawFrameAvailable = rawHandler@{ image ->
             if (!cameraReady) return@rawHandler
+            lastFrameArrivalTime = SystemClock.elapsedRealtime()
             if (!previewRenderer.useBayerPath) return@rawHandler
             val rawW = image.width
             val rawH = image.height
@@ -1789,6 +1809,9 @@ class MainActivity : AppCompatActivity() {
             Log.d(TAG, "Camera session ready: ${width}x${height}")
             cameraReady = true
             openingCamera = false
+
+            mainHandler.removeCallbacks(stallWatchdogRunnable)
+            mainHandler.postDelayed(stallWatchdogRunnable, 1000)
 
             if (previewRenderer.useBayerPath) {
                 rawFrameDelivered = false
@@ -2042,6 +2065,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun restartCamera() {
         CrashLogger.log(TAG, "restartCamera")
+        mainHandler.removeCallbacks(stallWatchdogRunnable)
         val lens = lensManager.activeLens ?: lensManager.selectPrimary() ?: return
         camera2Manager.close()
         camera2Manager.stopBackgroundThread()
@@ -2075,6 +2099,8 @@ class MainActivity : AppCompatActivity() {
 
         lensSwitchOverlay.text = "Switching to ${targetLens.label}\u2026"
         lensSwitchOverlay.visibility = View.VISIBLE
+
+        mainHandler.removeCallbacks(stallWatchdogRunnable)
 
         lensManager.saveCurrentState(
             currentLens.cameraId,
@@ -2376,6 +2402,7 @@ override fun onResume() {
     }
 
     private fun performCleanup() {
+        mainHandler.removeCallbacks(stallWatchdogRunnable)
         camera2Manager.close()
         camera2Manager.stopBackgroundThread()
         cameraReady = false
