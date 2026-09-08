@@ -660,8 +660,8 @@
                 <CheckBox android:id="@+id/use_pre_for_post_cb" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Use Pre for Post" android:textColor="#FFFFFFFF" android:textSize="10sp" android:checked="true" />
             </LinearLayout>
 
-            <TextView android:id="@+id/inset_rot_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Red Rotation  0.200" android:textColor="#FFFFFFFF" android:textSize="11sp" />
-            <SeekBar android:id="@+id/inset_rot_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="362" android:layout_marginBottom="2dp" />
+            <TextView android:id="@+id/inset_rot_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Red Rotation  0.120" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/inset_rot_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="322" android:layout_marginBottom="2dp" />
 
             <TextView android:id="@+id/inset_rot_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Green Rotation  -0.021" android:textColor="#FFFFFFFF" android:textSize="11sp" />
             <SeekBar android:id="@+id/inset_rot_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="251" android:layout_marginBottom="2dp" />
@@ -683,8 +683,8 @@
                 <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
                 <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Post-Processing" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
 
-                <TextView android:id="@+id/outset_rot_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Reverse R  0.200" android:textColor="#FFFFFFFF" android:textSize="11sp" />
-                <SeekBar android:id="@+id/outset_rot_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="362" android:layout_marginBottom="2dp" />
+                <TextView android:id="@+id/outset_rot_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Reverse R  0.120" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                <SeekBar android:id="@+id/outset_rot_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="322" android:layout_marginBottom="2dp" />
 
                 <TextView android:id="@+id/outset_rot_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Reverse G  -0.021" android:textColor="#FFFFFFFF" android:textSize="11sp" />
                 <SeekBar android:id="@+id/outset_rot_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="251" android:layout_marginBottom="2dp" />
