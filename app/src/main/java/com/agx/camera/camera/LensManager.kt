@@ -604,8 +604,8 @@ class LensManager(private val context: Context) {
                 zoomCenterX = json.optDouble("zoomCenterX", 0.5).toFloat(),
                 zoomCenterY = json.optDouble("zoomCenterY", 0.5).toFloat(),
                 wbModeOrdinal = json.optInt("wbModeOrdinal", 0),
-                kelvin = json.optDouble("kelvin", 5500.0).toFloat(),
-                kelvinTint = json.optDouble("kelvinTint", 0.0).toFloat(),
+                kelvin = json.optDouble("kelvin", 6300.0).toFloat(),
+                kelvinTint = json.optDouble("kelvinTint", -14.0).toFloat(),
                 flashModeOrdinal = json.optInt("flashModeOrdinal", 0)
             )
         } catch (e: Exception) {

@@ -149,7 +149,22 @@ class GrayCardWbTest {
     }
 
     @Test
-    fun kelvinWB_3000K_shiftsRedUp() {
+    fun kelvinWB_3000K_neutralizesItsIlluminant() {
+        val wbMat = WhiteBalanceMath.buildSceneLinearTo709(
+            kelvin = 3000f,
+            calibrationMatrix = ColorMatrix.identity(),
+            referenceToXyz = ColorMatrix.identity()
+        )
+        val (x, y) = WhiteBalanceMath.kelvinToXy(3000f)
+        val sourceWhiteXyz = floatArrayOf(x / y, 1.0f, (1 - x - y) / y)
+        val result = matMulVec(wbMat, sourceWhiteXyz)
+        assertTrue("no NaN", result.all { !it.isNaN() })
+        val spread = result.max() - result.min()
+        assertTrue("3000K white should map near-neutral (spread $spread)", spread < 0.1f)
+    }
+
+    @Test
+    fun kelvinWB_3000K_onNeutralFeed_boostsBlue() {
         val wbMat = WhiteBalanceMath.buildSceneLinearTo709(
             kelvin = 3000f,
             calibrationMatrix = ColorMatrix.identity(),
@@ -157,8 +172,7 @@ class GrayCardWbTest {
         )
         val neutral = floatArrayOf(0.5f, 0.5f, 0.5f)
         val result = matMulVec(wbMat, neutral)
-        val ratioRG = result[0] / result[1]
-        assertTrue("warm WB R/G > 1", ratioRG > 1.0f)
+        assertTrue("assuming 3000K light on a neutral feed should cool (B > G)", result[2] > result[1])
     }
 
     @Test

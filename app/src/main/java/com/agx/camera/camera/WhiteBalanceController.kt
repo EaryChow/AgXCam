@@ -13,6 +13,6 @@ enum class WhiteBalanceMode {
 }
 
 data class KelvinState(
-    val kelvin: Float = 5500f,
-    val tint: Float = 0f
+    val kelvin: Float = 6300f,
+    val tint: Float = -14f
 )

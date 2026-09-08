@@ -92,7 +92,67 @@ class WhiteBalanceMathTest {
     }
 
     @Test
-    fun kelvinSceneLinearTo709_warmTemp_shiftsRedUp() {
+    fun kelvinToXy_defaultD65() {
+        val (x, y) = WhiteBalanceMath.kelvinToXy(6300f, -14f)
+        assertEquals("default x near D65", 0.3127f, x, 0.003f)
+        assertEquals("default y near D65", 0.3290f, y, 0.003f)
+        val cat = WhiteBalanceMath.chromaticAdaptationBradford(
+            Pair(x, y), Pair(ColorMatrix.D65_X, ColorMatrix.D65_Y)
+        )
+        val identity = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)
+        vecEquals(identity, cat.m, 0.01f)
+    }
+
+    @Test
+    fun kelvinToXy_planckianAnchors() {
+        val illuminantA = WhiteBalanceMath.kelvinToXy(2856f)
+        assertEquals("Illuminant A x", 0.4476f, illuminantA.first, 0.01f)
+        assertEquals("Illuminant A y", 0.4074f, illuminantA.second, 0.01f)
+
+        val sixFive = WhiteBalanceMath.kelvinToXy(6500f)
+        assertEquals("6500K x", 0.3135f, sixFive.first, 0.01f)
+        assertEquals("6500K y", 0.3236f, sixFive.second, 0.01f)
+
+        val twoK = WhiteBalanceMath.kelvinToXy(2000f)
+        assertEquals("2000K x", 0.5267f, twoK.first, 0.01f)
+    }
+
+    @Test
+    fun kelvinToXy_continuousNoSeam() {
+        var prev = WhiteBalanceMath.kelvinToXy(2000f)
+        var temp = 2025f
+        while (temp <= 10000f) {
+            val cur = WhiteBalanceMath.kelvinToXy(temp)
+            val dx = abs(cur.first - prev.first)
+            val dy = abs(cur.second - prev.second)
+            assertTrue("jump in x near ${temp}K: $dx", dx < 0.01f)
+            assertTrue("jump in y near ${temp}K: $dy", dy < 0.01f)
+            prev = cur
+            temp += 25f
+        }
+    }
+
+    @Test
+    fun kelvinSceneLinearTo709_neutralizesItsOwnIlluminant() {
+        for (temp in listOf(2200f, 3000f, 4000f, 5500f, 6500f, 8000f, 10000f)) {
+            val mat = WhiteBalanceMath.buildSceneLinearTo709(
+                kelvin = temp,
+                calibrationMatrix = ColorMatrix.identity(),
+                referenceToXyz = ColorMatrix.identity()
+            )
+            val (x, y) = WhiteBalanceMath.kelvinToXy(temp)
+            val sourceWhiteXyz = floatArrayOf(x / y, 1.0f, (1 - x - y) / y)
+            val result = matMulVec(mat, sourceWhiteXyz)
+            assertTrue("no NaN at ${temp}K", result.all { !it.isNaN() })
+            assertTrue("no Inf at ${temp}K", result.all { !it.isInfinite() })
+            val spread = result.max() - result.min()
+            assertTrue("illuminant at ${temp}K should map near-neutral (spread $spread)", spread < 0.1f)
+            assertTrue("illuminant at ${temp}K should map near 1:1:1, got $result", result.all { it > 0.5f && it < 1.5f })
+        }
+    }
+
+    @Test
+    fun kelvinSceneLinearTo709_warmPreset_onNeutralFeed_boostsBlue() {
         val matWarm = WhiteBalanceMath.buildSceneLinearTo709(
             kelvin = 3000f,
             calibrationMatrix = ColorMatrix.identity(),
@@ -100,12 +160,14 @@ class WhiteBalanceMathTest {
         )
         val neutral = floatArrayOf(0.5f, 0.5f, 0.5f)
         val result = matMulVec(matWarm, neutral)
-        val ratioRG = result[0] / result[1]
-        assertTrue("warm WB should have R > G (ratioRG > 1)", ratioRG > 1.0f)
+        assertTrue(
+            "assuming warm (3000K) light on a neutral feed should cool the output (B > R), got B=${result[2]} R=${result[0]}",
+            result[2] > result[0]
+        )
     }
 
     @Test
-    fun kelvinSceneLinearTo709_coolTemp_shiftsBlueUp() {
+    fun kelvinSceneLinearTo709_coolPreset_onNeutralFeed_boostsRed() {
         val matCool = WhiteBalanceMath.buildSceneLinearTo709(
             kelvin = 8000f,
             calibrationMatrix = ColorMatrix.identity(),
@@ -113,8 +175,10 @@ class WhiteBalanceMathTest {
         )
         val neutral = floatArrayOf(0.5f, 0.5f, 0.5f)
         val result = matMulVec(matCool, neutral)
-        val ratioBG = result[2] / result[1]
-        assertTrue("cool WB should have B > G (ratioBG > 1)", ratioBG > 1.0f)
+        assertTrue(
+            "assuming cool (8000K) light on a neutral feed should warm the output (R > B), got R=${result[0]} B=${result[2]}",
+            result[0] > result[2]
+        )
     }
 
     @Test

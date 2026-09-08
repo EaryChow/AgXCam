@@ -976,9 +976,9 @@ class MainActivity : AppCompatActivity() {
             kelvinLabel.text = String.format("Kelvin  %.0fK", kelvinState.kelvin)
             if (currentWbMode == WhiteBalanceMode.KELVIN) uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(kelvinSlider, 35) {
-            kelvinState = kelvinState.copy(kelvin = 5500f)
-            kelvinLabel.text = "Kelvin  5500K"
+        setupSliderDoubleClickReset(kelvinSlider, 43) {
+            kelvinState = kelvinState.copy(kelvin = 6300f)
+            kelvinLabel.text = "Kelvin  6300K"
             if (currentWbMode == WhiteBalanceMode.KELVIN) uploadAgxUniforms()
         }
         tintSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
@@ -986,9 +986,9 @@ class MainActivity : AppCompatActivity() {
             tintLabel.text = String.format("Tint  %.0f", kelvinState.tint)
             if (currentWbMode == WhiteBalanceMode.KELVIN) uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(tintSlider, 100) {
-            kelvinState = kelvinState.copy(tint = 0f)
-            tintLabel.text = "Tint  0"
+        setupSliderDoubleClickReset(tintSlider, 86) {
+            kelvinState = kelvinState.copy(tint = -14f)
+            tintLabel.text = "Tint  -14"
             if (currentWbMode == WhiteBalanceMode.KELVIN) uploadAgxUniforms()
         }
 
@@ -1528,11 +1528,13 @@ class MainActivity : AppCompatActivity() {
         }
 
         kelvinBtn.setOnClickListener {
-            camera2Manager.setWhiteBalanceMode(android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_OFF)
             currentWbMode = WhiteBalanceMode.KELVIN
+            camera2Manager.setWhiteBalanceMode(android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_OFF)
             updateWbUI()
             syncWbSliders()
             uploadAgxUniforms()
+            // Pin HAL WB to the device's fixed D65 reference (DAYLIGHT + AWB_LOCK);
+            // applyAwb substitutes it for OFF because vendor HALs ignore OFF.
             wbPopup.visibility = View.GONE
         }
 
@@ -1813,6 +1815,14 @@ class MainActivity : AppCompatActivity() {
                             "mat=[${ccMat?.joinToString { String.format("%.4f", it) }}]"
                     )
                 }
+            } else if (currentWbMode == WhiteBalanceMode.KELVIN) {
+                // Manual Kelvin with no HAL gains reported: stay neutral — the
+                // illumination comes only from the app's Kelvin CAT. Never run
+                // the scene-adaptive estimator while in manual WB.
+                previewRenderer.wbGainR = 1f
+                previewRenderer.wbGainG = 1f
+                previewRenderer.wbGainB = 1f
+                previewRenderer.ccMatrix = ccMat
             } else {
                 previewRenderer.ccMatrix = null
                 if (wbEstimateFrame++ % 15 == 0) {
@@ -1847,6 +1857,11 @@ class MainActivity : AppCompatActivity() {
 
             mainHandler.post {
                 lensSwitchOverlay.visibility = View.GONE
+                if (currentWbMode == WhiteBalanceMode.KELVIN) {
+                    // Restored/current Kelvin mode: re-pin the HAL to the fixed
+                    // D65 reference (DAYLIGHT + AWB_LOCK via applyAwb).
+                    camera2Manager.setWhiteBalanceMode(android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_OFF)
+                }
                 val lens = lensManager.activeLens
                 if (lens != null) {
                     populateResolutionSpinner(lens)
@@ -2278,14 +2293,22 @@ class MainActivity : AppCompatActivity() {
 
     private fun uploadAgxUniforms() {
         // For YUV path: camera already handles CCM/AWB, so AUTO is identity.
-        // KELVIN applies only the relative chromatic adaptation (D65 → target),
+        // KELVIN applies only the relative chromatic adaptation (user illuminant -> D65),
         // not the absolute xyzToRGB conversion which is for raw sensor data.
         val sceneLinearTo709 = when (currentWbMode) {
             WhiteBalanceMode.AUTO -> ColorMatrix.identity()
             WhiteBalanceMode.KELVIN -> {
                 val d65xy = Pair(ColorMatrix.D65_X, ColorMatrix.D65_Y)
                 val userXY = WhiteBalanceMath.kelvinToXy(kelvinState.kelvin, kelvinState.tint)
-                val bradford = WhiteBalanceMath.chromaticAdaptationBradford(d65xy, userXY)
+                // Kelvin is fully manual: the HAL white-balance is pinned to the
+                // same fixed DAYLIGHT reference the Sun preset uses and locked
+                // (see Camera2Manager.applyAwb), and the raw path mirrors the
+                // HAL's WB gains, so input is already balanced exactly like the
+                // preset. Here we only apply the relative chromatic adaptation
+                // (user illuminant -> D65); the default 6300K/-14 is chosen so
+                // userXY == D65, making this matrix identity — which must
+                // therefore not change the Sun/DAYLIGHT visual.
+                val bradford = WhiteBalanceMath.chromaticAdaptationBradford(userXY, d65xy)
                 val m = bradford.m
                 CrashLogger.log(TAG, "uploadAgxUniforms KELVIN: kelvin=${kelvinState.kelvin} tint=${kelvinState.tint} " +
                     "userXY=(${String.format("%.6f", userXY.first)}, ${String.format("%.6f", userXY.second)}) " +
@@ -2297,12 +2320,12 @@ class MainActivity : AppCompatActivity() {
                 bradford
             }
             WhiteBalanceMode.GRAY_CARD -> ColorMatrix.identity()
-            WhiteBalanceMode.DAYLIGHT -> presetSceneLinearTo709("DAYLIGHT", 5500f)
-            WhiteBalanceMode.CLOUDY -> presetSceneLinearTo709("CLOUDY", 6500f)
-            WhiteBalanceMode.INCANDESCENT -> presetSceneLinearTo709("INCANDESCENT", 2850f)
-            WhiteBalanceMode.FLUORESCENT -> presetSceneLinearTo709("FLUORESCENT", 4100f)
-            WhiteBalanceMode.TWILIGHT -> presetSceneLinearTo709("TWILIGHT", 8000f)
-            WhiteBalanceMode.SHADE -> presetSceneLinearTo709("SHADE", 7500f)
+            WhiteBalanceMode.DAYLIGHT -> ColorMatrix.identity()
+            WhiteBalanceMode.CLOUDY -> ColorMatrix.identity()
+            WhiteBalanceMode.INCANDESCENT -> ColorMatrix.identity()
+            WhiteBalanceMode.FLUORESCENT -> ColorMatrix.identity()
+            WhiteBalanceMode.TWILIGHT -> ColorMatrix.identity()
+            WhiteBalanceMode.SHADE -> ColorMatrix.identity()
         }
 
         val insetParams = agxParams.toInsetParams()
@@ -2322,20 +2345,6 @@ class MainActivity : AppCompatActivity() {
         previewRenderer.agxToe = agxParams.toe
         previewRenderer.agxShoulder = agxParams.shoulder
         previewRenderer.bayerNrStrength = agxParams.nrStrength
-    }
-
-    private fun presetSceneLinearTo709(name: String, kelvin: Float): ColorMatrix.Mat3 {
-        if (!previewRenderer.useBayerPath) return ColorMatrix.identity()
-        val d65xy = Pair(ColorMatrix.D65_X, ColorMatrix.D65_Y)
-        val userXY = WhiteBalanceMath.kelvinToXy(kelvin)
-        val m = WhiteBalanceMath.chromaticAdaptationBradford(d65xy, userXY)
-        CrashLogger.log(TAG, "uploadAgxUniforms WB preset: mode=$name kelvin=$kelvin raw-path " +
-            "userXY=(${String.format("%.6f", userXY.first)}, ${String.format("%.6f", userXY.second)}) " +
-            "bradford=[${String.format("%.6f", m.m[0])},${String.format("%.6f", m.m[1])},${String.format("%.6f", m.m[2])}, " +
-            "${String.format("%.6f", m.m[3])},${String.format("%.6f", m.m[4])},${String.format("%.6f", m.m[5])}, " +
-            "${String.format("%.6f", m.m[6])},${String.format("%.6f", m.m[7])},${String.format("%.6f", m.m[8])}] " +
-            "awbMode=$currentWbMode")
-        return m
     }
 
     private fun extractPlane(plane: android.media.Image.Plane, width: Int, height: Int): java.nio.ByteBuffer {

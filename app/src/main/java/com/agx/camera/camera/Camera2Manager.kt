@@ -48,6 +48,7 @@ class Camera2Manager(private val context: Context) {
 
     private var availableAfModes: IntArray = intArrayOf()
     private var availableAeModes: IntArray = intArrayOf()
+    private var availableAwbModes: Set<Int> = emptySet()
 
     var onFrameAvailable: ((Image) -> Unit)? = null
     var onRawFrameAvailable: ((Image) -> Unit)? = null
@@ -95,6 +96,11 @@ class Camera2Manager(private val context: Context) {
 
     // White balance
     private var currentAwbMode = CaptureRequest.CONTROL_AWB_MODE_AUTO
+
+    // Kelvin never sends AWB-OFF: several vendor HALs (incl. Xiaomi) silently
+    // ignore OFF and keep running adaptive AWB. Instead applyAwb holds the HAL
+    // at its fixed D65 preset (DAYLIGHT) with CONTROL_AWB_LOCK so physical D65
+    // light maps to D65, and the app's relative Kelvin CAT does the shift.
     var isAwbLocked = false
         private set
 
@@ -171,7 +177,8 @@ class Camera2Manager(private val context: Context) {
             cameraCharacteristics = chars
             availableAfModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: intArrayOf()
             availableAeModes = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES) ?: intArrayOf()
-            CrashLogger.log(TAG, "AF modes: ${availableAfModes.toList()}, AE modes: ${availableAeModes.toList()}")
+            availableAwbModes = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.toSet() ?: emptySet()
+            CrashLogger.log(TAG, "AF modes: ${availableAfModes.toList()}, AE modes: ${availableAeModes.toList()}, AWB modes: $availableAwbModes")
 
             val maxAfRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
             val maxAeRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0
@@ -440,6 +447,44 @@ class Camera2Manager(private val context: Context) {
         applyPreviewRequest()
     }
 
+    // Fixed (non-adaptive) AWB presets are required for Kelvin. Prefer the one
+    // closest to D65 that this device supports; returns null only when the
+    // device exposes no fixed preset at all (then AUTO is the only option).
+    private fun pendingHoldMode(): Int? {
+        return listOf(
+            CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT,
+            CaptureRequest.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT,
+            CaptureRequest.CONTROL_AWB_MODE_SHADE,
+            CaptureRequest.CONTROL_AWB_MODE_TWILIGHT,
+            CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT,
+            CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT
+        ).firstOrNull { it in availableAwbModes }
+    }
+
+    // The AWB mode actually sent to the HAL (Kelvin's OFF is substituted with
+    // the fixed D65 preset because vendor HALs ignore AWB-OFF).
+    private fun effectiveAwbMode(): Int {
+        return if (currentAwbMode == CaptureRequest.CONTROL_AWB_MODE_OFF) {
+            pendingHoldMode() ?: CaptureRequest.CONTROL_AWB_MODE_AUTO
+        } else {
+            currentAwbMode
+        }
+    }
+
+    private fun CaptureRequest.Builder.applyAwb() {
+        if (currentAwbMode == CaptureRequest.CONTROL_AWB_MODE_OFF) {
+            // Kelvin: hold the HAL at its fixed D65 preset and lock AWB so
+            // nothing can re-adapt the white point. The app's relative
+            // Bradford CAT then shifts D65 -> user Kelvin on top of balanced
+            // input, keeping Kelvin fully manual but device-accurate.
+            set(CaptureRequest.CONTROL_AWB_MODE, effectiveAwbMode())
+            set(CaptureRequest.CONTROL_AWB_LOCK, true)
+        } else {
+            set(CaptureRequest.CONTROL_AWB_MODE, currentAwbMode)
+            if (isAwbLocked) set(CaptureRequest.CONTROL_AWB_LOCK, true)
+        }
+    }
+
     fun setExposureCompensation(ev: Int) {
         currentExposureComp = ev
         if (isManualExposure) return
@@ -470,16 +515,10 @@ class Camera2Manager(private val context: Context) {
             addPreviewTargets()
             set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
-            val awbToSend = if (currentAwbMode == CaptureRequest.CONTROL_AWB_MODE_OFF) {
-                CaptureRequest.CONTROL_AWB_MODE_AUTO
-            } else {
-                currentAwbMode
-            }
-            set(CaptureRequest.CONTROL_AWB_MODE, awbToSend)
+            applyAwb()
             if (useManualHold) {
                 set(CaptureRequest.LENS_FOCUS_DISTANCE, frozenLens)
             }
-            if (isAwbLocked) set(CaptureRequest.CONTROL_AWB_LOCK, true)
             set(CaptureRequest.SENSOR_SENSITIVITY, iso)
             set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureTimeNs)
             set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
@@ -758,12 +797,7 @@ class Camera2Manager(private val context: Context) {
                     set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE)
                 }
             }
-            val awbToSend = if (currentAwbMode == CaptureRequest.CONTROL_AWB_MODE_OFF) {
-                CaptureRequest.CONTROL_AWB_MODE_AUTO
-            } else {
-                currentAwbMode
-            }
-            set(CaptureRequest.CONTROL_AWB_MODE, awbToSend)
+            applyAwb()
             if (isManualExposure) {
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
                 set(CaptureRequest.SENSOR_SENSITIVITY, currentManualIso)
@@ -787,15 +821,12 @@ class Camera2Manager(private val context: Context) {
                 }
                 currentFlashMode.applyToRequest(this, availableAeModes)
             }
-            if (isAwbLocked) {
-                set(CaptureRequest.CONTROL_AWB_LOCK, true)
-            }
             applyPreviewCrop()
         }
 
         if (scanning) scanTriggerFired = true
 
-        CrashLogger.log(TAG, "applyPreviewRequest: awb=${awbModeName(currentAwbMode)} af=$afMode locked=$focusLocked tapHold=$useTapHold scan=$scanning frozenLens=${frozenLens ?: "no"} awbLocked=$isAwbLocked manual=$isManualExposure iso=$currentManualIso shutter=${currentManualExposureNs}")
+        CrashLogger.log(TAG, "applyPreviewRequest: awb=${awbModeName(effectiveAwbMode())} af=$afMode locked=$focusLocked tapHold=$useTapHold scan=$scanning frozenLens=${frozenLens ?: "no"} awbLocked=$isAwbLocked manual=$isManualExposure iso=$currentManualIso shutter=${currentManualExposureNs}")
 
         try {
             session.setRepeatingRequest(request.build(), aeReadoutCallback, backgroundHandler)
@@ -866,6 +897,7 @@ class Camera2Manager(private val context: Context) {
         val triggerRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addPreviewTargets()
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
+            applyAwb()
             setMeteringRegions(arrayOf(meteringRect))
             if (deviceMaxAfRegions > 0) {
                 set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
@@ -895,6 +927,7 @@ class Camera2Manager(private val context: Context) {
                         val lockRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                             addPreviewTargets()
                             set(CaptureRequest.CONTROL_AF_MODE, afMode)
+                            applyAwb()
                             if (deviceMaxAfRegions > 0) {
                                 set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRect))
                                 set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
@@ -937,6 +970,7 @@ class Camera2Manager(private val context: Context) {
         val triggerRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addPreviewTargets()
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
+            applyAwb()
             setMeteringRegions(arrayOf(meteringRect))
             if (deviceMaxAfRegions > 0) {
                 set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
@@ -968,6 +1002,7 @@ class Camera2Manager(private val context: Context) {
                         val lockRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                             addPreviewTargets()
                             set(CaptureRequest.CONTROL_AF_MODE, afMode)
+                            applyAwb()
                             if (deviceMaxAfRegions > 0) {
                                 set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRect))
                                 set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
@@ -1027,6 +1062,7 @@ class Camera2Manager(private val context: Context) {
             addTarget(reader.surface)
             if (preview != null) addTarget(preview)
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
+            applyAwb()
             set(CaptureRequest.CONTROL_AE_MODE, aeMode)
             if (isManualExposure) {
                 set(CaptureRequest.SENSOR_SENSITIVITY, currentManualIso)
@@ -1112,6 +1148,7 @@ class Camera2Manager(private val context: Context) {
 
         availableAfModes = intArrayOf()
         availableAeModes = intArrayOf()
+        availableAwbModes = emptySet()
     }
 
     fun close() {
@@ -1143,6 +1180,7 @@ class Camera2Manager(private val context: Context) {
 
         availableAfModes = intArrayOf()
         availableAeModes = intArrayOf()
+        availableAwbModes = emptySet()
     }
 
     private fun safeAfMode(preferred: Int): Int {
@@ -1167,8 +1205,18 @@ class Camera2Manager(private val context: Context) {
         CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT -> "INCANDESCENT"
         CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT -> "FLUORESCENT"
         CaptureRequest.CONTROL_AWB_MODE_TWILIGHT -> "TWILIGHT"
-        CaptureRequest.CONTROL_AWB_MODE_SHADE -> "SHADE"
-        else -> "UNKNOWN($mode)"
+CaptureRequest.CONTROL_AWB_MODE_SHADE -> "SHADE"
+        else -> "UNKNOWN"
+    }
+
+    private fun awbStateName(state: Int?): String {
+        return when (state) {
+            CaptureResult.CONTROL_AWB_STATE_INACTIVE -> "INACTIVE"
+            CaptureResult.CONTROL_AWB_STATE_SEARCHING -> "SEARCHING"
+            CaptureResult.CONTROL_AWB_STATE_CONVERGED -> "CONVERGED"
+            CaptureResult.CONTROL_AWB_STATE_LOCKED -> "LOCKED"
+            else -> "UNKNOWN"
+        }
     }
 
     private fun CaptureRequest.Builder.setMeteringRegions(regions: Array<MeteringRectangle>?) {
@@ -1201,7 +1249,9 @@ class Camera2Manager(private val context: Context) {
             ccLogCount++
             if (ccLogCount % 60 == 0) {
                 CrashLogger.log(TAG,
-                    "cc: gains=[${latestColorCorrectionGains?.joinToString { String.format("%.3f", it) }}] " +
+                    "cc: awbState=${awbStateName(result.get(CaptureResult.CONTROL_AWB_STATE))} " +
+                    "awbMode=${awbModeName(result.get(CaptureResult.CONTROL_AWB_MODE) ?: -1)} " +
+                    "gains=[${latestColorCorrectionGains?.joinToString { String.format("%.3f", it) }}] " +
                     "mat=[${latestColorCorrectionMatrix?.joinToString { String.format("%.4f", it) }}]"
                 )
             }
