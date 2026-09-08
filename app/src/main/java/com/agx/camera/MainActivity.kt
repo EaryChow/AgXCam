@@ -781,9 +781,9 @@ class MainActivity : AppCompatActivity() {
             contrastLabel.text = String.format("Contrast  %.1f", agxParams.contrast)
             uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(contrastSlider, 10) {
-            agxParams = agxParams.copy(contrast = 2.4f)
-            contrastLabel.text = "Contrast  2.4"
+        setupSliderDoubleClickReset(contrastSlider, ((AgxParams().contrast - 1.4f) / 0.1f).toInt().coerceIn(0, 26)) {
+            agxParams = agxParams.copy(contrast = AgxParams().contrast)
+            contrastLabel.text = String.format("Contrast  %.1f", agxParams.contrast)
             uploadAgxUniforms()
         }
         toeSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
@@ -791,9 +791,9 @@ class MainActivity : AppCompatActivity() {
             toeLabel.text = String.format("Toe  %.1f", agxParams.toe)
             uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(toeSlider, 8) {
-            agxParams = agxParams.copy(toe = 1.5f)
-            toeLabel.text = "Toe  1.5"
+        setupSliderDoubleClickReset(toeSlider, ((AgxParams().toe - 0.7f) / 0.1f).toInt().coerceIn(0, 93)) {
+            agxParams = agxParams.copy(toe = AgxParams().toe)
+            toeLabel.text = String.format("Toe  %.1f", agxParams.toe)
             uploadAgxUniforms()
         }
         shoulderSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
@@ -801,9 +801,9 @@ class MainActivity : AppCompatActivity() {
             shoulderLabel.text = String.format("Shoulder  %.1f", agxParams.shoulder)
             uploadAgxUniforms()
         })
-        setupSliderDoubleClickReset(shoulderSlider, 8) {
-            agxParams = agxParams.copy(shoulder = 1.5f)
-            shoulderLabel.text = "Shoulder  1.5"
+        setupSliderDoubleClickReset(shoulderSlider, ((AgxParams().shoulder - 0.7f) / 0.1f).toInt().coerceIn(0, 93)) {
+            agxParams = agxParams.copy(shoulder = AgxParams().shoulder)
+            shoulderLabel.text = String.format("Shoulder  %.1f", agxParams.shoulder)
             uploadAgxUniforms()
         }
 
@@ -1167,7 +1167,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadPreset(name: String) {
         val preset = presetManager.load(name) ?: return
-        agxParams = preset.agxParams
+        agxParams = preset.agxParams.copy(nrStrength = agxParams.nrStrength)
         syncAllSliders()
         uploadAgxUniforms()
     }

@@ -128,7 +128,6 @@ class PresetManager(private val context: Context) {
                 purityBoost = jsonArrayToFloatArray(p.optJSONArray("purity_boost"), floatArrayOf(10.0f, 30.0f, 10.0f)),
                 tintingScale = p.optDouble("tinting_scale", 0.0).toFloat(),
                 tintingHue = p.optDouble("tinting_hue", 0.0).toFloat(),
-                nrStrength = p.optDouble("nr_strength", 0.0).toFloat(),
                 usePreForPost = p.optBoolean("use_pre_for_post", false)
             )
         )
@@ -146,7 +145,6 @@ class PresetManager(private val context: Context) {
             put("purity_boost", floatArrayToJson(p.purityBoost))
             put("tinting_scale", p.tintingScale.toDouble())
             put("tinting_hue", p.tintingHue.toDouble())
-            put("nr_strength", p.nrStrength.toDouble())
             put("use_pre_for_post", p.usePreForPost)
         }
         return JSONObject().apply {

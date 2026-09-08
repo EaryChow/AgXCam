@@ -48,10 +48,11 @@ class ScrollIndexModel(val maxIndex: Int, val spacingPx: Float) {
         shiftPx = 0f
     }
 
-    /** Consume a vertical drag delta (screen px, +down) and return the new selected index. */
-    fun consumeDrag(dyPx: Float): Int {
+    /** Consume a drag delta along the scroll axis (screen px; +down for vertical, +right
+     *  for horizontal) and return the new selected index. */
+    fun consumeDrag(deltaPx: Float): Int {
         if (spacingPx <= 0f || maxIndex <= 0) return index
-        gestureAccumPx += dyPx
+        gestureAccumPx += deltaPx
         val shift = -gestureAccumPx
         val steps = Math.round(shift / spacingPx)
         index = (gestureBaseIndex + steps).coerceIn(0, maxIndex)
@@ -61,11 +62,14 @@ class ScrollIndexModel(val maxIndex: Int, val spacingPx: Float) {
 }
 
 /**
- * Vertical scrolling index picker with a fixed center dot.
+ * Scroll-to-index picker with a fixed center dot.
  *
  * The strip stays the same size as the slider line it replaces; the dot is fixed in the
  * middle and the number strip scrolls underneath. Numbers outside the strip's end points
- * are not drawn. Each detent (index change) triggers a haptic tick.
+ * are not drawn. Each detent (index change) can trigger a haptic tick ([hapticEnabled]).
+ *
+ * By default the strip scrolls vertically (drag up/down). Set [horizontal] = true to make
+ * it scroll left/right instead, which games the vertical scroll of the surrounding panel.
  *
  * Labels are drawn with [perTextRotation] applied around each label's own center so the
  * text can be re-oriented independently of the (unchanged) strip graphics in the future.
@@ -112,6 +116,10 @@ class ScrollingIndexBar @JvmOverloads constructor(
     /** Whether each detent (index change) triggers a haptic tick. */
     var hapticEnabled: Boolean = true
 
+    /** If true the strip scrolls horizontally (left/right drag); otherwise vertically.
+     *  The center line is drawn vertically for horizontal mode and horizontally otherwise. */
+    var horizontal: Boolean = false
+
     /** Double-tap resets to this index; -1 disables the double-tap reset. */
     var resetIndex: Int = -1
 
@@ -131,6 +139,7 @@ class ScrollingIndexBar @JvmOverloads constructor(
     private var lastTapTime = 0L
     private var lastTapX = 0f
     private var lastTapY = 0f
+    private var lastDragX = 0f
     private var lastDragY = 0f
     private var lastNotifiedIndex = 0
     private var tickCalls = 0
@@ -205,19 +214,29 @@ class ScrollingIndexBar @JvmOverloads constructor(
         if (spacing <= 0f) return
 
         val density = resources.displayMetrics.density
+        val centerX = width / 2f
         val centerY = height / 2f
-        val lineX = width / 2f
-        val visibleCount = (ceil((height / 2f) / spacing).toInt()) + 1
+        val axisLength = if (horizontal) width else height
+        val visibleCount = (ceil((axisLength / 2f) / spacing).toInt()).coerceAtMost(
+            if (horizontal) MAX_HORIZONTAL_OFFSETS else Int.MAX_VALUE
+        ) + 1
 
         for (offset in -visibleCount..visibleCount) {
             val i = model.index + offset
             if (i < 0 || i > maxIndex) continue
-            val y = centerY + offset * spacing - model.shiftPx
+            val pos = centerY + offset * spacing - model.shiftPx
+            val posX = centerX + offset * spacing - model.shiftPx
             val selected = offset == 0
 
             tickPaint.color = if (selected) 0xFFFFFFFF.toInt() else 0x30FFFFFF.toInt()
             tickPaint.strokeWidth = if (selected) 2.5f * density else 2f * density
-            canvas.drawRect(lineX + 2f * density, y - 1f * density, lineX + 9f * density, y + 1f * density, tickPaint)
+            if (horizontal) {
+                if (offset != 0) {
+                    canvas.drawRect(posX - 1f * density, centerY - 8f * density, posX + 1f * density, centerY + 8f * density, tickPaint)
+                }
+            } else {
+                canvas.drawRect(centerX + 2f * density, pos - 1f * density, centerX + 9f * density, pos + 1f * density, tickPaint)
+            }
 
             val label = labelFormatter(i)
             if (label.isEmpty()) continue
@@ -226,20 +245,30 @@ class ScrollingIndexBar @JvmOverloads constructor(
             textPaint.color = if (selected) 0xFFFFFFFF.toInt() else 0x88FFFFFF.toInt()
             textPaint.typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
             val fm = textPaint.fontMetrics
-            val halfHeight = (fm.descent - fm.ascent) / 2f
-            if (y + halfHeight < 0f || y - halfHeight > height) continue
 
-            val labelX = lineX + 12f * density
-            val labelCenterX = labelX + textPaint.measureText(label) / 2f
-            val baseline = y - (fm.ascent + fm.descent) / 2f
-            val labelCenterY = baseline - (fm.ascent + fm.descent) / 2f
-            canvas.save()
-            canvas.rotate(perTextRotation, labelCenterX, labelCenterY)
-            canvas.drawText(label, labelX, baseline, textPaint)
-            canvas.restore()
+            if (horizontal) {
+                val labelW = textPaint.measureText(label)
+                if (posX + labelW / 2f < 0f || posX - labelW / 2f > width) continue
+                val baseline = centerY - (fm.ascent + fm.descent) / 2f
+                canvas.save()
+                canvas.rotate(perTextRotation, posX, centerY)
+                canvas.drawText(label, posX - labelW / 2f, baseline, textPaint)
+                canvas.restore()
+            } else {
+                val halfHeight = (fm.descent - fm.ascent) / 2f
+                if (pos + halfHeight < 0f || pos - halfHeight > height) continue
+                val labelX = centerX + 12f * density
+                val labelCenterX = labelX + textPaint.measureText(label) / 2f
+                val baseline = pos - (fm.ascent + fm.descent) / 2f
+                val labelCenterY = baseline - (fm.ascent + fm.descent) / 2f
+                canvas.save()
+                canvas.rotate(perTextRotation, labelCenterX, labelCenterY)
+                canvas.drawText(label, labelX, baseline, textPaint)
+                canvas.restore()
+            }
         }
 
-        canvas.drawCircle(lineX, centerY, 6f * density, dotPaint)
+        if (!horizontal) canvas.drawCircle(centerX, centerY, 6f * density, dotPaint)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -260,17 +289,18 @@ class ScrollingIndexBar @JvmOverloads constructor(
                 lastTapTime = event.eventTime
                 lastTapX = event.x
                 lastTapY = event.y
+                lastDragX = event.x
                 lastDragY = event.y
                 model.beginGesture()
                 lastNotifiedIndex = model.index
                 parent?.requestDisallowInterceptTouchEvent(true)
-                CrashLogger.log(TAG, "DOWN touch index=${model.index} range=0..$maxIndex")
+                CrashLogger.log(TAG, "DOWN touch index=${model.index} range=0..$maxIndex horizontal=$horizontal")
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
-                val dy = event.y - lastDragY
-                lastDragY = event.y
-                val newIndex = model.consumeDrag(dy)
+                val delta = if (horizontal) event.x - lastDragX else event.y - lastDragY
+                if (horizontal) lastDragX = event.x else lastDragY = event.y
+                val newIndex = model.consumeDrag(delta)
                 if (newIndex != lastNotifiedIndex) {
                     lastNotifiedIndex = newIndex
                     if (hapticEnabled) vibrateTick()
@@ -289,6 +319,9 @@ class ScrollingIndexBar @JvmOverloads constructor(
 
     companion object {
         const val DEFAULT_SPACING_DP = 24f
+        /** Maximum detents shown on either side of the center for horizontal strips, so
+         *  only a handful of numbers are ever visible (matches the vertical rollers). */
+        const val MAX_HORIZONTAL_OFFSETS = 2
         const val TEXT_SP = 9f
         const val CENTER_TEXT_SP = 11f
         const val TICK_MS = 18L
