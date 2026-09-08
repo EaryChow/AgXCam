@@ -717,8 +717,8 @@
                     android:focusable="true" />
             </LinearLayout>
 
-            <TextView android:id="@+id/vibrance_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Vibrance  0.500" android:textColor="#FFFFFFFF" android:textSize="11sp" />
-            <SeekBar android:id="@+id/vibrance_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="200" android:progress="150" android:layout_marginBottom="8dp" />
+            <TextView android:id="@+id/vibrance_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Vibrance  0.600" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/vibrance_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="200" android:progress="160" android:layout_marginBottom="8dp" />
 
             <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
 

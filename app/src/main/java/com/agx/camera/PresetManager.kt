@@ -129,7 +129,7 @@ class PresetManager(private val context: Context) {
                 purityBoost = jsonArrayToFloatArray(p.optJSONArray("purity_boost"), floatArrayOf(10.0f, 30.0f, 10.0f)),
                 tintingScale = p.optDouble("tinting_scale", 0.0).toFloat(),
                 tintingHue = p.optDouble("tinting_hue", 0.0).toFloat(),
-                vibrance = p.optDouble("vibrance", 0.5).toFloat(),
+                vibrance = p.optDouble("vibrance", 0.6).toFloat(),
                 usePreForPost = p.optBoolean("use_pre_for_post", false)
             )
         )
