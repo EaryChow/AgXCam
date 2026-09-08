@@ -119,17 +119,17 @@ class PresetManager(private val context: Context) {
             name = obj.optString("name", "Unnamed"),
             createdAt = obj.optString("created_at", ""),
             agxParams = AgxParams(
-                contrast = p.optDouble("general_contrast", 2.4).toFloat(),
+                contrast = p.optDouble("general_contrast", 3.0).toFloat(),
                 toe = p.optDouble("toe_contrast", 1.5).toFloat(),
-                shoulder = p.optDouble("shoulder_contrast", 1.5).toFloat(),
-                rotation = jsonArrayToFloatArray(p.optJSONArray("rotation"), floatArrayOf(0.0373f, -0.0214f, -0.0532f)),
-                attenuation = jsonArrayToFloatArray(p.optJSONArray("attenuation"), floatArrayOf(32.9652f, 28.0513f, 12.4754f)),
-                reverseRotation = jsonArrayToFloatArray(p.optJSONArray("reverse_rotation"), floatArrayOf(0f, 0f, 0f)),
-                purityBoost = jsonArrayToFloatArray(p.optJSONArray("purity_boost"), floatArrayOf(32.3174f, 28.3256f, 3.7433f)),
+                shoulder = p.optDouble("shoulder_contrast", 2.5).toFloat(),
+                rotation = jsonArrayToFloatArray(p.optJSONArray("rotation"), floatArrayOf(0.2f, -0.021f, -0.053f)),
+                attenuation = jsonArrayToFloatArray(p.optJSONArray("attenuation"), floatArrayOf(30.0f, 45.0f, 20.0f)),
+                reverseRotation = jsonArrayToFloatArray(p.optJSONArray("reverse_rotation"), floatArrayOf(0.2f, -0.021f, -0.053f)),
+                purityBoost = jsonArrayToFloatArray(p.optJSONArray("purity_boost"), floatArrayOf(10.0f, 30.0f, 10.0f)),
                 tintingScale = p.optDouble("tinting_scale", 0.0).toFloat(),
                 tintingHue = p.optDouble("tinting_hue", 0.0).toFloat(),
                 nrStrength = p.optDouble("nr_strength", 0.0).toFloat(),
-                usePreForPost = p.optBoolean("use_pre_for_post", true)
+                usePreForPost = p.optBoolean("use_pre_for_post", false)
             )
         )
     }
