@@ -1322,12 +1322,12 @@ class MainActivity : AppCompatActivity() {
             .alpha(1f)
             .setDuration(150)
             .start()
-        val dp44 = 44 * resources.displayMetrics.density
+        val lockBtnSize = 24 * resources.displayMetrics.density
         aeAfLockButton.visibility = View.VISIBLE
         aeAfLockButton.setImageResource(if (autofocusController.isLocked) R.drawable.ic_lock_closed else R.drawable.ic_lock_open)
         aeAfLockButton.alpha = if (autofocusController.isLocked) 1.0f else 0.6f
-        aeAfLockButton.x = focusIndicator.x - dp44
-        aeAfLockButton.y = focusIndicator.y + size / 2f - 18 * resources.displayMetrics.density
+        aeAfLockButton.x = focusIndicator.x - lockBtnSize - 8 * resources.displayMetrics.density
+        aeAfLockButton.y = focusIndicator.y + size / 2f - lockBtnSize / 2f
         
         // Show EV slider in auto exposure mode
         if (!isManualMode) {

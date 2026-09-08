@@ -713,8 +713,8 @@ class Camera2Manager(private val context: Context) {
         applyPreviewRequest()
     }
 
-    // Call this from your unlock button or when switching lenses
-    fun unlockFocus() {
+    // Clear any tap region and return to continuous AF.
+    fun clearFocusRegion() {
         meteringRegions = null
         isAfScanning = false
         focusLocked = false
@@ -722,12 +722,12 @@ class Camera2Manager(private val context: Context) {
         applyPreviewRequest() // back to continuous picture, no regions
     }
 
-    // Lock focus (manual focus hold) and AE. The HAL reports afState
+    // Lock focus (manual focus hold) only. The HAL reports afState
     // FOCUSED_LOCKED while still moving the lens on this device, so a
     // trigger-based lock is not reliable: freeze the last auto-focus lens
     // distance by switching to AF_MODE_OFF + LENS_FOCUS_DISTANCE, and switch
-    // back to auto focus on unlock.
-    fun lockFocusAndExposure() {
+    // back to auto focus on unlock. Exposure keeps auto-metering normally.
+    fun lockFocus() {
         if (meteringRegions == null) return
         focusLocked = true
         tapFocusHeld = false
@@ -738,8 +738,8 @@ class Camera2Manager(private val context: Context) {
         applyPreviewRequest()
     }
 
-    // Unlock focus and exposure, resume auto/region AF
-    fun unlockFocusAndExposure() {
+    // Unlock focus, resume auto/region AF
+    fun unlockFocus() {
         focusLocked = false
         tapFocusHeld = false
         applyPreviewRequest()
@@ -805,9 +805,6 @@ class Camera2Manager(private val context: Context) {
             } else {
                 if (currentExposureComp != 0) {
                     set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, currentExposureComp)
-                }
-                if (focusLocked) {
-                    set(CaptureRequest.CONTROL_AE_LOCK, true)
                 }
                 if (carryRegion) {
                     if (scanning && !scanTriggerFired) {
