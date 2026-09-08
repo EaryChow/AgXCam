@@ -5,7 +5,7 @@ data class AgxParams(
     val toe: Float = 1.5f,
     val shoulder: Float = 2.5f,
     val middleGray: Float = 18f,
-    val rotation: FloatArray = floatArrayOf(0.120f, -0.021f, -0.053f),
+    val rotation: FloatArray = floatArrayOf(0.22f, -0.021f, -0.053f),
     val attenuation: FloatArray = floatArrayOf(50.0f, 50.0f, 20.0f),
     val reverseRotation: FloatArray = floatArrayOf(0.120f, -0.021f, -0.053f),
     val purityBoost: FloatArray = floatArrayOf(10.0f, 30.0f, 10.0f),
