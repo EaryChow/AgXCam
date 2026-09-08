@@ -636,6 +636,18 @@ class Camera2Manager(private val context: Context) {
     }
 
     /**
+     * Live-drag: retarget the active metering region without restarting the
+     * scan. Unlike updateMeteringRegion (zoom, storage-only), the repeating
+     * preview request is re-applied so the box follows on the HAL. No-op while
+     * no scan or hold is active (e.g. when focus is locked).
+     */
+    fun moveMeteringRegion(rect: MeteringRectangle) {
+        if (meteringRegions == null) return
+        meteringRegions = arrayOf(rect)
+        if (isAfScanning || tapFocusHeld) applyPreviewRequest(log = false)
+    }
+
+    /**
      * Tap-to-focus, Camera2Basic style: the repeating preview
      * request is re-applied as AF_MODE_AUTO + the tapped region + a one-time
      * AF_TRIGGER_START, and the repeating stream itself drives the scan at full
@@ -745,7 +757,7 @@ class Camera2Manager(private val context: Context) {
         applyPreviewRequest()
     }
 
-    private fun applyPreviewRequest() {
+    private fun applyPreviewRequest(log: Boolean = true) {
         if (isManualExposure) {
             setManualExposure(currentManualIso, currentManualExposureNs)
             return
@@ -823,7 +835,7 @@ class Camera2Manager(private val context: Context) {
 
         if (scanning) scanTriggerFired = true
 
-        CrashLogger.log(TAG, "applyPreviewRequest: awb=${awbModeName(effectiveAwbMode())} af=$afMode locked=$focusLocked tapHold=$useTapHold scan=$scanning frozenLens=${frozenLens ?: "no"} awbLocked=$isAwbLocked manual=$isManualExposure iso=$currentManualIso shutter=${currentManualExposureNs}")
+        if (log) CrashLogger.log(TAG, "applyPreviewRequest: awb=${awbModeName(effectiveAwbMode())} af=$afMode locked=$focusLocked tapHold=$useTapHold scan=$scanning frozenLens=${frozenLens ?: "no"} awbLocked=$isAwbLocked manual=$isManualExposure iso=$currentManualIso shutter=${currentManualExposureNs}")
 
         try {
             session.setRepeatingRequest(request.build(), aeReadoutCallback, backgroundHandler)

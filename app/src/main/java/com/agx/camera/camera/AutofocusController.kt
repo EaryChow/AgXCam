@@ -28,6 +28,20 @@ class AutofocusController(
         }
     }
 
+    /**
+     * Live-drag: retarget the focus region without starting a new scan. The
+     * region box follows the indicator on the HAL; a fresh scan is triggered on
+     * release.
+     */
+    fun moveFocusPoint(u: Float, v: Float, activeArray: Rect, isFrontCamera: Boolean) {
+        if (activeArray.width() <= 0 || activeArray.height() <= 0) return
+        currentRect = normalizedToMeteringRect(u, v, activeArray, isFrontCamera)
+        if (!isLocked) {
+            val rect = currentRect ?: return
+            cameraManager.moveMeteringRegion(rect)
+        }
+    }
+
     fun lock() {
         isLocked = true
         cameraManager.lockFocus()

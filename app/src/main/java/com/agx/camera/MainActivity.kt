@@ -18,6 +18,7 @@ import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.TextureView
 import android.view.View
+import android.view.ViewConfiguration
 import android.widget.*
 import android.view.ViewGroup
 import android.view.Gravity
@@ -157,6 +158,9 @@ class MainActivity : AppCompatActivity() {
     private var evPopupShowing = false
     private val focusIndicatorHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val focusIndicatorHideRunnable = Runnable { hideFocusIndicator() }
+    private var focusDragging = false
+    private var focusDragStartX = 0f
+    private var focusDragStartY = 0f
 
     // Pinch-to-zoom
     private var scaleGestureDetector: ScaleGestureDetector? = null
@@ -653,11 +657,40 @@ class MainActivity : AppCompatActivity() {
                 } else if (!autofocusController.isLocked && currentLensCanTapToFocus) {
                     showFocusIndicator(event.x, event.y)
                     applyFocusPoint(event.x, event.y)
+                    focusDragging = false
+                    focusDragStartX = event.x
+                    focusDragStartY = event.y
+                }
+                return@setOnTouchListener true
+            }
+            if (event.action == MotionEvent.ACTION_MOVE) {
+                // Start drag once the finger moves past touch slop; pause the
+                // auto-hide timeout while the indicator is being dragged.
+                if (!focusDragging && focusIndicator.visibility == View.VISIBLE &&
+                    !isScaling && !autofocusController.isLocked) {
+                    val slop = ViewConfiguration.get(this).scaledTouchSlop
+                    if (Math.abs(event.x - focusDragStartX) > slop ||
+                        Math.abs(event.y - focusDragStartY) > slop) {
+                        focusDragging = true
+                        focusIndicatorHandler.removeCallbacks(focusIndicatorHideRunnable)
+                    }
+                }
+                if (focusDragging) {
+                    moveFocusIndicator(event.x, event.y)
                 }
                 return@setOnTouchListener true
             }
             if (event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_CANCEL) {
                 isScaling = false
+                if (focusDragging) {
+                    focusDragging = false
+                    // Re-scan at the dropped position so the move takes effect.
+                    applyFocusPoint(event.x, event.y, triggerScan = true)
+                    // Timeout restarts counting from 0 after the drag.
+                    if (focusIndicatorTimeoutMs > 0 && !autofocusController.isLocked) {
+                        focusIndicatorHandler.postDelayed(focusIndicatorHideRunnable, focusIndicatorTimeoutMs)
+                    }
+                }
             }
             true
         }
@@ -1311,9 +1344,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showFocusIndicator(x: Float, y: Float) {
         focusIndicatorHandler.removeCallbacks(focusIndicatorHideRunnable)
-        val size = (80 * resources.displayMetrics.density).toFloat()
-        focusIndicator.x = x - size / 2f
-        focusIndicator.y = y - size / 2f
+        positionFocusIndicatorAt(x, y)
         focusIndicator.setImageResource(R.drawable.focus_circle)
         focusIndicator.visibility = View.VISIBLE
         focusIndicator.alpha = 0f
@@ -1322,13 +1353,10 @@ class MainActivity : AppCompatActivity() {
             .alpha(1f)
             .setDuration(150)
             .start()
-        val lockBtnSize = 24 * resources.displayMetrics.density
         aeAfLockButton.visibility = View.VISIBLE
         aeAfLockButton.setImageResource(if (autofocusController.isLocked) R.drawable.ic_lock_closed else R.drawable.ic_lock_open)
         aeAfLockButton.alpha = if (autofocusController.isLocked) 1.0f else 0.6f
-        aeAfLockButton.x = focusIndicator.x - lockBtnSize - 8 * resources.displayMetrics.density
-        aeAfLockButton.y = focusIndicator.y + size / 2f - lockBtnSize / 2f
-        
+
         // Show EV slider in auto exposure mode
         if (!isManualMode) {
             showEvSlider(x, y)
@@ -1336,6 +1364,33 @@ class MainActivity : AppCompatActivity() {
         // Auto-hide after timeout (never if focus is locked)
         if (focusIndicatorTimeoutMs > 0 && !autofocusController.isLocked) {
             focusIndicatorHandler.postDelayed(focusIndicatorHideRunnable, focusIndicatorTimeoutMs)
+        }
+    }
+
+    private fun positionFocusIndicatorAt(x: Float, y: Float) {
+        val size = (80 * resources.displayMetrics.density).toFloat()
+        val lockBtnSize = 24 * resources.displayMetrics.density
+        focusIndicator.x = x - size / 2f
+        focusIndicator.y = y - size / 2f
+        aeAfLockButton.x = focusIndicator.x - lockBtnSize - 8 * resources.displayMetrics.density
+        aeAfLockButton.y = focusIndicator.y + size / 2f - lockBtnSize / 2f
+    }
+
+    private fun moveFocusIndicator(x: Float, y: Float) {
+        positionFocusIndicatorAt(x, y)
+        if (evSliderContainer?.visibility == View.VISIBLE) {
+            positionEvSliderAt(x, y)
+        }
+        moveFocusPoint(x, y)
+    }
+
+    private fun positionEvSliderAt(x: Float, y: Float) {
+        // Center vertically on the point, offset right of the focus indicator
+        evSliderContainer?.let { container ->
+            val density = resources.displayMetrics.density
+            val halfContainerH = 70 * density
+            container.x = x + 48 * density
+            container.y = y - halfContainerH
         }
     }
 
@@ -1371,11 +1426,7 @@ class MainActivity : AppCompatActivity() {
                 setExposureCompFromProgress(50)
             }
             
-            // Position: center vertically on tap point, offset right of focus indicator
-            val density = resources.displayMetrics.density
-            val halfContainerH = 70 * density
-            container.x = x + 48 * density
-            container.y = y - halfContainerH
+            positionEvSliderAt(x, y)
             
             evSeekBarVertical?.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
@@ -1483,6 +1534,16 @@ class MainActivity : AppCompatActivity() {
             lensManager.getSensorActiveArraySize(lens),
             previewRenderer.isFrontCamera,
             triggerScan
+        )
+    }
+
+    private fun moveFocusPoint(viewX: Float, viewY: Float) {
+        val lens = lensManager.activeLens ?: return
+        val uv = viewToFrameCoords(viewX, viewY) ?: return
+        autofocusController.moveFocusPoint(
+            uv[0], uv[1],
+            lensManager.getSensorActiveArraySize(lens),
+            previewRenderer.isFrontCamera
         )
     }
 
