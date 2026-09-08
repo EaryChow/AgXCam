@@ -404,10 +404,10 @@
             android:textSize="10sp" />
     </LinearLayout>
 
-    <!-- ISO Popup — thin vertical line + dot, positioned dynamically above label -->
+    <!-- ISO Popup — fixed center dot + scrolling number strip, positioned dynamically above label -->
     <FrameLayout
         android:id="@+id/iso_popup"
-        android:layout_width="48dp"
+        android:layout_width="88dp"
         android:layout_height="240dp"
         android:visibility="gone">
 
@@ -418,25 +418,17 @@
             android:layout_gravity="center"
             android:background="#44FFFFFF" />
 
-        <SeekBar
-            android:id="@+id/iso_seekbar"
-            android:layout_width="120dp"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center"
-            android:min="0"
-            android:max="100"
-            android:progress="50"
-            android:rotation="-90"
-            android:thumb="@drawable/seekbar_circle_thumb"
-            android:progressDrawable="@android:color/transparent"
-            android:splitTrack="false"
-            android:padding="0dp" />
+        <com.agx.camera.ui.ScrollingIndexBar
+            android:id="@+id/iso_roller"
+            android:layout_width="match_parent"
+            android:layout_height="120dp"
+            android:layout_gravity="center" />
     </FrameLayout>
 
-    <!-- Shutter Popup — thin vertical line + dot, positioned dynamically above label -->
+    <!-- Shutter Popup — fixed center dot + scrolling number strip, positioned dynamically above label -->
     <FrameLayout
         android:id="@+id/shutter_popup"
-        android:layout_width="48dp"
+        android:layout_width="88dp"
         android:layout_height="240dp"
         android:visibility="gone">
 
@@ -447,25 +439,17 @@
             android:layout_gravity="center"
             android:background="#44FFFFFF" />
 
-        <SeekBar
-            android:id="@+id/shutter_seekbar"
-            android:layout_width="120dp"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center"
-            android:min="0"
-            android:max="100"
-            android:progress="50"
-            android:rotation="-90"
-            android:thumb="@drawable/seekbar_circle_thumb"
-            android:progressDrawable="@android:color/transparent"
-            android:splitTrack="false"
-            android:padding="0dp" />
+        <com.agx.camera.ui.ScrollingIndexBar
+            android:id="@+id/shutter_roller"
+            android:layout_width="match_parent"
+            android:layout_height="120dp"
+            android:layout_gravity="center" />
     </FrameLayout>
 
-    <!-- Post-Processing EV Popup — thin vertical line + dot, sibling of ISO/shutter -->
+    <!-- Post-Processing EV Popup — fixed center dot + scrolling number strip, sibling of ISO/shutter -->
     <FrameLayout
         android:id="@+id/ev_pp_popup"
-        android:layout_width="48dp"
+        android:layout_width="88dp"
         android:layout_height="240dp"
         android:visibility="gone">
 
@@ -476,19 +460,11 @@
             android:layout_gravity="center"
             android:background="#44FFFFFF" />
 
-        <SeekBar
-            android:id="@+id/ev_pp_seekbar"
-            android:layout_width="120dp"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center"
-            android:min="0"
-            android:max="2000"
-            android:progress="1150"
-            android:rotation="-90"
-            android:thumb="@drawable/seekbar_circle_thumb"
-            android:progressDrawable="@android:color/transparent"
-            android:splitTrack="false"
-            android:padding="0dp" />
+        <com.agx.camera.ui.ScrollingIndexBar
+            android:id="@+id/ev_pp_roller"
+            android:layout_width="match_parent"
+            android:layout_height="120dp"
+            android:layout_gravity="center" />
     </FrameLayout>
 
     <!-- EV Popup (appears near focus indicator) -->

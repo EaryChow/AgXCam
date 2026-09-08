@@ -40,6 +40,7 @@ import com.agx.camera.io.ExifWriter
 import com.agx.camera.io.JpegEncoder
 import com.agx.camera.io.MediaStoreSaver
 import com.agx.camera.thermal.ThermalManager
+import com.agx.camera.ui.ScrollingIndexBar
 import com.agx.camera.CrashLogger
 import java.nio.ByteBuffer
 import java.util.concurrent.CountDownLatch
@@ -129,19 +130,21 @@ class MainActivity : AppCompatActivity() {
     private lateinit var amToggleButton: TextView
     private lateinit var isoOverlay: TextView
     private lateinit var isoPopup: View
-    private lateinit var isoSeekBar: SeekBar
+    private lateinit var isoRoller: ScrollingIndexBar
     private lateinit var shutterOverlay: TextView
     private lateinit var shutterPopup: View
-    private lateinit var shutterSeekBar: SeekBar
+    private lateinit var shutterRoller: ScrollingIndexBar
     private lateinit var evPpOverlay: TextView
     private lateinit var evPpPopup: View
-    private lateinit var evPpSeekBar: SeekBar
+    private lateinit var evPpRoller: ScrollingIndexBar
     private lateinit var evPopup: LinearLayout
     private lateinit var evSeekBar: SeekBar
     private lateinit var evSliderContainer: FrameLayout
     private lateinit var evSeekBarVertical: SeekBar
 
     private var postProcessingEv = 1.5f
+
+    private var evPpRollerConfigured = false
 
     private var isManualMode = false
     private var lastAutoIso = 200
@@ -315,13 +318,13 @@ class MainActivity : AppCompatActivity() {
         amToggleButton = findViewById(R.id.am_toggle_button)
         isoOverlay = findViewById(R.id.iso_overlay)
         isoPopup = findViewById(R.id.iso_popup)
-        isoSeekBar = findViewById(R.id.iso_seekbar)
+        isoRoller = findViewById(R.id.iso_roller)
         shutterOverlay = findViewById(R.id.shutter_overlay)
         shutterPopup = findViewById(R.id.shutter_popup)
-        shutterSeekBar = findViewById(R.id.shutter_seekbar)
+        shutterRoller = findViewById(R.id.shutter_roller)
         evPpOverlay = findViewById(R.id.ev_pp_overlay)
         evPpPopup = findViewById(R.id.ev_pp_popup)
-        evPpSeekBar = findViewById(R.id.ev_pp_seekbar)
+        evPpRoller = findViewById(R.id.ev_pp_roller)
         evPopup = findViewById(R.id.ev_popup)
         evSeekBar = findViewById(R.id.ev_seekbar)
         evSliderContainer = findViewById(R.id.ev_slider_container)
@@ -2736,13 +2739,13 @@ override fun onResume() {
         amToggleButton = findViewById(R.id.am_toggle_button)
         isoOverlay = findViewById(R.id.iso_overlay)
         isoPopup = findViewById(R.id.iso_popup)
-        isoSeekBar = findViewById(R.id.iso_seekbar)
+        isoRoller = findViewById(R.id.iso_roller)
         shutterOverlay = findViewById(R.id.shutter_overlay)
         shutterPopup = findViewById(R.id.shutter_popup)
-        shutterSeekBar = findViewById(R.id.shutter_seekbar)
+        shutterRoller = findViewById(R.id.shutter_roller)
         evPpOverlay = findViewById(R.id.ev_pp_overlay)
         evPpPopup = findViewById(R.id.ev_pp_popup)
-        evPpSeekBar = findViewById(R.id.ev_pp_seekbar)
+        evPpRoller = findViewById(R.id.ev_pp_roller)
         evPopup = findViewById(R.id.ev_popup)
         evSeekBar = findViewById(R.id.ev_seekbar)
 
@@ -2751,50 +2754,54 @@ override fun onResume() {
             updateManualModeUI(isManualMode)
         }
 
-        isoOverlay.setOnClickListener { togglePopup(isoPopup, isoOverlay, isoPopupShowing) { isoPopupShowing = it } }
-        shutterOverlay.setOnClickListener { togglePopup(shutterPopup, shutterOverlay, shutterPopupShowing) { shutterPopupShowing = it } }
-        evPpOverlay.setOnClickListener { togglePopup(evPpPopup, evPpOverlay, evPpPopupShowing) { evPpPopupShowing = it } }
+        isoOverlay.setOnClickListener {
+            val opening = !isoPopupShowing
+            togglePopup(isoPopup, isoOverlay, isoPopupShowing) { isoPopupShowing = it }
+            if (opening) isoRoller.recenter()
+        }
+        shutterOverlay.setOnClickListener {
+            val opening = !shutterPopupShowing
+            togglePopup(shutterPopup, shutterOverlay, shutterPopupShowing) { shutterPopupShowing = it }
+            if (opening) shutterRoller.recenter()
+        }
+        evPpOverlay.setOnClickListener {
+            val opening = !evPpPopupShowing
+            togglePopup(evPpPopup, evPpOverlay, evPpPopupShowing) { evPpPopupShowing = it }
+            if (opening) evPpRoller.recenter()
+        }
         // Double-tap on EV overlay to reset to default (+1.5)
         var lastEvPpOverlayTapTime = 0L
         evPpOverlay.setOnTouchListener { _, event ->
             if (event.action == MotionEvent.ACTION_DOWN) {
                 val now = System.currentTimeMillis()
                 if (now - lastEvPpOverlayTapTime < 300) {
-                    evPpSeekBar.progress = 1150
-                    setPostProcessingEv(1150)
+                    evPpRoller.setIndex(EV_PP_DEFAULT_INDEX)
+                    setPostProcessingEv(EV_PP_DEFAULT_INDEX)
                 }
                 lastEvPpOverlayTapTime = now
             }
             false
         }
 
-        evPpSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
-                if (fromUser) setPostProcessingEv(progress)
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar) {}
-        })
-        // Double-tap to reset to default (+1.5)
-        var lastEvPpTapTime = 0L
-        evPpSeekBar.setOnTouchListener { _, event ->
-            if (event.action == MotionEvent.ACTION_DOWN) {
-                val now = System.currentTimeMillis()
-                if (now - lastEvPpTapTime < 300) {
-                    evPpSeekBar.progress = 1150
-                    setPostProcessingEv(1150)
-                }
-                lastEvPpTapTime = now
-            }
-            false
+        // Post-processing EV: ±10 EV in 0.5 EV steps (sensitive scrolling for big
+        // adjustments), default +1.5. Configure once; never re-apply on session reopens.
+        evPpRoller.maxIndex = EV_PP_MAX_INDEX
+        evPpRoller.resetIndex = EV_PP_DEFAULT_INDEX
+        evPpRoller.spacingPx = 14f * resources.displayMetrics.density
+        evPpRoller.hapticEnabled = false
+        if (!evPpRollerConfigured) {
+            evPpRoller.setIndex(EV_PP_DEFAULT_INDEX)
+            evPpRollerConfigured = true
         }
+        evPpRoller.labelFormatter = { i -> String.format("%+.1f", (i - EV_PP_MID_INDEX) * 0.5f) }
+        evPpRoller.onIndexChange = { setPostProcessingEv(it) }
 
         // Double-tap to reset to auto values
         isoOverlay.setOnTouchListener { _, event ->
             if (event.action == MotionEvent.ACTION_DOWN) {
                 val now = System.currentTimeMillis()
                 if (now - lastIsoTapTime < 300) {
-                    isoSeekBar.progress = isoSeekBar.max / 2
+                    isoRoller.setIndex(isoRoller.maxIndex / 2)
                     updateManualExposure()
                 }
                 lastIsoTapTime = now
@@ -2805,7 +2812,7 @@ override fun onResume() {
             if (event.action == MotionEvent.ACTION_DOWN) {
                 val now = System.currentTimeMillis()
                 if (now - lastShutterTapTime < 300) {
-                    shutterSeekBar.progress = shutterSeekBar.max / 2
+                    shutterRoller.setIndex(shutterRoller.maxIndex / 2)
                     updateManualExposure()
                 }
                 lastShutterTapTime = now
@@ -2833,57 +2840,26 @@ override fun onResume() {
             false
         }
 
-        isoSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
-                if (fromUser) updateManualExposure()
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar) {}
-        })
-        // Double-tap on ISO slider to reset
-        var lastIsoSliderTapTime = 0L
-        isoSeekBar.setOnTouchListener { _, event ->
-            if (event.action == MotionEvent.ACTION_DOWN) {
-                val now = System.currentTimeMillis()
-                if (now - lastIsoSliderTapTime < 300) {
-                    isoSeekBar.progress = isoSeekBar.max / 2
-                    updateManualExposure()
-                }
-                lastIsoSliderTapTime = now
-            }
-            false
+        isoRoller.labelFormatter = { i ->
+            val vals = camera2Manager.availableIsoValues
+            if (i in vals.indices) "${vals[i]}" else ""
         }
-
-        shutterSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
-                if (fromUser) updateManualExposure()
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar) {}
-        })
-        // Double-tap on Shutter slider to reset
-        var lastShutterSliderTapTime = 0L
-        shutterSeekBar.setOnTouchListener { _, event ->
-            if (event.action == MotionEvent.ACTION_DOWN) {
-                val now = System.currentTimeMillis()
-                if (now - lastShutterSliderTapTime < 300) {
-                    shutterSeekBar.progress = shutterSeekBar.max / 2
-                    updateManualExposure()
-                }
-                lastShutterSliderTapTime = now
-            }
-            false
+        isoRoller.onIndexChange = { updateManualExposure() }
+        shutterRoller.labelFormatter = { i ->
+            val vals = camera2Manager.availableShutterSpeedsNs
+            if (i in vals.indices) formatShutterSpeed(vals[i]) else ""
         }
+        shutterRoller.onIndexChange = { updateManualExposure() }
 
         updateManualModeUI()
     }
 
     private fun updateManualModeUI(syncToAuto: Boolean = false) {
         amToggleButton.text = if (isManualMode) "M" else "A"
-        isoSeekBar.isEnabled = isManualMode
-        shutterSeekBar.isEnabled = isManualMode
-        isoSeekBar.alpha = if (isManualMode) 1.0f else 0.4f
-        shutterSeekBar.alpha = if (isManualMode) 1.0f else 0.4f
+        isoRoller.isEnabled = isManualMode
+        shutterRoller.isEnabled = isManualMode
+        isoRoller.alpha = if (isManualMode) 1.0f else 0.4f
+        shutterRoller.alpha = if (isManualMode) 1.0f else 0.4f
         if (isManualMode) {
             // Only snap sliders to last auto values when the user first enters manual mode;
             // on session reopens (RAW/YUV toggle, resolution change, resume) keep the
@@ -2891,8 +2867,8 @@ override fun onResume() {
             if (syncToAuto) {
                 syncSlidersToAutoValues()
             }
-            val iso = isoFromProgress(isoSeekBar.progress)
-            val expNs = shutterNsFromProgress(shutterSeekBar.progress)
+            val iso = isoFromIndex(isoRoller.index)
+            val expNs = shutterNsFromIndex(shutterRoller.index)
             camera2Manager.setManualExposure(iso, expNs)
         } else {
             camera2Manager.setAutoExposure()
@@ -2913,8 +2889,8 @@ override fun onResume() {
         val isoIdx = isoVals.indices.minByOrNull { i -> Math.abs(isoVals[i] - targetIso) } ?: 0
         val shutterIdx = shutterVals.indices.minByOrNull { i -> Math.abs(shutterVals[i] - targetShutterNs) } ?: 0
 
-        isoSeekBar.progress = isoIdx
-        shutterSeekBar.progress = shutterIdx
+        isoRoller.setIndex(isoIdx)
+        shutterRoller.setIndex(shutterIdx)
     }
 
     private fun updateAutoExposureReadout(iso: Int, shutterNs: Long) {
@@ -2927,23 +2903,23 @@ override fun onResume() {
     }
 
     private fun updateManualExposure() {
-        val iso = isoFromProgress(isoSeekBar.progress)
-        val expNs = shutterNsFromProgress(shutterSeekBar.progress)
+        val iso = isoFromIndex(isoRoller.index)
+        val expNs = shutterNsFromIndex(shutterRoller.index)
         isoOverlay.text = "ISO $iso"
         shutterOverlay.text = formatShutterSpeed(expNs)
         camera2Manager.setManualExposure(iso, expNs)
     }
 
-    private fun isoFromProgress(progress: Int): Int {
+    private fun isoFromIndex(index: Int): Int {
         val vals = camera2Manager.availableIsoValues
         if (vals.isEmpty()) return 400
-        return vals[progress.coerceIn(0, vals.size - 1)]
+        return vals[index.coerceIn(0, vals.size - 1)]
     }
 
-    private fun shutterNsFromProgress(progress: Int): Long {
+    private fun shutterNsFromIndex(index: Int): Long {
         val vals = camera2Manager.availableShutterSpeedsNs
         if (vals.isEmpty()) return 33_333_333L
-        return vals[progress.coerceIn(0, vals.size - 1)]
+        return vals[index.coerceIn(0, vals.size - 1)]
     }
 
     private fun formatShutterSpeed(ns: Long): String {
@@ -3011,8 +2987,8 @@ override fun onResume() {
     private fun syncSeekBarMax() {
         val isoMax = (camera2Manager.availableIsoValues.size - 1).coerceAtLeast(0)
         val shutterMax = (camera2Manager.availableShutterSpeedsNs.size - 1).coerceAtLeast(0)
-        isoSeekBar.max = isoMax
-        shutterSeekBar.max = shutterMax
+        isoRoller.maxIndex = isoMax
+        shutterRoller.maxIndex = shutterMax
     }
 
     private fun setExposureCompFromProgress(progress: Int) {
@@ -3026,8 +3002,8 @@ override fun onResume() {
         camera2Manager.setExposureCompensation(value)
     }
 
-    private fun setPostProcessingEv(progress: Int) {
-        postProcessingEv = (progress - 1000) / 100f
+    private fun setPostProcessingEv(index: Int) {
+        postProcessingEv = (index - EV_PP_MID_INDEX) * 0.5f
         previewRenderer.exposureEv = postProcessingEv
         evPpOverlay.text = String.format("EV %+.1f", postProcessingEv)
         previewRenderer.requestRender()
@@ -3049,5 +3025,9 @@ override fun onResume() {
         private const val PREF_PREVIEW_RES_CAP = "preview_res_cap"
         private const val PREF_FOCUS_TIMEOUT = "focus_indicator_timeout"
         private const val RAW_BUFFER_POOL = 3
+        // Post-processing EV roller: 0.5 EV per step over the ±10 EV range.
+        private const val EV_PP_MAX_INDEX = 40
+        private const val EV_PP_MID_INDEX = 20
+        private const val EV_PP_DEFAULT_INDEX = 23
     }
 }
