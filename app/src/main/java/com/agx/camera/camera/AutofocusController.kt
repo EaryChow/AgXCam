@@ -42,6 +42,21 @@ class AutofocusController(
         }
     }
 
+    /**
+     * Set the independent auto-exposure metering region (auto exposure mode).
+     * Maps to the same 33% box geometry as the AF region.
+     */
+    fun setExposurePoint(u: Float, v: Float, activeArray: Rect, isFrontCamera: Boolean) {
+        if (activeArray.width() <= 0 || activeArray.height() <= 0) return
+        cameraManager.setAeRegion(normalizedToMeteringRect(u, v, activeArray, isFrontCamera))
+    }
+
+    /** Live-drag: retarget the independent AE metering region without a scan. */
+    fun moveExposurePoint(u: Float, v: Float, activeArray: Rect, isFrontCamera: Boolean) {
+        if (activeArray.width() <= 0 || activeArray.height() <= 0) return
+        cameraManager.moveAeRegion(normalizedToMeteringRect(u, v, activeArray, isFrontCamera))
+    }
+
     fun lock() {
         isLocked = true
         cameraManager.lockFocus()
@@ -80,7 +95,7 @@ class AutofocusController(
         val right = (cx + halfW).toInt().coerceAtMost(activeArray.right)
         val bottom = (cy + halfH).toInt().coerceAtMost(activeArray.bottom)
 
-        CrashLogger.log(TAG, "AF box: fullSensor box=${Rect(left, top, right, bottom)} tapSensor=(${cx.toInt()},${cy.toInt()})")
+        CrashLogger.log(TAG, "Metering box: fullSensor box=${Rect(left, top, right, bottom)} tapSensor=(${cx.toInt()},${cy.toInt()})")
 
         return MeteringRectangle(
             Rect(left, top, right, bottom),

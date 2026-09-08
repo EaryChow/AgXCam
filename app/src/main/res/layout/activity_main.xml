@@ -34,6 +34,26 @@
         android:focusable="true"
         android:visibility="gone" />
 
+    <!-- Auto Exposure Indicator (auto exposure mode only, appears with focus indicator).
+         Tall amber rectangle that partially overlaps the focus indicator and extends
+         downward below it; the solid light bulb below marks the AE metering region.
+         Drag the overlapped part -> moves focus; drag the lower strip/bulb -> moves AE. -->
+    <ImageView
+        android:id="@+id/ae_indicator"
+        android:layout_width="64dp"
+        android:layout_height="112dp"
+        android:src="@drawable/ae_rect"
+        android:scaleType="fitXY"
+        android:visibility="gone" />
+
+    <ImageView
+        android:id="@+id/ae_bulb"
+        android:layout_width="14dp"
+        android:layout_height="14dp"
+        android:src="@drawable/ic_bulb"
+        android:scaleType="fitXY"
+        android:visibility="gone" />
+
     <!-- EV Slider (vertical, appears near focus indicator in auto exposure mode) -->
     <FrameLayout
         android:id="@+id/ev_slider_container"

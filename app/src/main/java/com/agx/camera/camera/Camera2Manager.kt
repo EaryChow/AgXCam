@@ -106,6 +106,10 @@ class Camera2Manager(private val context: Context) {
 
     // Focus/Exposure lock
     private var meteringRegions: Array<MeteringRectangle>? = null
+    // Independent AE metering region, set separately from the AF region once the
+    // user drags the auto-exposure indicator away from the focus indicator. When
+    // null, AE meters the focus (tap) region in auto mode.
+    private var aeRegions: Array<MeteringRectangle>? = null
     private var focusLocked = false
     // Latest auto-focus lens distance (diopters), used to freeze focus on lock
     private var lastAutoFocusDistance: Float? = null
@@ -607,6 +611,7 @@ class Camera2Manager(private val context: Context) {
     fun setMeteringRegion(rect: MeteringRectangle?) {
         if (rect == null) {
             meteringRegions = null
+            aeRegions = null
             isAfScanning = false
             tapFocusHeld = false
             applyPreviewRequest()
@@ -622,6 +627,9 @@ class Camera2Manager(private val context: Context) {
             return
         }
 
+        // A fresh tap re-merges AE with the focus region: both indicators
+        // reappear at the same spot until the user drags AE away again.
+        aeRegions = null
         meteringRegions = arrayOf(rect)
         triggerRegionFocus(rect)
     }
@@ -645,6 +653,31 @@ class Camera2Manager(private val context: Context) {
         if (meteringRegions == null) return
         meteringRegions = arrayOf(rect)
         if (isAfScanning || tapFocusHeld) applyPreviewRequest(log = false)
+    }
+
+    /**
+     * Set the independent auto-exposure metering region (auto exposure mode
+     * only). When the user taps to focus, [setMeteringRegion] clears this so AE
+     * re-merges with the tapped focus region; dragging the AE indicator sets it
+     * separately.
+     */
+    fun setAeRegion(rect: MeteringRectangle) {
+        if (isManualExposure || focusLocked) return
+        val maxAeRegions = cameraCharacteristics?.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0
+        if (maxAeRegions <= 0) {
+            CrashLogger.log(TAG, "setAeRegion: device has 0 AE regions, ignoring")
+            return
+        }
+        aeRegions = arrayOf(rect)
+        applyPreviewRequest()
+    }
+
+    /** Live-drag: retarget the independent AE region without restarting any scan. */
+    fun moveAeRegion(rect: MeteringRectangle) {
+        if (isManualExposure || focusLocked) return
+        if (meteringRegions == null) return
+        aeRegions = arrayOf(rect)
+        applyPreviewRequest(log = false)
     }
 
     /**
@@ -728,6 +761,7 @@ class Camera2Manager(private val context: Context) {
     // Clear any tap region and return to continuous AF.
     fun clearFocusRegion() {
         meteringRegions = null
+        aeRegions = null
         isAfScanning = false
         focusLocked = false
         tapFocusHeld = false
@@ -818,14 +852,19 @@ class Camera2Manager(private val context: Context) {
                 if (currentExposureComp != 0) {
                     set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, currentExposureComp)
                 }
+                // AE regions: independent region if the user parked one, otherwise
+                // follow the tapped focus (scan/hold) region.
+                if (deviceMaxAeRegions > 0) {
+                    val aeRegionToUse = aeRegions ?: (if (carryRegion) tapRegions else null)
+                    if (aeRegionToUse != null) {
+                        set(CaptureRequest.CONTROL_AE_REGIONS, aeRegionToUse)
+                    }
+                }
                 if (carryRegion) {
                     if (scanning && !scanTriggerFired) {
                         set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
                     } else if (useTapHold) {
                         set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_IDLE)
-                    }
-                    if (deviceMaxAeRegions > 0) {
-                        set(CaptureRequest.CONTROL_AE_REGIONS, tapRegions)
                     }
                 }
                 currentFlashMode.applyToRequest(this, availableAeModes)

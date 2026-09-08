@@ -49,6 +49,8 @@ import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
+    private enum class IndicatorDragMode { FOCUS, AE }
+
     private lateinit var camera2Manager: Camera2Manager
     private lateinit var lensManager: LensManager
     private lateinit var previewRenderer: PreviewRenderer
@@ -125,6 +127,8 @@ class MainActivity : AppCompatActivity() {
     // Focus / WB
     private lateinit var focusIndicator: ImageView
     private lateinit var aeAfLockButton: ImageView
+    private lateinit var aeIndicator: ImageView
+    private lateinit var aeBulb: ImageView
     private lateinit var wbPopup: LinearLayout
 
     // Manual Exposure
@@ -161,6 +165,17 @@ class MainActivity : AppCompatActivity() {
     private var focusDragging = false
     private var focusDragStartX = 0f
     private var focusDragStartY = 0f
+    // Indicator centers (in view pixels), used for drag hit-testing and the EV
+    // slider anchor that follows the auto-exposure indicator.
+    private var focusCenterX = 0f
+    private var focusCenterY = 0f
+    private var aeCenterX = 0f
+    private var aeCenterY = 0f
+    private var aeDragging = false
+    // Grab intent captured at DOWN against the current (pre-tap) indicator
+    // geometry, before showFocusIndicator re-centers them; used so a drag that
+    // starts on the AE-only strip/bulb moves only the AE indicator.
+    private var pendingGrabMode: IndicatorDragMode? = null
 
     // Pinch-to-zoom
     private var scaleGestureDetector: ScaleGestureDetector? = null
@@ -319,6 +334,8 @@ class MainActivity : AppCompatActivity() {
 
         focusIndicator = findViewById(R.id.focus_indicator)
         aeAfLockButton = findViewById(R.id.ae_af_lock_button)
+        aeIndicator = findViewById(R.id.ae_indicator)
+        aeBulb = findViewById(R.id.ae_bulb)
         wbPopup = findViewById(R.id.wb_popup)
 
         amToggleButton = findViewById(R.id.am_toggle_button)
@@ -655,41 +672,79 @@ class MainActivity : AppCompatActivity() {
                         event.x, event.y, textureView.width, textureView.height
                     )
                 } else if (!autofocusController.isLocked && currentLensCanTapToFocus) {
-                    showFocusIndicator(event.x, event.y)
-                    applyFocusPoint(event.x, event.y)
                     focusDragging = false
+                    aeDragging = false
                     focusDragStartX = event.x
                     focusDragStartY = event.y
+                    // A DOWN on any visible indicator part is a drag grab, never
+                    // a tap-to-focus: grabbing the AE-only strip/bulb drags
+                    // exposure, everything else drags focus. Only a DOWN on empty
+                    // preview is a fresh tap (re-center + scan).
+                    val grab = if (focusIndicator.visibility == View.VISIBLE &&
+                        aeIndicator.visibility == View.VISIBLE) {
+                        dragGrabMode(event.x, event.y)
+                    } else null
+                    pendingGrabMode = grab
+                    if (grab == null) {
+                        showFocusIndicator(event.x, event.y)
+                        applyFocusPoint(event.x, event.y)
+                    }
                 }
                 return@setOnTouchListener true
             }
             if (event.action == MotionEvent.ACTION_MOVE) {
-                // Start drag once the finger moves past touch slop; pause the
-                // auto-hide timeout while the indicator is being dragged.
-                if (!focusDragging && focusIndicator.visibility == View.VISIBLE &&
-                    !isScaling && !autofocusController.isLocked) {
+                // Start a drag once the finger moves past touch slop; pause the
+                // auto-hide timeout while either indicator is being dragged. The
+                // grabbed part decides which one moves: the overlap / circle area
+                // drags focus, the lower AE strip or light bulb drags exposure.
+                if (!isScaling && !autofocusController.isLocked &&
+                    !focusDragging && !aeDragging && focusIndicator.visibility == View.VISIBLE) {
                     val slop = ViewConfiguration.get(this).scaledTouchSlop
                     if (Math.abs(event.x - focusDragStartX) > slop ||
                         Math.abs(event.y - focusDragStartY) > slop) {
-                        focusDragging = true
-                        focusIndicatorHandler.removeCallbacks(focusIndicatorHideRunnable)
+                        when (pendingGrabMode ?: dragGrabMode(focusDragStartX, focusDragStartY)) {
+                            IndicatorDragMode.FOCUS -> focusDragging = true
+                            IndicatorDragMode.AE -> aeDragging = true
+                            null -> {}
+                        }
+                        if (focusDragging || aeDragging) {
+                            focusIndicatorHandler.removeCallbacks(focusIndicatorHideRunnable)
+                        }
                     }
                 }
                 if (focusDragging) {
                     moveFocusIndicator(event.x, event.y)
                 }
+                if (aeDragging) {
+                    moveAeIndicator(event.x, event.y)
+                }
                 return@setOnTouchListener true
             }
             if (event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_CANCEL) {
                 isScaling = false
+                val dragJustEnded = focusDragging || aeDragging
                 if (focusDragging) {
                     focusDragging = false
                     // Re-scan at the dropped position so the move takes effect.
                     applyFocusPoint(event.x, event.y, triggerScan = true)
-                    // Timeout restarts counting from 0 after the drag.
-                    if (focusIndicatorTimeoutMs > 0 && !autofocusController.isLocked) {
-                        focusIndicatorHandler.postDelayed(focusIndicatorHideRunnable, focusIndicatorTimeoutMs)
-                    }
+                }
+                if (aeDragging) {
+                    aeDragging = false
+                    // Drop the AE metering region at the final position.
+                    applyAePoint(event.x, event.y)
+                }
+                // A grab that never became a drag is a tap on the indicator:
+                // re-center both and focus there.
+                if (event.action == MotionEvent.ACTION_UP && !dragJustEnded &&
+                    pendingGrabMode != null && !autofocusController.isLocked &&
+                    currentLensCanTapToFocus) {
+                    showFocusIndicator(event.x, event.y)
+                    applyFocusPoint(event.x, event.y)
+                }
+                pendingGrabMode = null
+                // Timeout restarts counting from 0 after the drag.
+                if (dragJustEnded && focusIndicatorTimeoutMs > 0 && !autofocusController.isLocked) {
+                    focusIndicatorHandler.postDelayed(focusIndicatorHideRunnable, focusIndicatorTimeoutMs)
                 }
             }
             true
@@ -761,6 +816,10 @@ class MainActivity : AppCompatActivity() {
                     focusIndicator.y + focusIndicator.height / 2f,
                     triggerScan = false
                 )
+            }
+            // Similarly keep the independent AE region glued to its indicator
+            if (!autofocusController.isLocked && aeIndicator.visibility == View.VISIBLE) {
+                applyAePoint(aeCenterX, aeCenterY)
             }
         }
 
@@ -1357,9 +1416,12 @@ class MainActivity : AppCompatActivity() {
         aeAfLockButton.setImageResource(if (autofocusController.isLocked) R.drawable.ic_lock_closed else R.drawable.ic_lock_open)
         aeAfLockButton.alpha = if (autofocusController.isLocked) 1.0f else 0.6f
 
-        // Show EV slider in auto exposure mode
+        // Show AE indicator + EV slider in auto exposure mode
         if (!isManualMode) {
-            showEvSlider(x, y)
+            showAeIndicator(x, y)
+            showEvSlider()
+        } else {
+            hideAeIndicator()
         }
         // Auto-hide after timeout (never if focus is locked)
         if (focusIndicatorTimeoutMs > 0 && !autofocusController.isLocked) {
@@ -1368,6 +1430,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun positionFocusIndicatorAt(x: Float, y: Float) {
+        focusCenterX = x
+        focusCenterY = y
         val size = (80 * resources.displayMetrics.density).toFloat()
         val lockBtnSize = 24 * resources.displayMetrics.density
         focusIndicator.x = x - size / 2f
@@ -1378,19 +1442,93 @@ class MainActivity : AppCompatActivity() {
 
     private fun moveFocusIndicator(x: Float, y: Float) {
         positionFocusIndicatorAt(x, y)
-        if (evSliderContainer?.visibility == View.VISIBLE) {
-            positionEvSliderAt(x, y)
-        }
         moveFocusPoint(x, y)
     }
 
-    private fun positionEvSliderAt(x: Float, y: Float) {
-        // Center vertically on the point, offset right of the focus indicator
+    // AE indicator geometry (dp): a tall rectangle the same width run as the
+    // focus circle, top-aligned with the circle and extending 32dp below it so
+    // there is a draggable strip that does not overlap the focus indicator.
+    private fun aeRectWidthPx(): Float = 64 * resources.displayMetrics.density
+    private fun aeRectHeightPx(): Float = 112 * resources.displayMetrics.density
+    private fun aeExtensionPx(): Float = aeRectHeightPx() - 80 * resources.displayMetrics.density
+
+    private fun positionAeIndicatorAt(x: Float, y: Float) {
+        aeCenterX = x
+        aeCenterY = y
+        val w = aeRectWidthPx()
+        val h = aeRectHeightPx()
+        aeIndicator.x = x - w / 2f
+        aeIndicator.y = y - h / 2f
+        // Solid light bulb right below the rectangle; dragging it drags AE too.
+        val bulbSize = 14 * resources.displayMetrics.density
+        val bulbGap = 2 * resources.displayMetrics.density
+        aeBulb.x = x - bulbSize / 2f
+        aeBulb.y = aeIndicator.y + h + bulbGap
+    }
+
+    /** Show the AE indicator overlapping the focus one (top-aligned, wider overlap). */
+    private fun showAeIndicator(focusX: Float, focusY: Float) {
+        positionAeIndicatorAt(focusX, focusY + aeExtensionPx() / 2f)
+        aeIndicator.visibility = View.VISIBLE
+        aeBulb.visibility = View.VISIBLE
+    }
+
+    private fun hideAeIndicator() {
+        aeIndicator.visibility = View.GONE
+        aeBulb.visibility = View.GONE
+    }
+
+    private fun moveAeIndicator(x: Float, y: Float) {
+        positionAeIndicatorAt(x, y)
+        if (evSliderContainer?.visibility == View.VISIBLE) {
+            positionEvSliderAt()
+        }
+        moveAePoint(x, y)
+    }
+
+    /**
+     * Decide which indicator a drag grabbed, based on the DOWN point:
+     * overlapped area / circle -> focus only; AE-only strip or light bulb -> AE only.
+     */
+    private fun dragGrabMode(touchX: Float, touchY: Float): IndicatorDragMode? {
+        val focusHalf = 80f * resources.displayMetrics.density / 2f
+        val aeHalfW = aeRectWidthPx() / 2f
+        val aeHalfH = aeRectHeightPx() / 2f
+        val bulbSize = 14 * resources.displayMetrics.density
+        val bulbGap = 2 * resources.displayMetrics.density
+
+        val aeTop = aeCenterY - aeHalfH
+        val bulbLeft = aeCenterX - bulbSize / 2f
+        val bulbTop = aeTop + aeRectHeightPx() + bulbGap
+        val aeVisible = aeIndicator.visibility == View.VISIBLE
+        val inBulb = aeVisible && touchX >= bulbLeft && touchX <= bulbLeft + bulbSize &&
+            touchY >= bulbTop && touchY <= bulbTop + bulbSize
+
+        val aeOnly = aeVisible &&
+            touchX >= aeCenterX - aeHalfW && touchX <= aeCenterX + aeHalfW &&
+            touchY >= aeCenterY - aeHalfH && touchY <= aeCenterY + aeHalfH
+
+        val focusOnly = touchX >= focusCenterX - focusHalf && touchX <= focusCenterX + focusHalf &&
+            touchY >= focusCenterY - focusHalf && touchY <= focusCenterY + focusHalf
+
+        return when {
+            inBulb -> IndicatorDragMode.AE
+            // AE strip below the focus circle (not overlapped): AE only.
+            aeOnly && !focusOnly -> IndicatorDragMode.AE
+            // Circle / overlapped area: focus only.
+            focusOnly -> IndicatorDragMode.FOCUS
+            else -> null
+        }
+    }
+
+    private fun positionEvSliderAt() {
+        // Anchor to the auto-exposure indicator: center vertically on the AE
+        // center, offset right of it.
         evSliderContainer?.let { container ->
             val density = resources.displayMetrics.density
             val halfContainerH = 70 * density
-            container.x = x + 48 * density
-            container.y = y - halfContainerH
+            container.x = aeCenterX + 48 * density
+            container.y = aeCenterY - halfContainerH
         }
     }
 
@@ -1413,10 +1551,11 @@ class MainActivity : AppCompatActivity() {
                 aeAfLockButton.alpha = 1f
             }
             .start()
+        hideAeIndicator()
         hideEvSlider()
     }
 
-    private fun showEvSlider(x: Float, y: Float) {
+    private fun showEvSlider() {
         if (isManualMode) return
         
         evSliderContainer?.let { container ->
@@ -1426,7 +1565,7 @@ class MainActivity : AppCompatActivity() {
                 setExposureCompFromProgress(50)
             }
             
-            positionEvSliderAt(x, y)
+            positionEvSliderAt()
             
             evSeekBarVertical?.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
@@ -1541,6 +1680,26 @@ class MainActivity : AppCompatActivity() {
         val lens = lensManager.activeLens ?: return
         val uv = viewToFrameCoords(viewX, viewY) ?: return
         autofocusController.moveFocusPoint(
+            uv[0], uv[1],
+            lensManager.getSensorActiveArraySize(lens),
+            previewRenderer.isFrontCamera
+        )
+    }
+
+    private fun applyAePoint(viewX: Float, viewY: Float) {
+        val lens = lensManager.activeLens ?: return
+        val uv = viewToFrameCoords(viewX, viewY) ?: return
+        autofocusController.setExposurePoint(
+            uv[0], uv[1],
+            lensManager.getSensorActiveArraySize(lens),
+            previewRenderer.isFrontCamera
+        )
+    }
+
+    private fun moveAePoint(viewX: Float, viewY: Float) {
+        val lens = lensManager.activeLens ?: return
+        val uv = viewToFrameCoords(viewX, viewY) ?: return
+        autofocusController.moveExposurePoint(
             uv[0], uv[1],
             lensManager.getSensorActiveArraySize(lens),
             previewRenderer.isFrontCamera
@@ -2953,8 +3112,11 @@ override fun onResume() {
             camera2Manager.setAutoExposure()
         }
         dismissAllPopups()
-        // Hide EV slider in manual mode
-        if (isManualMode) hideEvSlider()
+        // Hide EV slider + AE indicator in manual mode (focus indicator only)
+        if (isManualMode) {
+            hideEvSlider()
+            hideAeIndicator()
+        }
     }
 
     private fun syncSlidersToAutoValues() {
@@ -3043,7 +3205,7 @@ override fun onResume() {
         evPopupShowing = false
     }
 
-    private fun showEvSlider() {
+    private fun showEvPopup() {
         if (!isManualMode) {
             evPopup.visibility = View.VISIBLE
             evSeekBar.progress = 50
