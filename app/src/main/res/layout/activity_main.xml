@@ -647,7 +647,10 @@
             <SeekBar android:id="@+id/toe_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="93" android:progress="8" android:layout_marginBottom="4dp" />
 
             <TextView android:id="@+id/shoulder_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Shoulder  2.5" android:textColor="#FFFFFFFF" android:textSize="11sp" />
-            <SeekBar android:id="@+id/shoulder_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="93" android:progress="18" android:layout_marginBottom="8dp" />
+            <SeekBar android:id="@+id/shoulder_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="93" android:progress="18" android:layout_marginBottom="4dp" />
+
+            <TextView android:id="@+id/middle_gray_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Middle Gray  18.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/middle_gray_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="100" android:progress="53" android:layout_marginBottom="8dp" />
 
             <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
 

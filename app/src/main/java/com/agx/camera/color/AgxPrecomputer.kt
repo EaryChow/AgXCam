@@ -32,12 +32,13 @@ object AgxPrecomputer {
         params: InsetParams,
         sceneLinearTo709: ColorMatrix.Mat3,
         whiteLevel: Float,
-        blackLevel: Float
+        blackLevel: Float,
+        middleGrayPercent: Float = 18f
     ): AgxUniforms {
         val insetMat = computeInsetMatrix(params)
         val outsetMat = computeOutsetMatrix(params)
         val logMidgray = lin2logScalar(0.18f)
-        val displayMidgray = 0.18f.pow(1.0f / 2.4f)
+        val displayMidgray = (middleGrayPercent / 100f).pow(1.0f / 2.4f)
         val toRec2020 = ColorMatrix.rgbToRGB(ColorMatrix.REC709, ColorMatrix.REC2020)
 
         return AgxUniforms(

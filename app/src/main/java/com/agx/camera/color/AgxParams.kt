@@ -4,6 +4,7 @@ data class AgxParams(
     val contrast: Float = 3.0f,
     val toe: Float = 1.5f,
     val shoulder: Float = 2.5f,
+    val middleGray: Float = 18f,
     val rotation: FloatArray = floatArrayOf(0.2f, -0.021f, -0.053f),
     val attenuation: FloatArray = floatArrayOf(30.0f, 45.0f, 20.0f),
     val reverseRotation: FloatArray = floatArrayOf(0.2f, -0.021f, -0.053f),
@@ -24,10 +25,11 @@ data class AgxParams(
     )
 
     companion object {
-        fun fromInsetParams(p: AgxPrecomputer.InsetParams, contrast: Float = 2.4f, toe: Float = 1.5f, shoulder: Float = 1.5f, nrStrength: Float = 0f) = AgxParams(
+        fun fromInsetParams(p: AgxPrecomputer.InsetParams, contrast: Float = 2.4f, toe: Float = 1.5f, shoulder: Float = 1.5f, middleGray: Float = 18f, nrStrength: Float = 0f) = AgxParams(
             contrast = contrast,
             toe = toe,
             shoulder = shoulder,
+            middleGray = middleGray,
             rotation = p.rotation.copyOf(),
             attenuation = p.attenuation.copyOf(),
             reverseRotation = p.reverseRotation.copyOf(),

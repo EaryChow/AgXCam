@@ -218,6 +218,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var toeSlider: SeekBar
     private lateinit var shoulderLabel: TextView
     private lateinit var shoulderSlider: SeekBar
+    private lateinit var middleGrayLabel: TextView
+    private lateinit var middleGraySlider: SeekBar
 
     // Inset
     private lateinit var usePreForPostCb: CheckBox
@@ -295,6 +297,7 @@ class MainActivity : AppCompatActivity() {
         contrastLabel = findViewById(R.id.contrast_label); contrastSlider = findViewById(R.id.contrast_slider)
         toeLabel = findViewById(R.id.toe_label); toeSlider = findViewById(R.id.toe_slider)
         shoulderLabel = findViewById(R.id.shoulder_label); shoulderSlider = findViewById(R.id.shoulder_slider)
+        middleGrayLabel = findViewById(R.id.middle_gray_label); middleGraySlider = findViewById(R.id.middle_gray_slider)
 
         usePreForPostCb = findViewById(R.id.use_pre_for_post_cb)
         insetRotRLabel = findViewById(R.id.inset_rot_r_label); insetRotRSlider = findViewById(R.id.inset_rot_r_slider)
@@ -901,6 +904,16 @@ class MainActivity : AppCompatActivity() {
             shoulderLabel.text = String.format("Shoulder  %.1f", agxParams.shoulder)
             uploadAgxUniforms()
         }
+        middleGraySlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
+            agxParams = agxParams.copy(middleGray = 10f + v * 0.15f)
+            middleGrayLabel.text = String.format("Middle Gray  %.1f", agxParams.middleGray)
+            uploadAgxUniforms()
+        })
+        setupSliderDoubleClickReset(middleGraySlider, ((AgxParams().middleGray - 10f) / 0.15f).toInt().coerceIn(0, 100)) {
+            agxParams = agxParams.copy(middleGray = AgxParams().middleGray)
+            middleGrayLabel.text = String.format("Middle Gray  %.1f", agxParams.middleGray)
+            uploadAgxUniforms()
+        }
 
         usePreForPostCb.setOnCheckedChangeListener { _, checked ->
             agxParams = agxParams.copy(usePreForPost = checked)
@@ -1274,6 +1287,8 @@ class MainActivity : AppCompatActivity() {
         toeLabel.text = String.format("Toe  %.1f", agxParams.toe)
         shoulderSlider.progress = ((agxParams.shoulder - 0.7f) / 0.1f).toInt().coerceIn(0, 93)
         shoulderLabel.text = String.format("Shoulder  %.1f", agxParams.shoulder)
+        middleGraySlider.progress = ((agxParams.middleGray - 10f) / 0.15f).toInt().coerceIn(0, 100)
+        middleGrayLabel.text = String.format("Middle Gray  %.1f", agxParams.middleGray)
 
         usePreForPostCb.isChecked = agxParams.usePreForPost
         outsetSection.visibility = if (agxParams.usePreForPost) View.GONE else View.VISIBLE
@@ -2570,7 +2585,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val insetParams = agxParams.toInsetParams()
-        val agx = AgxPrecomputer.compute(insetParams, sceneLinearTo709, whiteLevel = 1023f, blackLevel = 64f)
+        val agx = AgxPrecomputer.compute(insetParams, sceneLinearTo709, whiteLevel = 1023f, blackLevel = 64f, middleGrayPercent = agxParams.middleGray)
 
         previewRenderer.agxSceneLinearTo709 = agx.sceneLinearTo709
         previewRenderer.agxInsetMat = agx.insetMat

@@ -122,6 +122,7 @@ class PresetManager(private val context: Context) {
                 contrast = p.optDouble("general_contrast", 3.0).toFloat(),
                 toe = p.optDouble("toe_contrast", 1.5).toFloat(),
                 shoulder = p.optDouble("shoulder_contrast", 2.5).toFloat(),
+                middleGray = p.optDouble("middle_gray", 18.0).toFloat(),
                 rotation = jsonArrayToFloatArray(p.optJSONArray("rotation"), floatArrayOf(0.2f, -0.021f, -0.053f)),
                 attenuation = jsonArrayToFloatArray(p.optJSONArray("attenuation"), floatArrayOf(30.0f, 45.0f, 20.0f)),
                 reverseRotation = jsonArrayToFloatArray(p.optJSONArray("reverse_rotation"), floatArrayOf(0.2f, -0.021f, -0.053f)),
@@ -139,6 +140,7 @@ class PresetManager(private val context: Context) {
             put("general_contrast", p.contrast.toDouble())
             put("toe_contrast", p.toe.toDouble())
             put("shoulder_contrast", p.shoulder.toDouble())
+            put("middle_gray", p.middleGray.toDouble())
             put("rotation", floatArrayToJson(p.rotation))
             put("attenuation", floatArrayToJson(p.attenuation))
             put("reverse_rotation", floatArrayToJson(p.reverseRotation))
