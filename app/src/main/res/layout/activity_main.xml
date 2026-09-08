@@ -600,6 +600,20 @@
                     android:paddingHorizontal="10dp"
                     android:clickable="true"
                     android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/preset_startup_btn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:layout_marginStart="4dp"
+                    android:background="#444444"
+                    android:gravity="center"
+                    android:text="Set Startup"
+                    android:textColor="#FF88C0FF"
+                    android:textSize="11sp"
+                    android:paddingHorizontal="10dp"
+                    android:clickable="true"
+                    android:focusable="true" />
             </LinearLayout>
 
             <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />

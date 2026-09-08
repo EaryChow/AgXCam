@@ -190,6 +190,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var presetDeleteBtn: TextView
     private lateinit var presetRenameBtn: TextView
     private lateinit var presetResetBtn: TextView
+    private lateinit var presetStartupBtn: TextView
 
     // Curve
     private lateinit var contrastLabel: TextView
@@ -270,6 +271,7 @@ class MainActivity : AppCompatActivity() {
         presetDeleteBtn = findViewById(R.id.preset_delete_btn)
         presetRenameBtn = findViewById(R.id.preset_rename_btn)
         presetResetBtn = findViewById(R.id.preset_reset_btn)
+        presetStartupBtn = findViewById(R.id.preset_startup_btn)
 
         contrastLabel = findViewById(R.id.contrast_label); contrastSlider = findViewById(R.id.contrast_slider)
         toeLabel = findViewById(R.id.toe_label); toeSlider = findViewById(R.id.toe_slider)
@@ -471,7 +473,13 @@ class MainActivity : AppCompatActivity() {
         textureView.surfaceTextureListener = previewRenderer
 
         setupUI()
-        loadPreset(PresetManager.PRESET_DEFAULT)
+        val startupPreset = previewResPrefs.getString(PREF_STARTUP_PRESET, null)
+        if (startupPreset != null && presetManager.getNames().contains(startupPreset)) {
+            loadPreset(startupPreset)
+            selectPreset(startupPreset)
+        } else {
+            loadPreset(PresetManager.PRESET_DEFAULT)
+        }
         checkPermissions()
     }
 
@@ -1144,9 +1152,16 @@ class MainActivity : AppCompatActivity() {
         }
 
         presetResetBtn.setOnClickListener {
-            loadPreset(PresetManager.PRESET_DEFAULT)
-            selectPreset(PresetManager.PRESET_DEFAULT)
-            Toast.makeText(this, "Reset to Default", Toast.LENGTH_SHORT).show()
+            val name = presetSpinner.selectedItem as? String ?: return@setOnClickListener
+            loadPreset(name)
+            selectPreset(name)
+            Toast.makeText(this, "Reset: $name", Toast.LENGTH_SHORT).show()
+        }
+
+        presetStartupBtn.setOnClickListener {
+            val name = presetSpinner.selectedItem as? String ?: return@setOnClickListener
+            previewResPrefs.edit().putString(PREF_STARTUP_PRESET, name).apply()
+            Toast.makeText(this, "Startup preset: $name", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -3024,6 +3039,7 @@ override fun onResume() {
         private const val REQUEST_CAMERA = 100
         private const val PREF_PREVIEW_RES_CAP = "preview_res_cap"
         private const val PREF_FOCUS_TIMEOUT = "focus_indicator_timeout"
+        private const val PREF_STARTUP_PRESET = "startup_preset"
         private const val RAW_BUFFER_POOL = 3
         // Post-processing EV roller: 0.5 EV per step over the ±10 EV range.
         private const val EV_PP_MAX_INDEX = 40
