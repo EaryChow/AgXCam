@@ -372,10 +372,12 @@ class MainActivity : AppCompatActivity() {
                         Log.d(TAG, "RAW mode: switching from non-RAW lens ${currentLens.cameraId} to RAW lens ${rawLens.cameraId}")
                         switchToLens(rawLens)
                         developerSwitch.updateBannerForRawMode(true)
+                        updateRawModeWarning()
                         return@DeveloperSwitch
                     } else {
                         developerSwitch.revertToggle()
                         developerSwitch.showErrorBanner("No RAW-capable lens found")
+                        updateRawModeWarning()
                         updateFrontRearToggleVisibility(false)
                         buildLensSelectorUI()
                         return@DeveloperSwitch
@@ -398,6 +400,7 @@ class MainActivity : AppCompatActivity() {
             preparePreviewPipeline(previewSize, 0f)
             previewRenderer.start()
             developerSwitch.updateBannerForRawMode(useRaw)
+            updateRawModeWarning()
             buildLensSelectorUI()
         }
         developerSwitch.init(
@@ -1702,7 +1705,6 @@ class MainActivity : AppCompatActivity() {
         developerSwitch.setRawSensorAvailable(rawAvailable)
         if (!rawAvailable) {
             CrashLogger.log(TAG, "initCamera: RAW sensor stream not supported by this device, using YUV fallback mode")
-            rawUnsupportedWarning.visibility = View.VISIBLE
         } else if (!developerSwitch.useRawSensor) {
             CrashLogger.log(TAG, "initCamera: RAW sensor stream available, auto-enabling RAW mode")
             developerSwitch.forceEnableRaw()
@@ -1719,6 +1721,7 @@ class MainActivity : AppCompatActivity() {
                 developerSwitch.showErrorBanner("No RAW-capable lens found")
             }
         }
+        updateRawModeWarning()
 
         val previewSize = lensManager.getBestPreviewSize(primary, maxPreviewDimensions.first, maxPreviewDimensions.second)
         buildLensSelectorUI()
@@ -3022,6 +3025,25 @@ override fun onResume() {
         previewRenderer.exposureEv = postProcessingEv
         evPpOverlay.text = String.format("EV %+.1f", postProcessingEv)
         previewRenderer.requestRender()
+    }
+
+    // Permanent red warning: RAW-unsupported devices already get one; RAW-capable
+    // devices running YUV instead of the RAW sensor stream also get a red "debug only"
+    // warning so it is never silently confused with a production YUV path.
+    private fun updateRawModeWarning() {
+        when {
+            !developerSwitch.rawSensorAvailable -> {
+                rawUnsupportedWarning.text = "RAW sensor stream not supported by this device - YUV fallback mode"
+                rawUnsupportedWarning.setTextColor(0xFFFF4444.toInt())
+                rawUnsupportedWarning.visibility = View.VISIBLE
+            }
+            !developerSwitch.useRawSensor -> {
+                rawUnsupportedWarning.text = "Currently DEBUG ONLY YUV MODE - please use RAW_SENSOR stream"
+                rawUnsupportedWarning.setTextColor(0xFFFF4444.toInt())
+                rawUnsupportedWarning.visibility = View.VISIBLE
+            }
+            else -> rawUnsupportedWarning.visibility = View.GONE
+        }
     }
 
     private fun getMaxPreviewDimensions(): Pair<Int, Int> {
