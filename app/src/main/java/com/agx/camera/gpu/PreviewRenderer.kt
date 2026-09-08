@@ -102,6 +102,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     var agxContrast = 2.4f
     var agxToe = 1.5f
     var agxShoulder = 1.5f
+    var agxVibrance = 0.5f
     var exposureEv = 1.5f
 
     fun setPreviewSize(width: Int, height: Int) {
@@ -220,6 +221,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val agxLogMin: Float, val agxLogMax: Float,
         val agxLogMidgray: Float, val agxDisplayMidgray: Float,
         val agxContrast: Float, val agxToe: Float, val agxShoulder: Float,
+        val agxVibrance: Float,
         val sensorOrientation: Int,
         val deviceOrientation: Int,
         val resultRef: AtomicReference<Bitmap?>,
@@ -257,6 +259,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             session.agxLogMin, session.agxLogMax,
             session.agxLogMidgray, session.agxDisplayMidgray,
             session.agxContrast, session.agxToe, session.agxShoulder,
+            session.agxVibrance,
             session.sensorOrientation, session.deviceOrientation,
             resultRef, latch
         )
@@ -275,6 +278,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val agxLogMin: Float, val agxLogMax: Float,
         val agxLogMidgray: Float, val agxDisplayMidgray: Float,
         val agxContrast: Float, val agxToe: Float, val agxShoulder: Float,
+        val agxVibrance: Float,
         val resultRef: AtomicReference<Bitmap?>,
         val latch: CountDownLatch
     )
@@ -295,6 +299,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             session.agxLogMin, session.agxLogMax,
             session.agxLogMidgray, session.agxDisplayMidgray,
             session.agxContrast, session.agxToe, session.agxShoulder,
+            session.agxVibrance,
             resultRef, latch
         )
         hasNewFrame = true
@@ -400,7 +405,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             agxWhiteLevel, agxBlackLevel,
             agxLogMin, agxLogMax,
             agxLogMidgray, agxDisplayMidgray,
-            agxContrast, agxToe, agxShoulder
+            agxContrast, agxToe, agxShoulder,
+            agxVibrance
         )
     }
 
@@ -472,7 +478,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             agxWhiteLevel, agxBlackLevel,
             agxLogMin, agxLogMax,
             agxLogMidgray, agxDisplayMidgray,
-            agxContrast, agxToe, agxShoulder
+            agxContrast, agxToe, agxShoulder,
+            agxVibrance
         )
         logGlError("after nrShader.draw", bayerRenderCount)
 
@@ -644,7 +651,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         captureReq.agxWhiteLevel, captureReq.agxBlackLevel,
                         captureReq.agxLogMin, captureReq.agxLogMax,
                         captureReq.agxLogMidgray, captureReq.agxDisplayMidgray,
-                        captureReq.agxContrast, captureReq.agxToe, captureReq.agxShoulder
+                        captureReq.agxContrast, captureReq.agxToe, captureReq.agxShoulder,
+                        captureReq.agxVibrance
                     )
 
                     val readW: Int
@@ -726,7 +734,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         rawCaptureReq.agxWhiteLevel, rawCaptureReq.agxBlackLevel,
                         rawCaptureReq.agxLogMin, rawCaptureReq.agxLogMax,
                         rawCaptureReq.agxLogMidgray, rawCaptureReq.agxDisplayMidgray,
-                        rawCaptureReq.agxContrast, rawCaptureReq.agxToe, rawCaptureReq.agxShoulder
+                        rawCaptureReq.agxContrast, rawCaptureReq.agxToe, rawCaptureReq.agxShoulder,
+                        rawCaptureReq.agxVibrance
                     )
                     logGlError("raw after nrShader.draw", bayerRenderCount)
 

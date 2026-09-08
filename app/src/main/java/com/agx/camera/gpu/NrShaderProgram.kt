@@ -25,6 +25,7 @@ class NrShaderProgram {
     private var uContrastLoc = 0
     private var uToeLoc = 0
     private var uShoulderLoc = 0
+    private var uVibranceLoc = 0
 
     private val quadVertices: FloatBuffer = ByteBuffer.allocateDirect(QUAD_COORDS.size * 4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer().put(QUAD_COORDS).also { it.position(0) }
@@ -55,6 +56,7 @@ class NrShaderProgram {
         uContrastLoc = GLES20.glGetUniformLocation(programId, "u_contrast")
         uToeLoc = GLES20.glGetUniformLocation(programId, "u_toe")
         uShoulderLoc = GLES20.glGetUniformLocation(programId, "u_shoulder")
+        uVibranceLoc = GLES20.glGetUniformLocation(programId, "u_vibrance")
 
         Log.d(TAG, "NR shader program created: $programId")
         com.agx.camera.CrashLogger.log(TAG, "Program created: nr=$programId")
@@ -71,7 +73,8 @@ class NrShaderProgram {
         whiteLevel: Float, blackLevel: Float,
         logMin: Float, logMax: Float,
         logMidgray: Float, displayMidgray: Float,
-        contrast: Float, toe: Float, shoulder: Float
+        contrast: Float, toe: Float, shoulder: Float,
+        vibrance: Float
     ) {
         GLES20.glUseProgram(programId)
 
@@ -94,6 +97,7 @@ class NrShaderProgram {
         GLES20.glUniform1f(uContrastLoc, contrast)
         GLES20.glUniform1f(uToeLoc, toe)
         GLES20.glUniform1f(uShoulderLoc, shoulder)
+        GLES20.glUniform1f(uVibranceLoc, vibrance)
 
         val posHandle = GLES20.glGetAttribLocation(programId, "a_position")
         val texHandle = GLES20.glGetAttribLocation(programId, "a_texCoord")
@@ -164,6 +168,7 @@ uniform float u_display_midgray;
 uniform float u_contrast;
 uniform float u_toe;
 uniform float u_shoulder;
+uniform float u_vibrance;
 
 ${AgxCoreGlsl.CORE_HELPERS}
 

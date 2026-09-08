@@ -85,6 +85,15 @@ vec3 srgbEOTF(vec3 srgb) {
     }
     return result;
 }
+
+vec3 vibrance(vec3 rgb, float strength) {
+    const vec3 coeffs = vec3(0.2126, 0.7152, 0.0722);
+    float luminance = dot(rgb, coeffs);
+    float chrominance = max(rgb.r, max(rgb.g, rgb.b)) - luminance;
+    float mask = 1.0 - pow(max(chrominance, 0.0), 0.4);
+    float t = 1.0 + strength * mask;
+    return luminance + (rgb - luminance) * t;
+}
 """
 
     const val AGX_FORMATION = """
@@ -99,6 +108,7 @@ vec3 agxFormation(vec3 sensorLinear) {
     rgb.b = sigmoid(rgb.b, u_shoulder, u_toe, u_contrast, u_log_midgray, u_display_midgray);
     rgb = spowf3(rgb, 2.4);
     rgb = u_outsetmat * rgb;
+    rgb = vibrance(rgb, u_vibrance);
     rgb = clamp(rgb, 0.0, 1.0);
     rgb = srgbOETF(rgb);
     return rgb;
@@ -119,6 +129,7 @@ vec3 agxFormationNorm(vec3 normalizedLinear) {
     rgb.b = sigmoid(rgb.b, u_shoulder, u_toe, u_contrast, u_log_midgray, u_display_midgray);
     rgb = spowf3(rgb, 2.4);
     rgb = u_outsetmat * rgb;
+    rgb = vibrance(rgb, u_vibrance);
     rgb = clamp(rgb, 0.0, 1.0);
     rgb = srgbOETF(rgb);
     return rgb;

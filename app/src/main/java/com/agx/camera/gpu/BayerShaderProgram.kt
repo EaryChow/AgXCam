@@ -37,6 +37,7 @@ class BayerShaderProgram {
     private var uContrastLoc = 0
     private var uToeLoc = 0
     private var uShoulderLoc = 0
+    private var uVibranceLoc = 0
 
     private var uBlackLevelPatternLoc = 0
     private var uBayerColorMapLoc = 0
@@ -113,6 +114,7 @@ class BayerShaderProgram {
         uContrastLoc = GLES20.glGetUniformLocation(programId, "u_contrast")
         uToeLoc = GLES20.glGetUniformLocation(programId, "u_toe")
         uShoulderLoc = GLES20.glGetUniformLocation(programId, "u_shoulder")
+        uVibranceLoc = GLES20.glGetUniformLocation(programId, "u_vibrance")
 
         uBlackLevelPatternLoc = GLES20.glGetUniformLocation(programId, "u_black_level_pattern")
         uBayerColorMapLoc = GLES20.glGetUniformLocation(programId, "u_bayer_color_map")
@@ -217,6 +219,7 @@ class BayerShaderProgram {
         logMin: Float, logMax: Float,
         logMidgray: Float, displayMidgray: Float,
         contrast: Float, toe: Float, shoulder: Float,
+        vibrance: Float,
         blackLevelPattern: IntArray,
         bayerColorMap: IntArray,
         bitDepth: Int,
@@ -252,6 +255,7 @@ class BayerShaderProgram {
         GLES20.glUniform1f(uContrastLoc, contrast)
         GLES20.glUniform1f(uToeLoc, toe)
         GLES20.glUniform1f(uShoulderLoc, shoulder)
+        GLES20.glUniform1f(uVibranceLoc, vibrance)
 
         GLES20.glUniform4i(uBlackLevelPatternLoc,
             blackLevelPattern[0], blackLevelPattern[1],
@@ -407,6 +411,7 @@ uniform float u_display_midgray;
 uniform float u_contrast;
 uniform float u_toe;
 uniform float u_shoulder;
+uniform float u_vibrance;
 
 uniform ivec4 u_black_level_pattern;
 uniform ivec4 u_bayer_color_map;

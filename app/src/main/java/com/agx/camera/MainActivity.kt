@@ -220,6 +220,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var shoulderSlider: SeekBar
     private lateinit var middleGrayLabel: TextView
     private lateinit var middleGraySlider: SeekBar
+    private lateinit var vibranceLabel: TextView
+    private lateinit var vibranceSlider: SeekBar
 
     // Inset
     private lateinit var usePreForPostCb: CheckBox
@@ -298,6 +300,7 @@ class MainActivity : AppCompatActivity() {
         toeLabel = findViewById(R.id.toe_label); toeSlider = findViewById(R.id.toe_slider)
         shoulderLabel = findViewById(R.id.shoulder_label); shoulderSlider = findViewById(R.id.shoulder_slider)
         middleGrayLabel = findViewById(R.id.middle_gray_label); middleGraySlider = findViewById(R.id.middle_gray_slider)
+        vibranceLabel = findViewById(R.id.vibrance_label); vibranceSlider = findViewById(R.id.vibrance_slider)
 
         usePreForPostCb = findViewById(R.id.use_pre_for_post_cb)
         insetRotRLabel = findViewById(R.id.inset_rot_r_label); insetRotRSlider = findViewById(R.id.inset_rot_r_slider)
@@ -600,6 +603,7 @@ class MainActivity : AppCompatActivity() {
                 agxContrast = previewRenderer.agxContrast,
                 agxToe = previewRenderer.agxToe,
                 agxShoulder = previewRenderer.agxShoulder,
+                agxVibrance = previewRenderer.agxVibrance,
                 isFrontCamera = previewRenderer.isFrontCamera
             )
 
@@ -912,6 +916,16 @@ class MainActivity : AppCompatActivity() {
         setupSliderDoubleClickReset(middleGraySlider, ((AgxParams().middleGray - 10f) / 0.15f).toInt().coerceIn(0, 100)) {
             agxParams = agxParams.copy(middleGray = AgxParams().middleGray)
             middleGrayLabel.text = String.format("Middle Gray  %.1f", agxParams.middleGray)
+            uploadAgxUniforms()
+        }
+        vibranceSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
+            agxParams = agxParams.copy(vibrance = -1f + v * 0.01f)
+            vibranceLabel.text = String.format("Vibrance  %.3f", agxParams.vibrance)
+            uploadAgxUniforms()
+        })
+        setupSliderDoubleClickReset(vibranceSlider, ((AgxParams().vibrance + 1f) / 0.01f).toInt().coerceIn(0, 200)) {
+            agxParams = agxParams.copy(vibrance = AgxParams().vibrance)
+            vibranceLabel.text = String.format("Vibrance  %.3f", agxParams.vibrance)
             uploadAgxUniforms()
         }
 
@@ -1289,6 +1303,8 @@ class MainActivity : AppCompatActivity() {
         shoulderLabel.text = String.format("Shoulder  %.1f", agxParams.shoulder)
         middleGraySlider.progress = ((agxParams.middleGray - 10f) / 0.15f).toInt().coerceIn(0, 100)
         middleGrayLabel.text = String.format("Middle Gray  %.1f", agxParams.middleGray)
+        vibranceSlider.progress = ((agxParams.vibrance + 1f) / 0.01f).toInt().coerceIn(0, 200)
+        vibranceLabel.text = String.format("Vibrance  %.3f", agxParams.vibrance)
 
         usePreForPostCb.isChecked = agxParams.usePreForPost
         outsetSection.visibility = if (agxParams.usePreForPost) View.GONE else View.VISIBLE
@@ -2600,6 +2616,7 @@ class MainActivity : AppCompatActivity() {
         previewRenderer.agxContrast = agxParams.contrast
         previewRenderer.agxToe = agxParams.toe
         previewRenderer.agxShoulder = agxParams.shoulder
+        previewRenderer.agxVibrance = agxParams.vibrance
         previewRenderer.bayerNrStrength = agxParams.nrStrength
     }
 
@@ -2982,6 +2999,7 @@ override fun onResume() {
         val agxContrast: Float,
         val agxToe: Float,
         val agxShoulder: Float,
+        val agxVibrance: Float,
         val isFrontCamera: Boolean = false
     ) {
         override fun equals(other: Any?) = this === other

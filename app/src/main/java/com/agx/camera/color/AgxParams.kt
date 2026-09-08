@@ -11,6 +11,7 @@ data class AgxParams(
     val purityBoost: FloatArray = floatArrayOf(10.0f, 30.0f, 10.0f),
     val tintingScale: Float = 0f,
     val tintingHue: Float = 0f,
+    val vibrance: Float = 0.5f,
     val nrStrength: Float = 0f,
     val usePreForPost: Boolean = false
 ) {
@@ -25,11 +26,12 @@ data class AgxParams(
     )
 
     companion object {
-        fun fromInsetParams(p: AgxPrecomputer.InsetParams, contrast: Float = 2.4f, toe: Float = 1.5f, shoulder: Float = 1.5f, middleGray: Float = 18f, nrStrength: Float = 0f) = AgxParams(
+        fun fromInsetParams(p: AgxPrecomputer.InsetParams, contrast: Float = 2.4f, toe: Float = 1.5f, shoulder: Float = 1.5f, middleGray: Float = 18f, vibrance: Float = 0.5f, nrStrength: Float = 0f) = AgxParams(
             contrast = contrast,
             toe = toe,
             shoulder = shoulder,
             middleGray = middleGray,
+            vibrance = vibrance,
             rotation = p.rotation.copyOf(),
             attenuation = p.attenuation.copyOf(),
             reverseRotation = p.reverseRotation.copyOf(),

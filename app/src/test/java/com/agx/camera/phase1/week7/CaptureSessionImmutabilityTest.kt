@@ -27,7 +27,8 @@ class CaptureSessionImmutabilityTest {
         agxDisplayMidgray = 0.18f,
         agxContrast = 1.0f,
         agxToe = 0.5f,
-        agxShoulder = 0.5f
+        agxShoulder = 0.5f,
+        agxVibrance = 0.5f
     )
 
     @Test
@@ -83,6 +84,7 @@ class CaptureSessionImmutabilityTest {
         assertEquals(1.0f, session.agxContrast, 0.001f)
         assertEquals(0.5f, session.agxToe, 0.001f)
         assertEquals(0.5f, session.agxShoulder, 0.001f)
+        assertEquals(0.5f, session.agxVibrance, 0.001f)
     }
 
     @Test
