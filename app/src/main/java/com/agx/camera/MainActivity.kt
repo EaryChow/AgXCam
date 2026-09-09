@@ -2852,7 +2852,7 @@ override fun onResume() {
         }.start()
     }
 
-    /** Encodes the given RGB bitmap through the AGX tone curve and demosaic pipeline. */
+    /** Encodes the already-processed bitmap to JPEG and builds capture EXIF metadata. */
     private fun encodeCaptureBitmap(bitmap: Bitmap, session: CaptureSession): Pair<ByteArray, CaptureMetadata> {
         val activeLens = lensManager.activeLens ?: lensManager.selectPrimary()
         val chars = activeLens?.let { lensManager.getCharacteristicsForLens(it) }
