@@ -342,7 +342,7 @@
                     android:background="#88333333"
                     android:gravity="center"
                     android:paddingHorizontal="8dp"
-                    android:text="A"
+                    android:text="AE"
                     android:textColor="#FFFFFFFF"
                     android:textSize="10sp"
                     android:clickable="true"
@@ -395,6 +395,32 @@
                     android:layout_height="0dp"
                     android:layout_weight="1" />
 
+                <!-- Manual-focus (AF/MF) toggle: tapping it reveals the circular A
+                     switch and the focus roller popup, which are overlays positioned
+                     above this button. Mirrored across the shutter from the EV PP
+                     button by positionFocusControls. -->
+                <LinearLayout
+                    android:id="@+id/focus_controls"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <TextView
+                        android:id="@+id/focus_mode_button"
+                        android:layout_width="wrap_content"
+                        android:layout_height="28dp"
+                        android:background="#88333333"
+                        android:gravity="center"
+                        android:paddingHorizontal="8dp"
+                        android:text="AF"
+                        android:textColor="#FFFFFFFF"
+                        android:textSize="10sp"
+                        android:clickable="true"
+                        android:focusable="true" />
+                </LinearLayout>
+
                 <LinearLayout
                     android:id="@+id/lens_selector"
                     android:layout_width="wrap_content"
@@ -426,6 +452,23 @@
             android:textColor="#88FFFFFF"
             android:textSize="10sp" />
     </LinearLayout>
+
+    <!-- Circular A/M focus switch: appears above the AF/MF button when the focus
+         panel is open. Smaller than the AF button; toggles auto vs manual focus.
+         Positioned dynamically in positionFocusControls. -->
+    <TextView
+        android:id="@+id/focus_mode_circle"
+        android:layout_width="20dp"
+        android:layout_height="20dp"
+        android:background="@drawable/bg_circle_button"
+        android:gravity="center"
+        android:text="A"
+        android:textColor="#FFFFFFFF"
+        android:textSize="8sp"
+        android:textStyle="bold"
+        android:visibility="gone"
+        android:clickable="true"
+        android:focusable="true" />
 
     <!-- ISO Popup — fixed center dot + scrolling number strip, positioned dynamically above label -->
     <FrameLayout
@@ -485,6 +528,27 @@
 
         <com.agx.camera.ui.ScrollingIndexBar
             android:id="@+id/ev_pp_roller"
+            android:layout_width="match_parent"
+            android:layout_height="120dp"
+            android:layout_gravity="center" />
+    </FrameLayout>
+
+    <!-- Focus Popup (MF) — fixed center dot + scrolling focus-distance strip, same style as ISO -->
+    <FrameLayout
+        android:id="@+id/focus_popup"
+        android:layout_width="88dp"
+        android:layout_height="240dp"
+        android:visibility="gone">
+
+        <View
+            android:id="@+id/focus_line"
+            android:layout_width="1dp"
+            android:layout_height="120dp"
+            android:layout_gravity="center"
+            android:background="#44FFFFFF" />
+
+        <com.agx.camera.ui.ScrollingIndexBar
+            android:id="@+id/focus_roller"
             android:layout_width="match_parent"
             android:layout_height="120dp"
             android:layout_gravity="center" />

@@ -146,6 +146,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var evSliderContainer: FrameLayout
     private lateinit var evSeekBarVertical: SeekBar
 
+    // Manual Focus (AF/MF toggle)
+    private lateinit var focusControls: View
+    private lateinit var focusModeButton: TextView
+    private lateinit var focusModeCircle: TextView
+    private lateinit var focusPopup: View
+    private lateinit var focusRoller: ScrollingIndexBar
+    // Panel open = the circular A toggle + focus roller popup are shown; toggling A/M
+    // switches auto focus (A) vs manual focus (M) while the panel stays visible.
+    private var focusPanelOpen = false
+    private var isManualFocus = false
+    private var focusRollerConfigured = false
+
     private var postProcessingEv = 1.5f
 
     private var evPpRollerConfigured = false
@@ -363,6 +375,12 @@ class MainActivity : AppCompatActivity() {
         evSeekBar = findViewById(R.id.ev_seekbar)
         evSliderContainer = findViewById(R.id.ev_slider_container)
         evSeekBarVertical = findViewById(R.id.ev_seekbar_vertical)
+
+        focusControls = findViewById(R.id.focus_controls)
+        focusModeButton = findViewById(R.id.focus_mode_button)
+        focusModeCircle = findViewById(R.id.focus_mode_circle)
+        focusPopup = findViewById(R.id.focus_popup)
+        focusRoller = findViewById(R.id.focus_roller)
 
         if (BuildConfig.AGX_ENABLE_YUV_FALLBACK) {
             devBanner.visibility = View.VISIBLE
@@ -651,7 +669,7 @@ class MainActivity : AppCompatActivity() {
                     settingsPanel.visibility = View.GONE
                     return@setOnTouchListener true
                 }
-                if (!autofocusController.isLocked && currentLensCanTapToFocus) {
+                if (!isManualFocus && !autofocusController.isLocked && currentLensCanTapToFocus) {
                     focusDragging = false
                     aeDragging = false
                     focusDragStartX = event.x
@@ -669,6 +687,23 @@ class MainActivity : AppCompatActivity() {
                         showFocusIndicator(event.x, event.y)
                         applyFocusPoint(event.x, event.y)
                     }
+                } else if (isManualFocus) {
+                    // MF: focus is frozen, but the auto-exposure metering region can
+                    // still be re-positioned (tap = move it, grab the AE strip/bulb =
+                    // drag it). Manual exposure has no AE region to move.
+                    pendingGrabMode = null
+                    if (!isManualMode) {
+                        if (aeIndicator.visibility == View.VISIBLE && aeGrabArea(event.x, event.y)) {
+                            pendingGrabMode = IndicatorDragMode.AE
+                        } else {
+                            showAeIndicator(event.x, event.y)
+                            applyAePoint(event.x, event.y)
+                            // Keep the EV slider anchored to the AE indicator.
+                            if (evSliderContainer?.visibility == View.VISIBLE) {
+                                positionEvSliderAt()
+                            }
+                        }
+                    }
                 }
                 return@setOnTouchListener true
             }
@@ -678,17 +713,26 @@ class MainActivity : AppCompatActivity() {
                 // grabbed part decides which one moves: the overlap / circle area
                 // drags focus, the lower AE strip or light bulb drags exposure.
                 if (!isScaling && !autofocusController.isLocked &&
-                    !focusDragging && !aeDragging && focusIndicator.visibility == View.VISIBLE) {
+                    !focusDragging && !aeDragging &&
+                    (focusIndicator.visibility == View.VISIBLE || aeIndicator.visibility == View.VISIBLE)) {
                     val slop = ViewConfiguration.get(this).scaledTouchSlop
                     if (Math.abs(event.x - focusDragStartX) > slop ||
                         Math.abs(event.y - focusDragStartY) > slop) {
-                        when (pendingGrabMode ?: dragGrabMode(focusDragStartX, focusDragStartY)) {
-                            IndicatorDragMode.FOCUS -> focusDragging = true
-                            IndicatorDragMode.AE -> aeDragging = true
-                            null -> {}
-                        }
-                        if (focusDragging || aeDragging) {
-                            focusIndicatorHandler.removeCallbacks(focusIndicatorHideRunnable)
+                        if (isManualFocus) {
+                            // MF: only the AE strip/bulb is draggable.
+                            if (pendingGrabMode == IndicatorDragMode.AE) {
+                                aeDragging = true
+                                focusIndicatorHandler.removeCallbacks(focusIndicatorHideRunnable)
+                            }
+                        } else {
+                            when (pendingGrabMode ?: dragGrabMode(focusDragStartX, focusDragStartY)) {
+                                IndicatorDragMode.FOCUS -> focusDragging = true
+                                IndicatorDragMode.AE -> aeDragging = true
+                                null -> {}
+                            }
+                            if (focusDragging || aeDragging) {
+                                focusIndicatorHandler.removeCallbacks(focusIndicatorHideRunnable)
+                            }
                         }
                     }
                 }
@@ -716,14 +760,15 @@ class MainActivity : AppCompatActivity() {
                 // A grab that never became a drag is a tap on the indicator:
                 // re-center both and focus there.
                 if (event.action == MotionEvent.ACTION_UP && !dragJustEnded &&
-                    pendingGrabMode != null && !autofocusController.isLocked &&
+                    pendingGrabMode != null && !isManualFocus && !autofocusController.isLocked &&
                     currentLensCanTapToFocus) {
                     showFocusIndicator(event.x, event.y)
                     applyFocusPoint(event.x, event.y)
                 }
                 pendingGrabMode = null
-                // Timeout restarts counting from 0 after the drag.
-                if (dragJustEnded && focusIndicatorTimeoutMs > 0 && !autofocusController.isLocked) {
+                // Timeout restarts counting from 0 after the drag (never in MF: the AE
+                // indicator stays while focus is manual).
+                if (dragJustEnded && focusIndicatorTimeoutMs > 0 && !autofocusController.isLocked && !isManualFocus) {
                     focusIndicatorHandler.postDelayed(focusIndicatorHideRunnable, focusIndicatorTimeoutMs)
                 }
             }
@@ -1575,6 +1620,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** MF-mode AE hit test: the AE rectangle or its bulb (no focus indicator present). */
+    private fun aeGrabArea(touchX: Float, touchY: Float): Boolean {
+        val aeHalfW = aeRectWidthPx() / 2f
+        val aeHalfH = aeRectHeightPx() / 2f
+        val bulbSize = 14 * resources.displayMetrics.density
+        val bulbGap = 2 * resources.displayMetrics.density
+        val aeTop = aeCenterY - aeHalfH
+        val bulbLeft = aeCenterX - bulbSize / 2f
+        val bulbTop = aeTop + aeRectHeightPx() + bulbGap
+        val inRect = touchX >= aeCenterX - aeHalfW && touchX <= aeCenterX + aeHalfW &&
+            touchY >= aeCenterY - aeHalfH && touchY <= aeCenterY + aeHalfH
+        val inBulb = touchX >= bulbLeft && touchX <= bulbLeft + bulbSize &&
+            touchY >= bulbTop && touchY <= bulbTop + bulbSize
+        return inRect || inBulb
+    }
+
     private fun positionEvSliderAt() {
         // Anchor to the auto-exposure indicator: center vertically on the AE
         // center, offset right of it.
@@ -2177,11 +2238,22 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     enableTapToFocus()
                 }
-                // Initial focus indicator at center
-                val cx = textureView.width / 2f
-                val cy = textureView.height / 2f
-                showFocusIndicator(cx, cy)
-                applyFocusPoint(cx, cy)
+                // Re-apply manual focus to the fresh session. If the user was in the
+                // focus panel, resume it in the same mode (AF or MF); otherwise reset
+                // to auto focus and re-seed the center focus point.
+                if (focusPanelOpen) {
+                    if (isManualFocus) {
+                        camera2Manager.setManualFocus(focusRollerDistance())
+                    }
+                    updateManualFocusUI()
+                } else {
+                    isManualFocus = false
+                    camera2Manager.resetAutoFocus()
+                    val cx = textureView.width / 2f
+                    val cy = textureView.height / 2f
+                    showFocusIndicator(cx, cy)
+                    applyFocusPoint(cx, cy)
+                }
             }
         }
 
@@ -3049,6 +3121,12 @@ override fun onResume() {
         evPopup = findViewById(R.id.ev_popup)
         evSeekBar = findViewById(R.id.ev_seekbar)
 
+        focusControls = findViewById(R.id.focus_controls)
+        focusModeButton = findViewById(R.id.focus_mode_button)
+        focusModeCircle = findViewById(R.id.focus_mode_circle)
+        focusPopup = findViewById(R.id.focus_popup)
+        focusRoller = findViewById(R.id.focus_roller)
+
         amToggleButton.setOnClickListener {
             isManualMode = !isManualMode
             updateManualModeUI(isManualMode)
@@ -3151,11 +3229,80 @@ override fun onResume() {
         }
         shutterRoller.onIndexChange = { updateManualExposure() }
 
+        // Manual-focus (AF/MF) panel. Tapping the AF button opens the panel, showing
+        // the circular A switch (above the button) and the focus roller popup (above
+        // the circle) WITHOUT changing the focus mode — the camera stays in auto
+        // focus (A). The circular A is the switch: tapping it toggles auto (A,
+        // roller disabled) vs manual focus (M, dimmed A, roller enabled), and the
+        // AF button text changes to MF. Tapping the AF button again closes the
+        // panel and returns to auto focus.
+        focusModeButton.setOnClickListener {
+            if (!cameraReady) return@setOnClickListener
+            if (focusPanelOpen) {
+                focusPanelOpen = false
+                if (isManualFocus) {
+                    isManualFocus = false
+                    camera2Manager.resetAutoFocus()
+                }
+            } else {
+                val minFocus = camera2Manager.minFocusDistance
+                if (minFocus <= 0f) {
+                    showLensWarning("Manual focus not supported on this lens")
+                    return@setOnClickListener
+                }
+                // A locked AE/AF hold would fight the manual-focus override; release
+                // the lock so MF owns the lens and auto focus resumes on exit.
+                if (autofocusController.isLocked) autofocusController.unlock()
+                val startDistance = (camera2Manager.lastAutoFocusDistanceDiopters ?: 0f)
+                    .coerceIn(0f, minFocus)
+                focusRoller.setIndex(distanceToRollerIndex(startDistance))
+                focusPanelOpen = true
+            }
+            updateManualFocusUI()
+        }
+
+        // Inside the panel: switch between auto focus (A, full opacity, roller
+        // disabled) and manual focus (M, dimmed A, roller enabled).
+        focusModeCircle.setOnClickListener {
+            if (!cameraReady || !focusPanelOpen) return@setOnClickListener
+            isManualFocus = !isManualFocus
+            if (isManualFocus) {
+                // Enter manual focus at the last auto focus value: re-seed the roller
+                // from the most recent auto focus distance before holding the lens.
+                val minFocus = camera2Manager.minFocusDistance
+                if (minFocus > 0f) {
+                    val lastDistance = (camera2Manager.lastAutoFocusDistanceDiopters ?: 0f)
+                        .coerceIn(0f, minFocus)
+                    focusRoller.setIndex(distanceToRollerIndex(lastDistance))
+                }
+                camera2Manager.setManualFocus(focusRollerDistance())
+            } else {
+                camera2Manager.resetAutoFocus()
+            }
+            updateManualFocusUI()
+        }
+
+        focusRoller.spacingPx = 14f * resources.displayMetrics.density
+        focusRoller.sensitivity = 7f
+        focusRoller.hapticEnabled = false
+        focusRoller.isHapticFeedbackEnabled = false
+        focusRoller.maxIndex = FOCUS_ROLLER_MAX_INDEX
+        // Double-tap the roller to reset to the middle of the focus range.
+        focusRoller.resetIndex = FOCUS_ROLLER_MAX_INDEX / 2
+        if (!focusRollerConfigured) {
+            focusRoller.setIndex(FOCUS_ROLLER_MAX_INDEX / 2)
+            focusRollerConfigured = true
+        }
+        focusRoller.labelFormatter = { i -> focusLabelForIndex(i) }
+        focusRoller.onIndexChange = { applyManualFocusRoller(it) }
+
         updateManualModeUI()
+        updateManualFocusUI()
+        positionFocusControls()
     }
 
     private fun updateManualModeUI(syncToAuto: Boolean = false) {
-        amToggleButton.text = if (isManualMode) "M" else "A"
+        amToggleButton.text = if (isManualMode) "ME" else "AE"
         isoRoller.isEnabled = isManualMode
         shutterRoller.isEnabled = isManualMode
         isoRoller.alpha = if (isManualMode) 1.0f else 0.4f
@@ -3181,6 +3328,97 @@ override fun onResume() {
         }
     }
 
+    private fun updateManualFocusUI() {
+        focusModeButton.text = if (isManualFocus) "MF" else "AF"
+        focusModeCircle.alpha = if (isManualFocus) 0.4f else 1.0f
+        focusRoller.isEnabled = isManualFocus
+        focusRoller.alpha = if (isManualFocus) 1.0f else 0.4f
+        focusModeCircle.visibility = if (focusPanelOpen) View.VISIBLE else View.GONE
+        focusPopup.visibility = if (focusPanelOpen) View.VISIBLE else View.GONE
+        positionFocusControls()
+        // In MF the focus indicator is hidden; the AE indicator stays so exposure
+        // metering readout keeps working.
+        if (isManualFocus) {
+            focusIndicatorHandler.removeCallbacks(focusIndicatorHideRunnable)
+            focusIndicator.animate().cancel()
+            focusIndicator.visibility = View.GONE
+            focusIndicator.alpha = 1f
+            aeAfLockButton.animate().cancel()
+            aeAfLockButton.visibility = View.GONE
+            aeAfLockButton.alpha = 1f
+        }
+    }
+
+    /** Open the focus roller popup above the AF/MF button (same geometry as ISO). */
+    /**
+     * Mirror the AF/MF button across the shutter center from the EV PP overlay, so
+     * the focus button sits at the same distance from the shutter as the EV PP
+     * button, and (when the panel is open) stack the circular A switch and the
+     * focus roller popup above it. Runs after layout since the left-side overlays'
+     * widths (ISO/shutter readouts) move the EV PP center.
+     */
+    private fun positionFocusControls() {
+        focusControls.post {
+            val row = focusControls.parent as? View ?: return@post
+            if (row.width <= 0 || evPpOverlay.width <= 0) return@post
+            val rowCenter = row.width / 2f
+            val evCenter = evPpOverlay.x + evPpOverlay.width / 2f
+            val mirrorCenter = 2f * rowCenter - evCenter
+            focusControls.translationX = mirrorCenter - focusControls.width / 2f - focusControls.left
+            if (!focusPanelOpen) return@post
+            if (focusModeCircle.width <= 0 || focusPopup.width <= 0) {
+                focusControls.post { positionFocusControls() }
+                return@post
+            }
+            val root = focusModeCircle.parent as? View ?: return@post
+            val rowLoc = IntArray(2)
+            row.getLocationOnScreen(rowLoc)
+            val rootLoc = IntArray(2)
+            root.getLocationOnScreen(rootLoc)
+            val density = focusControls.resources.displayMetrics.density
+            val gapPx = 4 * density
+            val lineBottomOffsetPx = 180 * density
+            // Button center/top in row coordinates (translationX already applied).
+            val btnCenterRow = focusControls.left + focusControls.width / 2f + focusControls.translationX
+            val btnTopRow = focusControls.top.toFloat() + focusControls.translationY
+            val btnCenterX = rowLoc[0] + btnCenterRow - rootLoc[0]
+            val btnTopY = rowLoc[1] + btnTopRow - rootLoc[1]
+            val circleW = focusModeCircle.width.toFloat()
+            val circleH = focusModeCircle.height.toFloat()
+            // Circular A switch centered over the button, just above its top.
+            focusModeCircle.x = btnCenterX - circleW / 2f
+            focusModeCircle.y = btnTopY - circleH - gapPx
+            // Roller popup centered over the button, with the roller (bottom 180dp of
+            // the strip) ending just above the circle.
+            focusPopup.x = btnCenterX - focusPopup.width / 2f
+            focusPopup.y = btnTopY - circleH - gapPx - lineBottomOffsetPx - gapPx
+        }
+    }
+
+    private fun distanceToRollerIndex(distance: Float): Int {
+        val minFocus = camera2Manager.minFocusDistance
+        if (minFocus <= 0f) return 0
+        return Math.round(distance / minFocus * FOCUS_ROLLER_MAX_INDEX)
+            .coerceIn(0, FOCUS_ROLLER_MAX_INDEX)
+    }
+
+    private fun focusRollerDistance(): Float {
+        val minFocus = camera2Manager.minFocusDistance
+        if (minFocus <= 0f) return 0f
+        return focusRoller.index.toFloat() / FOCUS_ROLLER_MAX_INDEX * minFocus
+    }
+
+    private fun focusLabelForIndex(index: Int): String {
+        val minFocus = camera2Manager.minFocusDistance
+        if (minFocus <= 0f) return ""
+        return String.format("%.1f", index.toFloat() / FOCUS_ROLLER_MAX_INDEX * minFocus)
+    }
+
+    private fun applyManualFocusRoller(index: Int) {
+        if (!isManualFocus) return
+        camera2Manager.setManualFocus(focusRollerDistance())
+    }
+
     private fun syncSlidersToAutoValues() {
         val isoVals = camera2Manager.availableIsoValues
         val shutterVals = camera2Manager.availableShutterSpeedsNs
@@ -3203,6 +3441,7 @@ override fun onResume() {
             isoOverlay.text = "ISO $iso"
             shutterOverlay.text = formatShutterSpeed(shutterNs)
         }
+        positionFocusControls()
     }
 
     private fun updateManualExposure() {
@@ -3211,6 +3450,7 @@ override fun onResume() {
         isoOverlay.text = "ISO $iso"
         shutterOverlay.text = formatShutterSpeed(expNs)
         camera2Manager.setManualExposure(iso, expNs)
+        positionFocusControls()
     }
 
     private fun isoFromIndex(index: Int): Int {
@@ -3310,6 +3550,7 @@ override fun onResume() {
         previewRenderer.exposureEv = postProcessingEv
         evPpOverlay.text = String.format("EV %+.1f", postProcessingEv)
         previewRenderer.requestRender()
+        positionFocusControls()
     }
 
     // Permanent red warning: RAW-unsupported devices already get one; RAW-capable
@@ -3344,6 +3585,7 @@ override fun onResume() {
     companion object {
         private const val TAG = "MainActivity"
         private const val REQUEST_CAMERA = 100
+        private const val FOCUS_ROLLER_MAX_INDEX = 100
         private const val PREF_PREVIEW_RES_CAP = "preview_res_cap"
         private const val PREF_FOCUS_TIMEOUT = "focus_indicator_timeout"
         private const val PREF_STARTUP_PRESET = "startup_preset"

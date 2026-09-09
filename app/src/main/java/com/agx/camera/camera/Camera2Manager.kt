@@ -114,6 +114,18 @@ class Camera2Manager(private val context: Context) {
     // Latest auto-focus lens distance (diopters), used to freeze focus on lock
     private var lastAutoFocusDistance: Float? = null
 
+    // Manual focus (AF/MF toggle): when enabled, AF is driven to AF_MODE_OFF +
+    // LENS_FOCUS_DISTANCE from the focus roller instead of any controller.
+    var isManualFocus = false
+        private set
+    private var currentManualFocusDistance = 0f
+
+    /** Device minimum focus distance in diopters (0 = no MF support, fixed lens). */
+    val minFocusDistance: Float get() = deviceMinFocusDistance
+
+    /** Last auto-focus lens position in diopters, used as the MF roller start. */
+    val lastAutoFocusDistanceDiopters: Float? get() = lastAutoFocusDistance
+
     // Device region capabilities (set on session open)
     private var deviceMaxAfRegions = 0
     private var deviceMaxAeRegions = 0
@@ -520,11 +532,13 @@ class Camera2Manager(private val context: Context) {
         val camera = cameraDevice ?: return
         val session = captureSession ?: return
 
-        // Focus behaves the same in manual mode: auto when unlocked, frozen when locked
-        val frozenLens = if (focusLocked && deviceMinFocusDistance > 0f) {
-            lastAutoFocusDistance?.coerceIn(0f, deviceMinFocusDistance)
+        // Focus behaves the same in manual mode: auto when unlocked, frozen when locked,
+        // and user-driven (LENS_FOCUS_DISTANCE) when the AF/MF toggle is in manual focus.
+        val frozenLens = if (deviceMinFocusDistance > 0f) {
+            val distance = if (isManualFocus) currentManualFocusDistance else lastAutoFocusDistance
+            if (isManualFocus || focusLocked) distance?.coerceIn(0f, deviceMinFocusDistance) else null
         } else null
-        val useManualHold = focusLocked && frozenLens != null
+        val useManualHold = frozenLens != null
         val afMode = safeAfMode(
             if (useManualHold) CaptureRequest.CONTROL_AF_MODE_OFF
             else CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
@@ -692,7 +706,9 @@ class Camera2Manager(private val context: Context) {
     /** Live-drag: retarget the independent AE region without restarting any scan. */
     fun moveAeRegion(rect: MeteringRectangle) {
         if (isManualExposure || focusLocked) return
-        if (meteringRegions == null) return
+        // Outside MF a live AE drag needs a parked focus region to build on; in MF the
+        // AE region can float freely since focus is frozen.
+        if (meteringRegions == null && !isManualFocus) return
         aeRegions = arrayOf(rect)
         applyPreviewRequest(log = false)
     }
@@ -808,6 +824,36 @@ class Camera2Manager(private val context: Context) {
         applyPreviewRequest()
     }
 
+    // Drive the lens to an explicit focus distance (diopters). Switches to
+    // AF_MODE_OFF + LENS_FOCUS_DISTANCE and cancels any in-flight tap scan or
+    // focus lock; independent AE metering regions are preserved so the AE
+    // indicator keeps working in manual focus.
+    fun setManualFocus(distance: Float) {
+        isManualFocus = true
+        currentManualFocusDistance = distance
+        tapFocusHeld = false
+        focusLocked = false
+        isAfScanning = false
+        scanTriggerFired = false
+        // The AE indicator stays visible in manual focus: keep metering the point
+        // it was last parked on, even if that was the tapped focus region.
+        if (aeRegions == null && meteringRegions != null) {
+            aeRegions = meteringRegions
+        }
+        meteringRegions = null
+        ++focusGeneration
+        CrashLogger.log(TAG, "setManualFocus distance=$distance minDistance=$deviceMinFocusDistance")
+        applyPreviewRequest()
+    }
+
+    // Return to auto focus (CONTINUOUS_PICTURE unless a tap region is parked).
+    fun resetAutoFocus() {
+        if (!isManualFocus) return
+        isManualFocus = false
+        CrashLogger.log(TAG, "resetAutoFocus")
+        applyPreviewRequest()
+    }
+
     private fun applyPreviewRequest(log: Boolean = true) {
         if (isManualExposure) {
             setManualExposure(currentManualIso, currentManualExposureNs)
@@ -816,11 +862,14 @@ class Camera2Manager(private val context: Context) {
         val camera = cameraDevice ?: run { CrashLogger.log(TAG, "applyPreviewRequest: cameraDevice null"); return }
         val session = captureSession ?: run { CrashLogger.log(TAG, "applyPreviewRequest: session null"); return }
 
-        val frozenLens = if (focusLocked && deviceMinFocusDistance > 0f) {
-            lastAutoFocusDistance?.coerceIn(0f, deviceMinFocusDistance)
+        val frozenLens = if ((isManualFocus || focusLocked) && deviceMinFocusDistance > 0f) {
+            // Manual focus pins the roller distance; focus-lock freezes the last
+            // auto-focus position. Both switch the HAL to AF_MODE_OFF + LENS_FOCUS_DISTANCE.
+            val distance = if (isManualFocus) currentManualFocusDistance else lastAutoFocusDistance
+            distance?.coerceIn(0f, deviceMinFocusDistance)
         } else null
         // Only drop into manual focus when we can actually pin a distance.
-        val useManualHold = focusLocked && frozenLens != null
+        val useManualHold = frozenLens != null
         // Active tap-trigger scan: keep emitting AUTO + region on the repeating
         // stream so the scan is driven at full frame rate. The AF trigger START
         // is carried once (first frame); later re-applications omit the trigger.
@@ -1300,7 +1349,7 @@ CaptureRequest.CONTROL_AWB_MODE_SHADE -> "SHADE"
         override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
             val afState = result.get(CaptureResult.CONTROL_AF_STATE)
             val lensFocusD = result.get(CaptureResult.LENS_FOCUS_DISTANCE)
-            if (lensFocusD != null && afState != CaptureResult.CONTROL_AF_STATE_PASSIVE_SCAN &&
+            if (lensFocusD != null && !isManualFocus && afState != CaptureResult.CONTROL_AF_STATE_PASSIVE_SCAN &&
                 afState != CaptureResult.CONTROL_AF_STATE_ACTIVE_SCAN) {
                 lastAutoFocusDistance = lensFocusD
             }

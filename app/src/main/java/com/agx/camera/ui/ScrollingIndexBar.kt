@@ -18,16 +18,19 @@ import kotlin.math.ceil
 /**
  * Pure scroll-to-index mapping used by [ScrollingIndexBar].
  *
- * A drag is converted into whole detents of `spacingPx`; the selection index steps by one
- * per detent (haptic tick in the view) and the remainder is carried back so the strip
- * glides continuously with the finger and is always re-centered on the selected index at
- * each detent boundary.
+ * A drag is converted into whole detents of `spacingPx / sensitivity`; the selection index
+ * steps by one per detent (haptic tick in the view) and the remainder is carried back so
+ * the strip glides continuously with the finger and is always re-centered on the selected
+ * index at each detent boundary. A sensitivity > 1 makes each detent cost less finger
+ * movement (faster scroll) without changing the drawn strip spacing.
  */
-class ScrollIndexModel(val maxIndex: Int, val spacingPx: Float) {
+class ScrollIndexModel(val maxIndex: Int, val spacingPx: Float, sensitivity: Float = 1f) {
     var index: Int = 0
         private set
     var shiftPx: Float = 0f
         private set
+
+    private val detentPx: Float = spacingPx / sensitivity.coerceAtLeast(0.01f)
 
     private var gestureAccumPx = 0f
     private var gestureBaseIndex = 0
@@ -51,12 +54,12 @@ class ScrollIndexModel(val maxIndex: Int, val spacingPx: Float) {
     /** Consume a drag delta along the scroll axis (screen px; +down for vertical, +right
      *  for horizontal) and return the new selected index. */
     fun consumeDrag(deltaPx: Float): Int {
-        if (spacingPx <= 0f || maxIndex <= 0) return index
+        if (detentPx <= 0f || maxIndex <= 0) return index
         gestureAccumPx += deltaPx
         val shift = -gestureAccumPx
-        val steps = Math.round(shift / spacingPx)
+        val steps = Math.round(shift / detentPx)
         index = (gestureBaseIndex + steps).coerceIn(0, maxIndex)
-        shiftPx = shift - steps * spacingPx
+        shiftPx = shift - steps * detentPx
         return index
     }
 }
@@ -86,7 +89,7 @@ class ScrollingIndexBar @JvmOverloads constructor(
             if (v != field) {
                 val prevIndex = model.index
                 field = v
-                model = ScrollIndexModel(v, spacingPx)
+                model = ScrollIndexModel(v, spacingPx, sensitivity)
                 model.setIndex(prevIndex)
                 if (resetIndex < 0 || resetIndex > v) resetIndex = v / 2
             }
@@ -102,7 +105,21 @@ class ScrollingIndexBar @JvmOverloads constructor(
             if (v != field) {
                 val prevIndex = model.index
                 field = v
-                model = ScrollIndexModel(maxIndex, v)
+                model = ScrollIndexModel(maxIndex, v, sensitivity)
+                model.setIndex(prevIndex)
+            }
+            invalidate()
+        }
+
+    /** Detent scale: > 1 makes each index step cost less finger movement (faster scroll)
+     *  without changing the drawn strip spacing. */
+    var sensitivity: Float = 1f
+        set(value) {
+            val v = value.coerceAtLeast(0.1f)
+            if (v != field) {
+                val prevIndex = model.index
+                field = v
+                model = ScrollIndexModel(maxIndex, spacingPx, v)
                 model.setIndex(prevIndex)
             }
             invalidate()
@@ -126,7 +143,7 @@ class ScrollingIndexBar @JvmOverloads constructor(
     /** Rotate every label around its own center by this angle (degrees). */
     var perTextRotation: Float = 0f
 
-    private var model: ScrollIndexModel = ScrollIndexModel(maxIndex, spacingPx)
+    private var model: ScrollIndexModel = ScrollIndexModel(maxIndex, spacingPx, sensitivity)
 
     private val tickPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG)
