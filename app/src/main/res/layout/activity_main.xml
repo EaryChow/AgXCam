@@ -240,6 +240,21 @@
                 android:focusable="true" />
         </LinearLayout>
 
+        <!-- Transient mode name pill (flash/WB), auto-dismissing -->
+        <TextView
+            android:id="@+id/mode_label"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal"
+            android:layout_marginTop="6dp"
+            android:background="#DD111111"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="5dp"
+            android:text=""
+            android:textColor="#FFFFFFFF"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
         <!-- Thermal Indicator: top right, same top edge as icons -->
         <TextView
             android:id="@+id/thermal_indicator"

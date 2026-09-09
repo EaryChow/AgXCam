@@ -42,7 +42,12 @@ enum class FlashMode {
                 request.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
             }
             TORCH -> {
-                request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                // Keep auto exposure running with the torch. AE OFF is only
+                // valid when the app drives ISO/exposure itself; without that
+                // the HAL clamps to a short dark exposure on many lenses.
+                val aeMode = if (CaptureRequest.CONTROL_AE_MODE_ON in availableAeModes)
+                    CaptureRequest.CONTROL_AE_MODE_ON else CaptureRequest.CONTROL_AE_MODE_OFF
+                request.set(CaptureRequest.CONTROL_AE_MODE, aeMode)
                 request.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
             }
         }

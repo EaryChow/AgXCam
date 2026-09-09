@@ -104,6 +104,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var rawUnsupportedWarning: TextView
     private lateinit var disconnectBanner: TextView
     private lateinit var flashButton: ImageView
+    private lateinit var modeLabel: TextView
     private lateinit var wbButton: TextView
     private lateinit var awbLockButton: ImageView
     private lateinit var settingsButton: ImageView
@@ -278,6 +279,7 @@ class MainActivity : AppCompatActivity() {
         disconnectBanner = findViewById(R.id.disconnect_banner)
         warningContainer = findViewById(R.id.warningContainer)
         flashButton = findViewById(R.id.flash_button)
+        modeLabel = findViewById(R.id.mode_label)
         wbButton = findViewById(R.id.wb_button)
         awbLockButton = findViewById(R.id.awb_lock_button)
         settingsButton = findViewById(R.id.settings_button)
@@ -512,6 +514,7 @@ class MainActivity : AppCompatActivity() {
         flashButton.setOnClickListener {
             currentFlashMode = currentFlashMode.cycle()
             updateFlashUI()
+            showModeLabel(flashModeDisplayName(currentFlashMode))
             thermalManager.isTorchActive = (currentFlashMode == FlashMode.TORCH)
             if (cameraReady) camera2Manager.setFlashMode(currentFlashMode)
         }
@@ -1392,6 +1395,43 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    private fun flashModeDisplayName(mode: FlashMode): String = when (mode) {
+        FlashMode.OFF -> "Flash Off"
+        FlashMode.AUTO -> "Flash Auto"
+        FlashMode.ON -> "Flash On"
+        FlashMode.TORCH -> "Torch"
+    }
+
+    private fun whiteBalanceDisplayName(mode: WhiteBalanceMode): String = when (mode) {
+        WhiteBalanceMode.AUTO -> "WB Auto"
+        WhiteBalanceMode.KELVIN -> "WB Kelvin"
+        WhiteBalanceMode.DAYLIGHT -> "WB Daylight"
+        WhiteBalanceMode.CLOUDY -> "WB Cloudy"
+        WhiteBalanceMode.INCANDESCENT -> "WB Tungsten"
+        WhiteBalanceMode.FLUORESCENT -> "WB Fluorescent"
+        WhiteBalanceMode.TWILIGHT -> "WB Twilight"
+        WhiteBalanceMode.SHADE -> "WB Shade"
+    }
+
+    private val modeLabelHideRunnable = Runnable {
+        modeLabel.animate().cancel()
+        modeLabel.animate().alpha(0f).setDuration(300).withEndAction {
+            modeLabel.visibility = View.GONE
+        }.start()
+    }
+
+    // Transient mode-name pill: fade in, hold, fade out.
+    private fun showModeLabel(text: String) {
+        if (!::modeLabel.isInitialized) return
+        modeLabel.removeCallbacks(modeLabelHideRunnable)
+        modeLabel.text = text
+        modeLabel.visibility = View.VISIBLE
+        modeLabel.animate().cancel()
+        modeLabel.alpha = 0f
+        modeLabel.animate().alpha(1f).setDuration(150).start()
+        modeLabel.postDelayed(modeLabelHideRunnable, 2000)
+    }
+
     private fun wbModeToCameraMode(mode: WhiteBalanceMode): Int = when (mode) {
         WhiteBalanceMode.AUTO -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_AUTO
         WhiteBalanceMode.KELVIN -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_OFF
@@ -1790,6 +1830,7 @@ class MainActivity : AppCompatActivity() {
                 currentWbMode = wbEnum
                 updateWbUI()
                 syncWbSliders()
+                showModeLabel(whiteBalanceDisplayName(wbEnum))
                 uploadAgxUniforms()
             }
             wbPopup.visibility = View.GONE
@@ -1800,6 +1841,7 @@ class MainActivity : AppCompatActivity() {
             camera2Manager.setWhiteBalanceMode(android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_OFF)
             updateWbUI()
             syncWbSliders()
+            showModeLabel(whiteBalanceDisplayName(WhiteBalanceMode.KELVIN))
             uploadAgxUniforms()
             // Pin HAL WB to the device's fixed D65 reference (DAYLIGHT + AWB_LOCK);
             // applyAwb substitutes it for OFF because vendor HALs ignore OFF.
@@ -2131,6 +2173,9 @@ class MainActivity : AppCompatActivity() {
                 // without this the image would keep the previous session's mode
                 // while the UI shows the restored one.
                 camera2Manager.setWhiteBalanceMode(wbModeToCameraMode(currentWbMode))
+                // Same for flash: the restored per-lens mode drives the icon
+                // but the HAL needs the mode re-applied to this new session.
+                camera2Manager.setFlashMode(currentFlashMode)
                 val lens = lensManager.activeLens
                 if (lens != null) {
                     populateResolutionSpinner(lens)
@@ -2425,12 +2470,20 @@ class MainActivity : AppCompatActivity() {
 
         currentWbMode = WhiteBalanceMode.entries[restored.wbModeOrdinal.coerceIn(0, WhiteBalanceMode.entries.size - 1)]
         kelvinState = KelvinState(restored.kelvin, restored.kelvinTint)
-        currentFlashMode = FlashMode.entries[restored.flashModeOrdinal.coerceIn(0, FlashMode.entries.size - 1)]
+
+        // Flash mode is global, not per-lens: keep the current mode so the
+        // torch does not get dropped when switching to a lens whose saved
+        // state is OFF. The active session re-applies it below.
 
         updateFlashUI()
         updateWbUI()
         syncWbSliders()
         thermalManager.isTorchActive = (currentFlashMode == FlashMode.TORCH)
+        // The fresh session inherits the *previous* session's flash state, so
+        // push the current mode before openCamera builds its first request
+        // (the request itself no-ops until a session exists, but the value
+        // must be set so icon and torch stay in sync).
+        camera2Manager.setFlashMode(currentFlashMode)
         syncAllSliders()
 
         buildLensSelectorUI()

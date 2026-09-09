@@ -495,6 +495,17 @@ class Camera2Manager(private val context: Context) {
         }
     }
 
+    // Manual-exposure requests drive AE/ISO directly; the only flash mode that
+    // still makes sense is TORCH, which must survive the request switch so the
+    // flashlight doesn't die when the user flips to manual exposure.
+    private fun CaptureRequest.Builder.applyFlashForManualExposure() {
+        set(
+            CaptureRequest.FLASH_MODE,
+            if (currentFlashMode == FlashMode.TORCH) CaptureRequest.FLASH_MODE_TORCH
+            else CaptureRequest.FLASH_MODE_OFF
+        )
+    }
+
     fun setExposureCompensation(ev: Int) {
         currentExposureComp = ev
         if (isManualExposure) return
@@ -531,7 +542,7 @@ class Camera2Manager(private val context: Context) {
             }
             set(CaptureRequest.SENSOR_SENSITIVITY, iso)
             set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureTimeNs)
-            set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+            applyFlashForManualExposure()
             applyPreviewCrop()
         }
 
@@ -961,7 +972,7 @@ class Camera2Manager(private val context: Context) {
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
                 set(CaptureRequest.SENSOR_SENSITIVITY, currentManualIso)
                 set(CaptureRequest.SENSOR_EXPOSURE_TIME, currentManualExposureNs)
-                set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                applyFlashForManualExposure()
             } else {
                 currentFlashMode.applyToRequest(this, availableAeModes)
             }
@@ -992,7 +1003,7 @@ class Camera2Manager(private val context: Context) {
                                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
                                 set(CaptureRequest.SENSOR_SENSITIVITY, currentManualIso)
                                 set(CaptureRequest.SENSOR_EXPOSURE_TIME, currentManualExposureNs)
-                                set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                                applyFlashForManualExposure()
                             } else {
                                 currentFlashMode.applyToRequest(this, availableAeModes)
                             }
@@ -1034,7 +1045,7 @@ class Camera2Manager(private val context: Context) {
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
                 set(CaptureRequest.SENSOR_SENSITIVITY, currentManualIso)
                 set(CaptureRequest.SENSOR_EXPOSURE_TIME, currentManualExposureNs)
-                set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                applyFlashForManualExposure()
             } else {
                 currentFlashMode.applyToRequest(this, availableAeModes)
             }
@@ -1067,7 +1078,7 @@ class Camera2Manager(private val context: Context) {
                                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
                                 set(CaptureRequest.SENSOR_SENSITIVITY, currentManualIso)
                                 set(CaptureRequest.SENSOR_EXPOSURE_TIME, currentManualExposureNs)
-                                set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                                applyFlashForManualExposure()
                             } else {
                                 currentFlashMode.applyToRequest(this, availableAeModes)
                             }
@@ -1121,9 +1132,16 @@ class Camera2Manager(private val context: Context) {
             if (isManualExposure) {
                 set(CaptureRequest.SENSOR_SENSITIVITY, currentManualIso)
                 set(CaptureRequest.SENSOR_EXPOSURE_TIME, currentManualExposureNs)
-                set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                applyFlashForManualExposure()
             } else {
                 currentFlashMode.applyToRequest(this, availableAeModes)
+                // ON must fire regardless of AE flash-mode support: override
+                // with a single-shot flash on the still request (the most
+                // device-agnostic way to force one flash at capture).
+                if (currentFlashMode == FlashMode.ON) {
+                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                    set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_SINGLE)
+                }
             }
             applyCropRegion()
         }
