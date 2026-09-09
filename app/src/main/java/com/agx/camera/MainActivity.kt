@@ -120,7 +120,6 @@ class MainActivity : AppCompatActivity() {
     // Shutter / Thermal
     private lateinit var shutterButton: ImageView
     private lateinit var thumbnailButton: ImageView
-    private lateinit var cooldownText: TextView
     private lateinit var shutterStateLabel: TextView
     private lateinit var thermalIndicator: TextView
 
@@ -341,7 +340,6 @@ class MainActivity : AppCompatActivity() {
 
         shutterButton = findViewById(R.id.shutter_button)
         thumbnailButton = findViewById(R.id.thumbnail_button)
-        cooldownText = findViewById(R.id.cooldown_text)
         shutterStateLabel = findViewById(R.id.shutter_state_label)
         thermalIndicator = findViewById(R.id.thermal_indicator)
 
@@ -376,7 +374,7 @@ class MainActivity : AppCompatActivity() {
         presetManager.ensureDefault()
 
         thermalManager = ThermalManager(this)
-        shutterController = ShutterController(mainHandler)
+        shutterController = ShutterController()
         autofocusController = AutofocusController(camera2Manager, mainHandler)
         mediaStoreSaver = MediaStoreSaver(this)
 
@@ -468,17 +466,6 @@ class MainActivity : AppCompatActivity() {
 
         shutterController.onStateChanged = { state ->
             mainHandler.post { updateShutterUI(state) }
-        }
-
-        shutterController.onCooldownTick = { remaining ->
-            mainHandler.post {
-                if (remaining > 0) {
-                    cooldownText.text = "${remaining}s"
-                    cooldownText.visibility = View.VISIBLE
-                } else {
-                    cooldownText.visibility = View.GONE
-                }
-            }
         }
 
         previewRenderer = PreviewRenderer(textureView).apply {
@@ -2757,7 +2744,6 @@ override fun onResume() {
         camera2Manager.stopBackgroundThread()
         cameraReady = false
         previewRenderer.stop()
-        shutterController.cancelCooldown()
     }
 
     override fun onDestroy() {
@@ -2795,18 +2781,12 @@ override fun onResume() {
             ShutterController.State.IDLE -> {
                 shutterButton.isEnabled = true
                 shutterButton.alpha = 1.0f
-                cooldownText.visibility = View.GONE
                 shutterStateLabel.text = ""
             }
             ShutterController.State.CAPTURING -> {
                 shutterButton.isEnabled = false
                 shutterButton.alpha = 0.5f
                 shutterStateLabel.text = "Capturing..."
-            }
-            ShutterController.State.COOLDOWN -> {
-                shutterButton.isEnabled = false
-                shutterButton.alpha = 0.3f
-                shutterStateLabel.text = "Cooling..."
             }
             else -> {}
         }
