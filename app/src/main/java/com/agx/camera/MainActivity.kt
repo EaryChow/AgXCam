@@ -1392,11 +1392,22 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    private fun wbModeToCameraMode(mode: WhiteBalanceMode): Int = when (mode) {
+        WhiteBalanceMode.AUTO -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_AUTO
+        WhiteBalanceMode.KELVIN -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_OFF
+        WhiteBalanceMode.DAYLIGHT -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT
+        WhiteBalanceMode.CLOUDY -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT
+        WhiteBalanceMode.INCANDESCENT -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT
+        WhiteBalanceMode.FLUORESCENT -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT
+        WhiteBalanceMode.TWILIGHT -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_TWILIGHT
+        WhiteBalanceMode.SHADE -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_SHADE
+    }
+
     private fun updateWbUI() {
         wbButton.text = when (currentWbMode) {
             WhiteBalanceMode.AUTO -> "WB"
             WhiteBalanceMode.KELVIN -> "\u00B0K"
-            WhiteBalanceMode.DAYLIGHT -> "Sun"
+            WhiteBalanceMode.DAYLIGHT -> "DAY"
             WhiteBalanceMode.CLOUDY -> "Cld"
             WhiteBalanceMode.INCANDESCENT -> "Tng"
             WhiteBalanceMode.FLUORESCENT -> "Flr"
@@ -2114,11 +2125,12 @@ class MainActivity : AppCompatActivity() {
 
             mainHandler.post {
                 lensSwitchOverlay.visibility = View.GONE
-                if (currentWbMode == WhiteBalanceMode.KELVIN) {
-                    // Restored/current Kelvin mode: re-pin the HAL to the fixed
-                    // D65 reference (DAYLIGHT + AWB_LOCK via applyAwb).
-                    camera2Manager.setWhiteBalanceMode(android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_OFF)
-                }
+                // Re-apply the active WB mode to the fresh session. The HAL mode
+                // (Camera2Manager.currentAwbMode) does not survive a lens switch,
+                // but the restored per-lens WB state lives in currentWbMode;
+                // without this the image would keep the previous session's mode
+                // while the UI shows the restored one.
+                camera2Manager.setWhiteBalanceMode(wbModeToCameraMode(currentWbMode))
                 val lens = lensManager.activeLens
                 if (lens != null) {
                     populateResolutionSpinner(lens)

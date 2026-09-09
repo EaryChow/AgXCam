@@ -477,15 +477,21 @@ class Camera2Manager(private val context: Context) {
 
     private fun CaptureRequest.Builder.applyAwb() {
         if (currentAwbMode == CaptureRequest.CONTROL_AWB_MODE_OFF) {
-            // Kelvin: hold the HAL at its fixed D65 preset and lock AWB so
-            // nothing can re-adapt the white point. The app's relative
-            // Bradford CAT then shifts D65 -> user Kelvin on top of balanced
-            // input, keeping Kelvin fully manual but device-accurate.
+            // Kelvin: hold the HAL at its fixed D65 preset. A fixed preset is
+            // non-adaptive, so no AWB lock is needed; explicitly release any
+            // stray latch so the HAL recomputes at the new mode (otherwise the
+            // previous mode's converged gains persist into Kelvin). The app's
+            // relative Bradford CAT then shifts D65 -> user Kelvin on top of
+            // balanced input, keeping Kelvin fully manual but device-accurate.
             set(CaptureRequest.CONTROL_AWB_MODE, effectiveAwbMode())
-            set(CaptureRequest.CONTROL_AWB_LOCK, true)
+            set(CaptureRequest.CONTROL_AWB_LOCK, effectiveAwbMode() == CaptureRequest.CONTROL_AWB_MODE_AUTO)
         } else {
             set(CaptureRequest.CONTROL_AWB_MODE, currentAwbMode)
-            if (isAwbLocked) set(CaptureRequest.CONTROL_AWB_LOCK, true)
+            // AWB_LOCK is sticky in some HALs: if a Kelvin session left it
+            // latched, the next mode would never recompute. Explicitly set it
+            // every frame so switching modes always re-runs AWB unless the
+            // user locked it in AUTO.
+            set(CaptureRequest.CONTROL_AWB_LOCK, isAwbLocked)
         }
     }
 

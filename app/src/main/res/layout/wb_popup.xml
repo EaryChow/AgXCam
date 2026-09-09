@@ -33,7 +33,7 @@
         android:background="#444444"
         android:gravity="center"
         android:paddingHorizontal="8dp"
-        android:text="Sun"
+        android:text="DAY"
         android:textColor="#FFFFCC00"
         android:textSize="10sp"
         android:clickable="true"
