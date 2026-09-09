@@ -142,23 +142,6 @@ object WhiteBalanceMath {
         )
     }
 
-    fun buildGrayCardSceneLinearTo709(
-        grayCardMatrix: ColorMatrix.Mat3,
-        calibrationMatrix: ColorMatrix.Mat3 = ColorMatrix.identity(),
-        referenceToXyz: ColorMatrix.Mat3 = ColorMatrix.identity()
-    ): ColorMatrix.Mat3 {
-        return ColorMatrix.multiply(
-            ColorMatrix.multiply(
-                ColorMatrix.multiply(
-                    ColorMatrix.xyzToRGB(ColorMatrix.REC709),
-                    referenceToXyz
-                ),
-                grayCardMatrix
-            ),
-            calibrationMatrix
-        )
-    }
-
     fun buildAutoSceneLinearTo709(
         colorCorrectionTransform: android.hardware.camera2.params.ColorSpaceTransform?,
         calibrationMatrix: ColorMatrix.Mat3 = ColorMatrix.identity()

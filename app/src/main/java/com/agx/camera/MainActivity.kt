@@ -58,7 +58,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var thermalManager: ThermalManager
     private lateinit var shutterController: ShutterController
     private lateinit var autofocusController: AutofocusController
-    private lateinit var grayCardSampler: GrayCardSampler
     private lateinit var mediaStoreSaver: MediaStoreSaver
     private lateinit var developerSwitch: DeveloperSwitch
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -377,7 +376,6 @@ class MainActivity : AppCompatActivity() {
         thermalManager = ThermalManager(this)
         shutterController = ShutterController(mainHandler)
         autofocusController = AutofocusController(camera2Manager, mainHandler)
-        grayCardSampler = GrayCardSampler()
         mediaStoreSaver = MediaStoreSaver(this)
 
         // Compute max preview dimensions based on screen resolution
@@ -481,15 +479,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        grayCardSampler.onSampleComplete = { gains ->
-            mainHandler.post {
-                val grayCardMatrix = ColorMatrix.diagonal(gains.gainR, gains.gainG, gains.gainB)
-                val sceneLinearTo709 = WhiteBalanceMath.buildGrayCardSceneLinearTo709(grayCardMatrix)
-                previewRenderer.agxSceneLinearTo709 = sceneLinearTo709.m
-                Toast.makeText(this, "Gray card WB applied", Toast.LENGTH_SHORT).show()
-            }
-        }
-
         previewRenderer = PreviewRenderer(textureView).apply {
             onFirstFrameRendered = { Log.d(TAG, "First frame rendered") }
             onFrameRendered = { ms -> thermalManager.onFrameRendered(ms.toFloat()) }
@@ -575,10 +564,6 @@ class MainActivity : AppCompatActivity() {
             if (shutterController.state != ShutterController.State.IDLE) return@setOnClickListener
             if (thermalManager.isCaptureBlocked) {
                 Toast.makeText(this, "Device too hot — wait for cooldown", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            if (currentWbMode == WhiteBalanceMode.GRAY_CARD && grayCardSampler.isActive) {
-                Toast.makeText(this, "Tap the preview to sample gray card", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
             shutterController.onCaptureSubmitted()
@@ -676,15 +661,7 @@ class MainActivity : AppCompatActivity() {
                     settingsPanel.visibility = View.GONE
                     return@setOnTouchListener true
                 }
-                if (currentWbMode == WhiteBalanceMode.GRAY_CARD && grayCardSampler.isActive) {
-                    grayCardSampler.sample(
-                        previewRenderer.currentYPlane ?: return@setOnTouchListener false,
-                        previewRenderer.currentUPlane ?: return@setOnTouchListener false,
-                        previewRenderer.currentVPlane ?: return@setOnTouchListener false,
-                        previewRenderer.currentYuvWidth, previewRenderer.currentYuvHeight,
-                        event.x, event.y, textureView.width, textureView.height
-                    )
-                } else if (!autofocusController.isLocked && currentLensCanTapToFocus) {
+                if (!autofocusController.isLocked && currentLensCanTapToFocus) {
                     focusDragging = false
                     aeDragging = false
                     focusDragStartX = event.x
@@ -765,14 +742,6 @@ class MainActivity : AppCompatActivity() {
 
         wbButton.setOnClickListener {
             if (cameraReady) showWbPopup()
-        }
-
-        wbButton.setOnLongClickListener {
-            if (currentWbMode == WhiteBalanceMode.GRAY_CARD) {
-                grayCardSampler.activate()
-                Toast.makeText(this, "Tap the preview to sample gray card", Toast.LENGTH_SHORT).show()
-            }
-            true
         }
 
         awbLockButton.setOnClickListener {
@@ -1427,7 +1396,6 @@ class MainActivity : AppCompatActivity() {
         wbButton.text = when (currentWbMode) {
             WhiteBalanceMode.AUTO -> "WB"
             WhiteBalanceMode.KELVIN -> "\u00B0K"
-            WhiteBalanceMode.GRAY_CARD -> "Gry"
             WhiteBalanceMode.DAYLIGHT -> "Sun"
             WhiteBalanceMode.CLOUDY -> "Cld"
             WhiteBalanceMode.INCANDESCENT -> "Tng"
@@ -2608,7 +2576,6 @@ class MainActivity : AppCompatActivity() {
                     "awbMode=$currentWbMode")
                 bradford
             }
-            WhiteBalanceMode.GRAY_CARD -> ColorMatrix.identity()
             WhiteBalanceMode.DAYLIGHT -> ColorMatrix.identity()
             WhiteBalanceMode.CLOUDY -> ColorMatrix.identity()
             WhiteBalanceMode.INCANDESCENT -> ColorMatrix.identity()
