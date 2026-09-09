@@ -130,7 +130,8 @@ class PresetManager(private val context: Context) {
                 tintingScale = p.optDouble("tinting_scale", 0.0).toFloat(),
                 tintingHue = p.optDouble("tinting_hue", 0.0).toFloat(),
                 vibrance = p.optDouble("vibrance", 0.6).toFloat(),
-                usePreForPost = p.optBoolean("use_pre_for_post", false)
+                useRotationForReverse = p.optBoolean("use_rotation_for_reverse", true),
+                useAttenuationForBoost = p.optBoolean("use_attenuation_for_boost", false)
             )
         )
     }
@@ -149,7 +150,8 @@ class PresetManager(private val context: Context) {
             put("tinting_scale", p.tintingScale.toDouble())
             put("tinting_hue", p.tintingHue.toDouble())
             put("vibrance", p.vibrance.toDouble())
-            put("use_pre_for_post", p.usePreForPost)
+            put("use_rotation_for_reverse", p.useRotationForReverse)
+            put("use_attenuation_for_boost", p.useAttenuationForBoost)
         }
         return JSONObject().apply {
             put("name", preset.name)

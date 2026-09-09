@@ -13,12 +13,14 @@ data class AgxParams(
     val tintingHue: Float = 0f,
     val vibrance: Float = 0.6f,
     val nrStrength: Float = 0f,
-    val usePreForPost: Boolean = false
+    val useRotationForReverse: Boolean = true,
+    val useAttenuationForBoost: Boolean = false
 ) {
     fun toInsetParams(): AgxPrecomputer.InsetParams = AgxPrecomputer.InsetParams(
         rotation = rotation.copyOf(),
         attenuation = attenuation.copyOf(),
-        usePreForPost = usePreForPost,
+        useRotationForReverse = useRotationForReverse,
+        useAttenuationForBoost = useAttenuationForBoost,
         reverseRotation = reverseRotation.copyOf(),
         purityBoost = purityBoost.copyOf(),
         tintingScale = tintingScale,
@@ -39,7 +41,8 @@ data class AgxParams(
             tintingScale = p.tintingScale,
             tintingHue = p.tintingHue,
             nrStrength = nrStrength,
-            usePreForPost = p.usePreForPost
+            useRotationForReverse = p.useRotationForReverse,
+            useAttenuationForBoost = p.useAttenuationForBoost
         )
     }
 }

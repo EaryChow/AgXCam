@@ -224,7 +224,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var vibranceSlider: SeekBar
 
     // Inset
-    private lateinit var usePreForPostCb: CheckBox
+    private lateinit var useRotationForReverseCb: CheckBox
+    private lateinit var useAttenuationForBoostCb: CheckBox
     private lateinit var insetRotRLabel: TextView; private lateinit var insetRotRSlider: SeekBar
     private lateinit var insetRotGLabel: TextView; private lateinit var insetRotGSlider: SeekBar
     private lateinit var insetRotBLabel: TextView; private lateinit var insetRotBSlider: SeekBar
@@ -233,14 +234,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var insetPurBLabel: TextView; private lateinit var insetPurBSlider: SeekBar
 
     // Outset
-    private lateinit var outsetSection: LinearLayout
+    private lateinit var outsetRotationSection: LinearLayout
+    private lateinit var outsetBoostSection: LinearLayout
     private lateinit var outsetRotRLabel: TextView; private lateinit var outsetRotRSlider: SeekBar
     private lateinit var outsetRotGLabel: TextView; private lateinit var outsetRotGSlider: SeekBar
     private lateinit var outsetRotBLabel: TextView; private lateinit var outsetRotBSlider: SeekBar
     private lateinit var outsetPurRLabel: TextView; private lateinit var outsetPurRSlider: SeekBar
     private lateinit var outsetPurGLabel: TextView; private lateinit var outsetPurGSlider: SeekBar
     private lateinit var outsetPurBLabel: TextView; private lateinit var outsetPurBSlider: SeekBar
-    private lateinit var copyInsetBtn: TextView
+    private lateinit var copyRotationToReverseBtn: TextView
+    private lateinit var copyAttenuationToBoostBtn: TextView
 
     // Tinting
     private lateinit var tintingScaleLabel: TextView; private lateinit var tintingScaleSlider: SeekBar
@@ -302,7 +305,8 @@ class MainActivity : AppCompatActivity() {
         middleGrayLabel = findViewById(R.id.middle_gray_label); middleGraySlider = findViewById(R.id.middle_gray_slider)
         vibranceLabel = findViewById(R.id.vibrance_label); vibranceSlider = findViewById(R.id.vibrance_slider)
 
-        usePreForPostCb = findViewById(R.id.use_pre_for_post_cb)
+        useRotationForReverseCb = findViewById(R.id.use_rotation_for_reverse_cb)
+        useAttenuationForBoostCb = findViewById(R.id.use_attenuation_for_boost_cb)
         insetRotRLabel = findViewById(R.id.inset_rot_r_label); insetRotRSlider = findViewById(R.id.inset_rot_r_slider)
         insetRotGLabel = findViewById(R.id.inset_rot_g_label); insetRotGSlider = findViewById(R.id.inset_rot_g_slider)
         insetRotBLabel = findViewById(R.id.inset_rot_b_label); insetRotBSlider = findViewById(R.id.inset_rot_b_slider)
@@ -310,14 +314,16 @@ class MainActivity : AppCompatActivity() {
         insetPurGLabel = findViewById(R.id.inset_pur_g_label); insetPurGSlider = findViewById(R.id.inset_pur_g_slider)
         insetPurBLabel = findViewById(R.id.inset_pur_b_label); insetPurBSlider = findViewById(R.id.inset_pur_b_slider)
 
-        outsetSection = findViewById(R.id.post_section)
+        outsetRotationSection = findViewById(R.id.outset_rotation_section)
+        outsetBoostSection = findViewById(R.id.outset_boost_section)
         outsetRotRLabel = findViewById(R.id.outset_rot_r_label); outsetRotRSlider = findViewById(R.id.outset_rot_r_slider)
         outsetRotGLabel = findViewById(R.id.outset_rot_g_label); outsetRotGSlider = findViewById(R.id.outset_rot_g_slider)
         outsetRotBLabel = findViewById(R.id.outset_rot_b_label); outsetRotBSlider = findViewById(R.id.outset_rot_b_slider)
         outsetPurRLabel = findViewById(R.id.outset_pur_r_label); outsetPurRSlider = findViewById(R.id.outset_pur_r_slider)
         outsetPurGLabel = findViewById(R.id.outset_pur_g_label); outsetPurGSlider = findViewById(R.id.outset_pur_g_slider)
         outsetPurBLabel = findViewById(R.id.outset_pur_b_label); outsetPurBSlider = findViewById(R.id.outset_pur_b_slider)
-        copyInsetBtn = findViewById(R.id.copy_inset_to_outset_btn)
+        copyRotationToReverseBtn = findViewById(R.id.copy_rotation_to_reverse_btn)
+        copyAttenuationToBoostBtn = findViewById(R.id.copy_attenuation_to_boost_btn)
 
         tintingScaleLabel = findViewById(R.id.tinting_scale_label); tintingScaleSlider = findViewById(R.id.tinting_scale_slider)
         tintingHueLabel = findViewById(R.id.tinting_hue_label); tintingHueSlider = findViewById(R.id.tinting_hue_slider)
@@ -929,9 +935,15 @@ class MainActivity : AppCompatActivity() {
             uploadAgxUniforms()
         }
 
-        usePreForPostCb.setOnCheckedChangeListener { _, checked ->
-            agxParams = agxParams.copy(usePreForPost = checked)
-            outsetSection.visibility = if (checked) View.GONE else View.VISIBLE
+        useRotationForReverseCb.setOnCheckedChangeListener { _, checked ->
+            agxParams = agxParams.copy(useRotationForReverse = checked)
+            outsetRotationSection.visibility = if (checked) View.GONE else View.VISIBLE
+            uploadAgxUniforms()
+        }
+
+        useAttenuationForBoostCb.setOnCheckedChangeListener { _, checked ->
+            agxParams = agxParams.copy(useAttenuationForBoost = checked)
+            outsetBoostSection.visibility = if (checked) View.GONE else View.VISIBLE
             uploadAgxUniforms()
         }
 
@@ -1063,11 +1075,14 @@ class MainActivity : AppCompatActivity() {
             uploadAgxUniforms()
         }
 
-        copyInsetBtn.setOnClickListener {
-            agxParams = agxParams.copy(
-                reverseRotation = agxParams.rotation.copyOf(),
-                purityBoost = agxParams.attenuation.copyOf()
-            )
+        copyRotationToReverseBtn.setOnClickListener {
+            agxParams = agxParams.copy(reverseRotation = agxParams.rotation.copyOf())
+            syncOutsetSliders()
+            uploadAgxUniforms()
+        }
+
+        copyAttenuationToBoostBtn.setOnClickListener {
+            agxParams = agxParams.copy(purityBoost = agxParams.attenuation.copyOf())
             syncOutsetSliders()
             uploadAgxUniforms()
         }
@@ -1306,8 +1321,10 @@ class MainActivity : AppCompatActivity() {
         vibranceSlider.progress = ((agxParams.vibrance + 1f) / 0.01f).toInt().coerceIn(0, 200)
         vibranceLabel.text = String.format("Vibrance  %.3f", agxParams.vibrance)
 
-        usePreForPostCb.isChecked = agxParams.usePreForPost
-        outsetSection.visibility = if (agxParams.usePreForPost) View.GONE else View.VISIBLE
+        useRotationForReverseCb.isChecked = agxParams.useRotationForReverse
+        outsetRotationSection.visibility = if (agxParams.useRotationForReverse) View.GONE else View.VISIBLE
+        useAttenuationForBoostCb.isChecked = agxParams.useAttenuationForBoost
+        outsetBoostSection.visibility = if (agxParams.useAttenuationForBoost) View.GONE else View.VISIBLE
         syncInsetSliders()
         syncOutsetSliders()
 

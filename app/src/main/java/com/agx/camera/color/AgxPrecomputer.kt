@@ -18,7 +18,8 @@ object AgxPrecomputer {
     data class InsetParams(
         val rotation: FloatArray = floatArrayOf(0.0373f, -0.0214f, -0.0532f),
         val attenuation: FloatArray = floatArrayOf(32.9652f, 28.0513f, 12.4754f),
-        val usePreForPost: Boolean = true,
+        val useRotationForReverse: Boolean = true,
+        val useAttenuationForBoost: Boolean = false,
         val reverseRotation: FloatArray = floatArrayOf(0f, 0f, 0f),
         val purityBoost: FloatArray = floatArrayOf(32.3174f, 28.3256f, 3.7433f),
         val tintingScale: Float = 0f,
@@ -72,23 +73,15 @@ object AgxPrecomputer {
     }
 
     private fun computeOutsetMatrix(params: InsetParams): ColorMatrix.Mat3 {
-        return if (params.usePreForPost) {
-            val ch = insetPrimaries(
-                ColorMatrix.REC709,
-                params.attenuation[0], params.attenuation[1], params.attenuation[2],
-                params.rotation[0], params.rotation[1], params.rotation[2],
-                params.tintingHue + PI.toFloat(), params.tintingScale
-            )
-            ColorMatrix.inverse(ColorMatrix.rgbToRGB(ch, ColorMatrix.REC709))
-        } else {
-            val ch = insetPrimaries(
-                ColorMatrix.REC709,
-                params.purityBoost[0], params.purityBoost[1], params.purityBoost[2],
-                params.reverseRotation[0], params.reverseRotation[1], params.reverseRotation[2],
-                params.tintingHue + PI.toFloat(), params.tintingScale
-            )
-            ColorMatrix.inverse(ColorMatrix.rgbToRGB(ch, ColorMatrix.REC709))
-        }
+        val rot = if (params.useRotationForReverse) params.rotation else params.reverseRotation
+        val boost = if (params.useAttenuationForBoost) params.attenuation else params.purityBoost
+        val ch = insetPrimaries(
+            ColorMatrix.REC709,
+            boost[0], boost[1], boost[2],
+            rot[0], rot[1], rot[2],
+            params.tintingHue + PI.toFloat(), params.tintingScale
+        )
+        return ColorMatrix.inverse(ColorMatrix.rgbToRGB(ch, ColorMatrix.REC709))
     }
 
     private fun insetPrimaries(
