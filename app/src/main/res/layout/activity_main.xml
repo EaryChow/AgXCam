@@ -684,8 +684,8 @@
 
             <!-- Outset Primaries (hidden when Use Pre for Post is on) -->
             <LinearLayout android:id="@+id/post_section" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
-                <TextView android:id="@+id/outset_rot_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Reverse R  0.120" android:textColor="#FFFFFFFF" android:textSize="11sp" />
-                <SeekBar android:id="@+id/outset_rot_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="322" android:layout_marginBottom="2dp" />
+                <TextView android:id="@+id/outset_rot_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Reverse R  0.220" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                <SeekBar android:id="@+id/outset_rot_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="372" android:layout_marginBottom="2dp" />
 
                 <TextView android:id="@+id/outset_rot_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Reverse G  -0.021" android:textColor="#FFFFFFFF" android:textSize="11sp" />
                 <SeekBar android:id="@+id/outset_rot_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="251" android:layout_marginBottom="2dp" />
