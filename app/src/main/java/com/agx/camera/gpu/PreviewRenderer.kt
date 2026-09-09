@@ -52,6 +52,16 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private val bayerShader = BayerShaderProgram()
     private val nrShader = NrShaderProgram()
     private val blitShader = BlitShaderProgram()
+    private val focusPeakShader = FocusPeakShaderProgram()
+
+    /** Green focus-peak overlay on the final blit. Enabled while the MF roller is
+     *  actively editable (focus panel open + manual focus). [focusPeakRadius] is the
+     *  screen-pixel band radius; sharpness is additionally checked at a source-
+     *  anchored distance so peaks stay visible when zoomed or on a tele lens. */
+    @Volatile var focusPeakEnabled = false
+    @Volatile var focusPeakRadius = 3f
+    @Volatile var focusPeakThreshold = 0.75f
+    @Volatile var focusPeakStrength = 0.8f
 
     @Volatile var useBayerPath = false
         private set
@@ -788,7 +798,24 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             }
             GLES20.glViewport(vpX, vpY, vpW, vpH)
 
-            blitShader.draw(fboTextureId)
+            if (focusPeakEnabled) {
+                val zoom = zoomController.zoomFactor.coerceAtLeast(1f)
+                val srcW = if (useBayerPath) bayerWidth else yuvWidth
+                val srcH = if (useBayerPath) bayerHeight else yuvHeight
+                val K_SOURCE_ANCHOR_PX = 2f
+                val sharpUvX = if (srcW > 0) K_SOURCE_ANCHOR_PX * zoom / srcW else 0f
+                val sharpUvY = if (srcH > 0) K_SOURCE_ANCHOR_PX * zoom / srcH else 0f
+                focusPeakShader.draw(
+                    fboTextureId,
+                    vpW, vpH,
+                    focusPeakRadius,
+                    sharpUvX, sharpUvY,
+                    focusPeakThreshold,
+                    focusPeakStrength
+                )
+            } else {
+                blitShader.draw(fboTextureId)
+            }
 
             val swapResult = EGL14.eglSwapBuffers(eglDisplay, eglSurface)
             if (!swapResult) {
@@ -832,6 +859,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         bayerShader.destroy()
         nrShader.destroy()
         blitShader.destroy()
+        focusPeakShader.destroy()
     }
 
     fun initEgl() {
@@ -884,6 +912,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         bayerShader.create(bayerWidth, bayerHeight)
         nrShader.create()
         blitShader.create()
+        focusPeakShader.create()
 
         bayerLensShadingData?.let {
             bayerShader.uploadLensShadingMap(it, bayerLensShadingWidth, bayerLensShadingHeight)

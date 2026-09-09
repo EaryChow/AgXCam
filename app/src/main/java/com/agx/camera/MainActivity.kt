@@ -2238,16 +2238,13 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     enableTapToFocus()
                 }
-                // Re-apply manual focus to the fresh session. If the user was in the
-                // focus panel, resume it in the same mode (AF or MF); otherwise reset
-                // to auto focus and re-seed the center focus point.
-                if (focusPanelOpen) {
-                    if (isManualFocus) {
-                        camera2Manager.setManualFocus(focusRollerDistance())
-                    }
+                // Re-apply manual focus to the fresh session. MF persists whether
+                // or not the focus panel is open: the AF/MF button never changes the
+                // mode itself, only the circular A does.
+                if (isManualFocus) {
+                    camera2Manager.setManualFocus(focusRollerDistance())
                     updateManualFocusUI()
                 } else {
-                    isManualFocus = false
                     camera2Manager.resetAutoFocus()
                     val cx = textureView.width / 2f
                     val cy = textureView.height / 2f
@@ -3229,21 +3226,16 @@ override fun onResume() {
         }
         shutterRoller.onIndexChange = { updateManualExposure() }
 
-        // Manual-focus (AF/MF) panel. Tapping the AF button opens the panel, showing
-        // the circular A switch (above the button) and the focus roller popup (above
-        // the circle) WITHOUT changing the focus mode — the camera stays in auto
-        // focus (A). The circular A is the switch: tapping it toggles auto (A,
-        // roller disabled) vs manual focus (M, dimmed A, roller enabled), and the
-        // AF button text changes to MF. Tapping the AF button again closes the
-        // panel and returns to auto focus.
+        // Manual-focus (AF/MF) panel. Tapping the AF/MF button only opens/closes the
+        // panel (circular A switch above + focus roller popup above that); it never
+        // changes the focus mode itself. The circular A is the switch: tapping it
+        // toggles auto (A, roller disabled) vs manual (M, dimmed A, roller enabled)
+        // and the button text reads AF/MF accordingly. Closing the panel keeps the
+        // current mode (e.g. MF stays manual focus).
         focusModeButton.setOnClickListener {
             if (!cameraReady) return@setOnClickListener
             if (focusPanelOpen) {
                 focusPanelOpen = false
-                if (isManualFocus) {
-                    isManualFocus = false
-                    camera2Manager.resetAutoFocus()
-                }
             } else {
                 val minFocus = camera2Manager.minFocusDistance
                 if (minFocus <= 0f) {
@@ -3335,6 +3327,10 @@ override fun onResume() {
         focusRoller.alpha = if (isManualFocus) 1.0f else 0.4f
         focusModeCircle.visibility = if (focusPanelOpen) View.VISIBLE else View.GONE
         focusPopup.visibility = if (focusPanelOpen) View.VISIBLE else View.GONE
+        // Green focus-peak overlay: on while the focus roller is visible and editable
+        // (panel open + manual focus), so the in-focus edges track the scroller.
+        previewRenderer.focusPeakEnabled = focusPanelOpen && isManualFocus
+        previewRenderer.requestRender()
         positionFocusControls()
         // In MF the focus indicator is hidden; the AE indicator stays so exposure
         // metering readout keeps working.
