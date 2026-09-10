@@ -48,9 +48,27 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var rawDemosaicFboWidth = 0
     private var rawDemosaicFboHeight = 0
 
+    // Romanenko-NR output-driven denoise buffers: single RGBA32F texture
+    // holding the denoised 4-phase mosaic (R,G1,G2,B), written every frame
+    // and consumed by the demosaic pass in the SAME frame via the reverse
+    // map.  Spatial-only — no history, no MRT.
+    private var denoiseFboId = 0
+    private var denoisedTexId = 0
+    private var denoiseFboWidth = 0
+    private var denoiseFboHeight = 0
+
+    // Capture (still) Romanenko buffers: same spatial-only Bayer-domain pass
+    // at the capture output resolution; the denoised mosaic is RGBA16F to
+    // halve the memory footprint of a full-res still.
+    private var captureDenoiseFboId = 0
+    private var captureDenoisedTexId = 0
+    private var captureDenoiseFboWidth = 0
+    private var captureDenoiseFboHeight = 0
+
     private val yuvShader = YuvShaderProgram()
     private val bayerShader = BayerShaderProgram()
     private val nrShader = NrShaderProgram()
+    private val spatialNrShader = SpatialNrShaderProgram()
     private val blitShader = BlitShaderProgram()
     private val focusPeakShader = FocusPeakShaderProgram()
 
@@ -440,6 +458,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         }
 
         ensureDemosaicFbo(fboWidth, fboHeight)
+        ensureDenoiseBuffers(fboWidth, fboHeight)
+
+        val nrEnabled = bayerNrStrength > 0f && spatialNrShader.isReady()
+        val previewTransform = computePreviewTransform(bayerWidth, bayerHeight)
+        val whiteRange = (agxWhiteLevel - agxBlackLevel).coerceAtLeast(1f)
+        val crop = bayerShader.currentCropRegion()
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, demosaicFboId)
         GLES20.glViewport(0, 0, demosaicFboWidth, demosaicFboHeight)
@@ -449,16 +473,46 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         bayerShader.uploadBayer(buffer.duplicate(), bayerWidth, bayerHeight, bayerStridePixels)
         logGlError("after uploadBayer", bayerRenderCount)
 
+        // Romanenko Bayer-domain spatial denoise pass (pre-demosaic).
+        // Samples the R16UI sensor frame directly; no temporal state.
+        if (nrEnabled) {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, denoiseFboId)
+            GLES20.glViewport(0, 0, denoiseFboWidth, denoiseFboHeight)
+            spatialNrShader.draw(
+                transformMatrix = previewTransform,
+                cropOriginX = crop[0], cropOriginY = crop[1],
+                cropSizeX = crop[2], cropSizeY = crop[3],
+                viewWidth = denoiseFboWidth.toFloat(), viewHeight = denoiseFboHeight.toFloat(),
+                sensorWidth = bayerWidth.toFloat(), sensorHeight = bayerHeight.toFloat(),
+                bayerTex = bayerShader.bayerTextureHandle(),
+                blackLevelPattern = bayerBlackLevelPattern,
+                bitDepth = bayerBitDepth,
+                nrStrength = bayerNrStrength.coerceIn(0f, 1f)
+            )
+            logGlError("after romanenko.draw", bayerRenderCount)
+        }
+
+        // The Romanenko pass left the denoise FBO bound; put back the demosaic
+        // target FBO + viewport so drawDemosaic renders into the right place.
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, demosaicFboId)
+        GLES20.glViewport(0, 0, demosaicFboWidth, demosaicFboHeight)
+
         bayerShader.drawDemosaic(
             demosaicFboWidth, demosaicFboHeight,
-            computePreviewTransform(bayerWidth, bayerHeight),
+            previewTransform,
             bayerBlackLevelPattern,
             bayerColorMap,
             bayerBitDepth,
             agxWhiteLevel, agxBlackLevel,
             boxAA = 4,
             wbGains = floatArrayOf(wbGainR, wbGainG, wbGainB),
-            colorMat = ccMatrix
+            colorMat = ccMatrix,
+            denoisedTextureId = denoisedTexId,
+            denoiseActive = nrEnabled,
+            scaleFactor = maxOf(
+                crop[2] / demosaicFboWidth.toFloat(),
+                crop[3] / demosaicFboHeight.toFloat()
+            )
         )
         logGlError("after drawDemosaic", bayerRenderCount)
 
@@ -479,7 +533,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
         nrShader.draw(
             demosaicFboTextureId,
-            bayerNrStrength,
             exposureEv,
             agxSceneLinearTo709,
             agxInsetMat,
@@ -715,6 +768,44 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         rawCaptureReq.rawW, rawCaptureReq.rawH, rawCaptureReq.stridePixels
                     )
                     logGlError("raw after uploadBayer", bayerRenderCount)
+                    if (bayerNrStrength > 0f && spatialNrShader.isReady()) {
+                        ensureCaptureDenoiseBuffers(rawDemosaicFboWidth, rawDemosaicFboHeight)
+                    }
+
+                    // Romanenko NR on the still: the same spatial-only Bayer-domain pass
+                    // as the preview, run once at capture resolution.  The
+                    // capture history outputs are discarded (the capture FBO
+                    // lists a single draw buffer).
+                    val rcStrength = (bayerNrStrength.coerceIn(0f, 1f)).takeIf { it > 0f }
+                    val captureDenoiseActive =
+                        rcStrength != null && spatialNrShader.isReady() && captureDenoiseFboId != 0
+                    val crop = bayerShader.currentCropRegion()
+                    if (captureDenoiseActive) {
+                        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, captureDenoiseFboId)
+                        GLES20.glViewport(0, 0, captureDenoiseFboWidth, captureDenoiseFboHeight)
+                        spatialNrShader.draw(
+                            transformMatrix = captureMatrix,
+                            cropOriginX = crop[0],
+                            cropOriginY = crop[1],
+                            cropSizeX = crop[2],
+                            cropSizeY = crop[3],
+                            viewWidth = captureDenoiseFboWidth.toFloat(),
+                            viewHeight = captureDenoiseFboHeight.toFloat(),
+                            sensorWidth = rawCaptureReq.rawW.toFloat(),
+                            sensorHeight = rawCaptureReq.rawH.toFloat(),
+                            bayerTex = bayerShader.bayerTextureHandle(),
+                            blackLevelPattern = bayerBlackLevelPattern,
+                            bitDepth = bayerBitDepth,
+                            nrStrength = rcStrength,
+                        )
+                        logGlError("raw after romanenko.draw", bayerRenderCount)
+                    }
+
+                    // Restore the demosaic target FBO + viewport (the denoise
+                    // pass left the capture denoise FBO bound).
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, rawDemosaicFboId)
+                    GLES20.glViewport(0, 0, rawDemosaicFboWidth, rawDemosaicFboHeight)
+
                     bayerShader.drawDemosaic(
                         rawDemosaicFboWidth, rawDemosaicFboHeight,
                         captureMatrix,
@@ -724,7 +815,13 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         rawCaptureReq.agxWhiteLevel, rawCaptureReq.agxBlackLevel,
                         boxAA = if (outW < rawCaptureReq.rawW || outH < rawCaptureReq.rawH) 4 else 0,
                         wbGains = floatArrayOf(wbGainR, wbGainG, wbGainB),
-                        colorMat = ccMatrix
+                        colorMat = ccMatrix,
+                        denoisedTextureId = captureDenoisedTexId,
+                        denoiseActive = captureDenoiseActive,
+                        scaleFactor = maxOf(
+                            rawCaptureReq.rawW.toFloat() / rawDemosaicFboWidth.toFloat(),
+                            rawCaptureReq.rawH.toFloat() / rawDemosaicFboHeight.toFloat()
+                        )
                     )
                     logGlError("raw after drawDemosaic", bayerRenderCount)
 
@@ -735,7 +832,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
                     nrShader.draw(
                         rawDemosaicFboTextureId,
-                        0f,
                         exposureEv,
                         rawCaptureReq.agxSceneLinearTo709,
                         rawCaptureReq.agxInsetMat,
@@ -858,6 +954,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         yuvShader.destroy()
         bayerShader.destroy()
         nrShader.destroy()
+        spatialNrShader.destroy()
         blitShader.destroy()
         focusPeakShader.destroy()
     }
@@ -911,6 +1008,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         yuvShader.create()
         bayerShader.create(bayerWidth, bayerHeight)
         nrShader.create()
+        spatialNrShader.create()
         blitShader.create()
         focusPeakShader.create()
 
@@ -1155,6 +1253,111 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         CrashLogger.log(TAG, "Raw demosaic FBO created RGBA32F: ${width}x${height}")
     }
 
+    private fun allocRgba32fTexture(width: Int, height: Int): Int {
+        val texBuf = IntArray(1)
+        GLES20.glGenTextures(1, texBuf, 0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texBuf[0])
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES30.GL_RGBA32F,
+            width, height, 0,
+            GLES20.GL_RGBA, GLES20.GL_FLOAT, null
+        )
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        return texBuf[0]
+    }
+
+    private fun ensureDenoiseBuffers(width: Int, height: Int) {
+        if (denoiseFboId != 0 && denoiseFboWidth == width && denoiseFboHeight == height) return
+        if (denoiseFboId != 0) {
+            GLES20.glDeleteFramebuffers(1, intArrayOf(denoiseFboId), 0)
+            denoiseFboId = 0
+            GLES20.glDeleteTextures(1, intArrayOf(denoisedTexId), 0)
+            denoisedTexId = 0
+        }
+
+        denoiseFboWidth = width
+        denoiseFboHeight = height
+
+        denoisedTexId = allocRgba32fTexture(width, height)
+
+        val fboBuf = IntArray(1)
+        GLES20.glGenFramebuffers(1, fboBuf, 0)
+        denoiseFboId = fboBuf[0]
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, denoiseFboId)
+        GLES20.glFramebufferTexture2D(
+            GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+            GLES20.GL_TEXTURE_2D, denoisedTexId, 0
+        )
+
+        val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
+        if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+            Log.e(TAG, "Denoise FBO incomplete: $status")
+            CrashLogger.log(TAG, "Denoise FBO incomplete: $status")
+        }
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        CrashLogger.log(TAG, "Denoise FBO created RGBA32F: ${width}x${height}")
+    }
+
+    // Capture/still Romanenko: single spatial pass at the capture output
+    // resolution; the denoised mosaic is RGBA16F to halve the memory
+    // footprint of a full-res still.
+    private fun allocRgba16fTexture(width: Int, height: Int): Int {
+        val texBuf = IntArray(1)
+        GLES20.glGenTextures(1, texBuf, 0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texBuf[0])
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES30.GL_RGBA16F,
+            width, height, 0,
+            GLES20.GL_RGBA, GLES20.GL_FLOAT, null
+        )
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        return texBuf[0]
+    }
+
+    private fun ensureCaptureDenoiseBuffers(width: Int, height: Int) {
+        if (captureDenoiseFboId != 0 &&
+            captureDenoiseFboWidth == width && captureDenoiseFboHeight == height) return
+        if (captureDenoiseFboId != 0) {
+            GLES20.glDeleteFramebuffers(1, intArrayOf(captureDenoiseFboId), 0)
+            GLES20.glDeleteTextures(1, intArrayOf(captureDenoisedTexId), 0)
+            captureDenoiseFboId = 0
+            captureDenoisedTexId = 0
+        }
+
+        captureDenoiseFboWidth = width
+        captureDenoiseFboHeight = height
+        captureDenoisedTexId = allocRgba16fTexture(width, height)
+
+        val fboBuf = IntArray(1)
+        GLES20.glGenFramebuffers(1, fboBuf, 0)
+        captureDenoiseFboId = fboBuf[0]
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, captureDenoiseFboId)
+        GLES20.glFramebufferTexture2D(
+            GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+            GLES20.GL_TEXTURE_2D, captureDenoisedTexId, 0
+        )
+
+        val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
+        if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+            val msg = "Capture denoise FBO incomplete: $status"
+            Log.e(TAG, msg)
+            CrashLogger.log(TAG, msg)
+            GLES20.glDeleteFramebuffers(1, intArrayOf(captureDenoiseFboId), 0)
+            captureDenoiseFboId = 0
+        } else {
+            GLES20.glClearColor(0f, 0f, 0f, 1f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            CrashLogger.log(TAG, "Capture denoise FBO created RGBA16F: ${width}x${height}")
+        }
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+    }
+
     private fun destroyEgl() {
         if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
             EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
@@ -1198,6 +1401,18 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             if (rawDemosaicFboTextureId != 0) {
                 GLES20.glDeleteTextures(1, intArrayOf(rawDemosaicFboTextureId), 0)
                 rawDemosaicFboTextureId = 0
+            }
+            if (denoiseFboId != 0) {
+                GLES20.glDeleteFramebuffers(1, intArrayOf(denoiseFboId), 0)
+                denoiseFboId = 0
+                GLES20.glDeleteTextures(1, intArrayOf(denoisedTexId), 0)
+                denoisedTexId = 0
+            }
+            if (captureDenoiseFboId != 0) {
+                GLES20.glDeleteFramebuffers(1, intArrayOf(captureDenoiseFboId), 0)
+                GLES20.glDeleteTextures(1, intArrayOf(captureDenoisedTexId), 0)
+                captureDenoiseFboId = 0
+                captureDenoisedTexId = 0
             }
 
             if (eglSurface != EGL14.EGL_NO_SURFACE) {

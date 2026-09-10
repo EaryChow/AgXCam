@@ -15,6 +15,11 @@ class BayerShaderProgram {
     private var demosaicProgramId = 0
     private var bayerTextureId = 0
     private var lensShadingTextureId = 0
+    // 1x1 native-RGBA texture bound to the u_denoisedTex unit whenever no real
+    // denoised mosaic is provided: the sampler is float-typed so binding the
+    // integer R16UI Bayer texture there would raise GL_INVALID_OPERATION (0x502)
+    // at draw time even though the inactive branch never samples it.
+    private var fallbackFloatTextureId = 0
 
     private var uBayerTexLoc = 0
     private var uLensShadingMapLoc = 0
@@ -49,6 +54,7 @@ class BayerShaderProgram {
     private var dULensShadingMapLoc = 0
     private var dUOutputResolutionLoc = 0
     private var dUTransformMatrixLoc = 0
+    private var dUInverseTransformMatrixLoc = 0
     private var dUSensorSizeLoc = 0
     private var dUCropOriginLoc = 0
     private var dUCropSizeLoc = 0
@@ -60,6 +66,9 @@ class BayerShaderProgram {
     private var dUColorMatLoc = 0
     private var dUWhiteLevelLoc = 0
     private var dUBlackLevelLoc = 0
+    private var dUDenoisedTexLoc = 0
+    private var dUDenoiseActiveLoc = 0
+    private var dUScaleFactorLoc = 0
 
     private var sensorWidth = 0
     private var sensorHeight = 0
@@ -126,6 +135,7 @@ class BayerShaderProgram {
         dULensShadingMapLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_lens_shading_map")
         dUOutputResolutionLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_outputResolution")
         dUTransformMatrixLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_transformMatrix")
+        dUInverseTransformMatrixLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_inverseTransformMatrix")
         dUSensorSizeLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_sensorSize")
         dUCropOriginLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_cropOrigin")
         dUCropSizeLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_cropSize")
@@ -137,11 +147,28 @@ class BayerShaderProgram {
         dUColorMatLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_color_mat")
         dUWhiteLevelLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_white_level")
         dUBlackLevelLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_black_level")
+        dUDenoisedTexLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_denoisedTex")
+        dUDenoiseActiveLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_denoise_active")
+        dUScaleFactorLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_scale_factor")
 
         val textures = IntArray(2)
         GLES20.glGenTextures(2, textures, 0)
         bayerTextureId = textures[0]
         lensShadingTextureId = textures[1]
+
+        val fallback = IntArray(1)
+        GLES20.glGenTextures(1, fallback, 0)
+        fallbackFloatTextureId = fallback[0]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fallbackFloatTextureId)
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+            1, 1, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE,
+            java.nio.ByteBuffer.allocateDirect(4).put(byteArrayOf(0, 0, 0, 255.toByte())).apply { position(0) }
+        )
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
         GLES30.glBindTexture(GLES20.GL_TEXTURE_2D, bayerTextureId)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
@@ -165,6 +192,8 @@ class BayerShaderProgram {
         cropSizeX = sizeX
         cropSizeY = sizeY
     }
+
+    fun currentCropRegion(): FloatArray = floatArrayOf(cropOriginX, cropOriginY, cropSizeX, cropSizeY)
 
     fun uploadBayer(buffer: ByteBuffer, width: Int, height: Int, stridePixels: Int) {
         GLES30.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -290,7 +319,10 @@ class BayerShaderProgram {
         whiteLevel: Float, blackLevel: Float,
         boxAA: Int = 4,
         wbGains: FloatArray = floatArrayOf(1f, 1f, 1f),
-        colorMat: FloatArray? = null
+        colorMat: FloatArray? = null,
+        denoisedTextureId: Int = 0,
+        denoiseActive: Boolean = false,
+        scaleFactor: Float = 1f
     ) {
         GLES20.glUseProgram(demosaicProgramId)
 
@@ -302,8 +334,24 @@ class BayerShaderProgram {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, lensShadingTextureId)
         GLES20.glUniform1i(dULensShadingMapLoc, 1)
 
+        // Always bind a float-typed texture on u_denoisedTex's unit — never the
+        // integer R16UI Bayer texture — otherwise the float sampler2D is
+        // incompatible at draw time (GL_INVALID_OPERATION).
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
+        val denoisedBindTex = if (denoisedTextureId != 0) denoisedTextureId else fallbackFloatTextureId
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, denoisedBindTex)
+        GLES20.glUniform1i(dUDenoisedTexLoc, 2)
+        GLES20.glUniform1f(dUDenoiseActiveLoc, if (denoiseActive && denoisedTextureId != 0) 1f else 0f)
+        GLES20.glUniform1f(dUScaleFactorLoc, scaleFactor)
+
         GLES20.glUniform2f(dUOutputResolutionLoc, outputWidth.toFloat(), outputHeight.toFloat())
         GLES20.glUniformMatrix4fv(dUTransformMatrixLoc, 1, false, transformMatrix, 0)
+        // Precomputed on the CPU: inverting the transform per-fragment in GLSL
+        // accumulates float error that shows up as off-by-one denoised-texel
+        // lookups when the demosaic reverse-maps sensor coordinates.
+        val invTransform = FloatArray(16)
+        android.opengl.Matrix.invertM(invTransform, 0, transformMatrix, 0)
+        GLES20.glUniformMatrix4fv(dUInverseTransformMatrixLoc, 1, false, invTransform, 0)
         GLES20.glUniform2f(dUSensorSizeLoc, sensorWidth.toFloat(), sensorHeight.toFloat())
         GLES20.glUniform2f(dUCropOriginLoc, cropOriginX, cropOriginY)
         GLES20.glUniform2f(dUCropSizeLoc, cropSizeX, cropSizeY)
@@ -338,6 +386,8 @@ class BayerShaderProgram {
 
     fun isReady(): Boolean = programId != 0 && demosaicProgramId != 0 && bayerTextureId != 0
 
+    fun bayerTextureHandle(): Int = bayerTextureId
+
     fun destroy() {
         if (programId != 0) {
             GLES20.glDeleteProgram(programId)
@@ -347,10 +397,11 @@ class BayerShaderProgram {
             GLES20.glDeleteProgram(demosaicProgramId)
             demosaicProgramId = 0
         }
-        val textures = intArrayOf(bayerTextureId, lensShadingTextureId)
-        GLES20.glDeleteTextures(2, textures, 0)
+        val textures = intArrayOf(bayerTextureId, lensShadingTextureId, fallbackFloatTextureId)
+        GLES20.glDeleteTextures(3, textures, 0)
         bayerTextureId = 0
         lensShadingTextureId = 0
+        fallbackFloatTextureId = 0
     }
 
     companion object {
@@ -567,6 +618,11 @@ out vec4 fragColor;
 
 uniform usampler2D u_bayerTex;
 uniform sampler2D u_lens_shading_map;
+uniform sampler2D u_denoisedTex;
+uniform float u_denoise_active;
+uniform float u_scale_factor;
+uniform mat4 u_transformMatrix;
+uniform mat4 u_inverseTransformMatrix;
 uniform vec2 u_outputResolution;
 uniform vec2 u_sensorSize;
 uniform vec2 u_cropOrigin;
@@ -621,6 +677,36 @@ float lsGain(vec2 lsNeighborUV) {
     return texture(u_lens_shading_map, vec2(c) / u_sensorSize)[safePhase(c.x, c.y)];
 }
 
+// Reverse-map a clamped sensor coordinate onto the denoised output grid.
+// At 1:1 (capture) this is a per-pixel bijection; at downscaled preview the
+// mapping collapses whole sensor neighbourhoods onto single output texels.
+ivec2 mappedOutCoord(ivec2 clampedCoord) {
+    vec2 uv = (vec2(clampedCoord) - u_cropOrigin) / u_cropSize;
+    vec4 frag = u_inverseTransformMatrix * vec4(uv, 0.0, 1.0);
+    ivec2 oc = ivec2(floor(frag.xy * u_outputResolution));
+    return clamp(oc, ivec2(0), ivec2(u_outputResolution) - ivec2(1));
+}
+
+// Romanenko-NR-aware RAW sample.  When the output-driven denoiser produced a
+// denoised mosaiced frame, invert the reverse map (sensor -> output grid) and
+// take the denoised value for the requested CFA phase.  The denoiser writes
+// one spatial estimate per phase into r/g/b/a of every output texel (which is
+// the whole 4-phase mosaic cell), so the colour plane is selected by channel
+// index — correct at every zoom AND in 1:1 stills, with no guard arithmetic.
+float denoisedSampleRaw(ivec2 sensorCoord) {
+    ivec2 clampedCoord = clamp(sensorCoord, ivec2(0), ivec2(u_sensorSize) - ivec2(1));
+    if (u_denoise_active > 0.5) {
+        ivec2 oc = mappedOutCoord(clampedCoord);
+        vec4 den = texelFetch(u_denoisedTex, oc, 0);
+        int want = safePhase(clampedCoord.x, clampedCoord.y);
+        if (want == 0) return den.r;
+        if (want == 1) return den.g;
+        if (want == 2) return den.b;
+        return den.a;
+    }
+    return sampleBayerRaw(clampedCoord);
+}
+
 vec3 demosaicAt(ivec2 sensorCoord, vec2 lsSensorUV) {
     int phase = safePhase(sensorCoord.x, sensorCoord.y);
     int color = u_bayer_color_map[phase];
@@ -645,17 +731,17 @@ vec3 demosaicAt(ivec2 sensorCoord, vec2 lsSensorUV) {
     vec2 lsSW = lsSensorUV + vec2(-1.0,  1.0);
     vec2 lsSE = lsSensorUV + vec2( 1.0,  1.0);
 
-    float nN  = sampleBayerRaw(nN_coord)  * lsGain(lsN);
-    float nS  = sampleBayerRaw(nS_coord)  * lsGain(lsS);
-    float nW  = sampleBayerRaw(nW_coord)  * lsGain(lsW);
-    float nE  = sampleBayerRaw(nE_coord)  * lsGain(lsE);
+    float nN  = denoisedSampleRaw(nN_coord)  * lsGain(lsN);
+    float nS  = denoisedSampleRaw(nS_coord)  * lsGain(lsS);
+    float nW  = denoisedSampleRaw(nW_coord)  * lsGain(lsW);
+    float nE  = denoisedSampleRaw(nE_coord)  * lsGain(lsE);
 
-    float nNW = sampleBayerRaw(nNW_coord) * lsGain(lsNW);
-    float nNE = sampleBayerRaw(nNE_coord) * lsGain(lsNE);
-    float nSW = sampleBayerRaw(nSW_coord) * lsGain(lsSW);
-    float nSE = sampleBayerRaw(nSE_coord) * lsGain(lsSE);
+    float nNW = denoisedSampleRaw(nNW_coord) * lsGain(lsNW);
+    float nNE = denoisedSampleRaw(nNE_coord) * lsGain(lsNE);
+    float nSW = denoisedSampleRaw(nSW_coord) * lsGain(lsSW);
+    float nSE = denoisedSampleRaw(nSE_coord) * lsGain(lsSE);
 
-    float center = sampleBayerRaw(sensorCoord) * gain;
+    float center = denoisedSampleRaw(sensorCoord) * gain;
     float r = 0.0, g = 0.0, b = 0.0;
 
     if (color == 0) {
