@@ -528,6 +528,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupUI() {
+        loadWbModePrefs()
         flashButton.setOnClickListener {
             currentFlashMode = currentFlashMode.cycle()
             updateFlashUI()
@@ -1139,22 +1140,34 @@ class MainActivity : AppCompatActivity() {
         kelvinSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             kelvinState = kelvinState.copy(kelvin = 2000f + v * 100f)
             kelvinLabel.text = String.format("Kelvin  %.0fK", kelvinState.kelvin)
-            if (currentWbMode == WhiteBalanceMode.KELVIN) uploadAgxUniforms()
+            if (currentWbMode == WhiteBalanceMode.KELVIN) {
+                uploadAgxUniforms()
+                persistWbMode()
+            }
         })
         setupSliderDoubleClickReset(kelvinSlider, 43) {
             kelvinState = kelvinState.copy(kelvin = 6300f)
             kelvinLabel.text = "Kelvin  6300K"
-            if (currentWbMode == WhiteBalanceMode.KELVIN) uploadAgxUniforms()
+            if (currentWbMode == WhiteBalanceMode.KELVIN) {
+                uploadAgxUniforms()
+                persistWbMode()
+            }
         }
         tintSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             kelvinState = kelvinState.copy(tint = (v - 100).toFloat())
             tintLabel.text = String.format("Tint  %.0f", kelvinState.tint)
-            if (currentWbMode == WhiteBalanceMode.KELVIN) uploadAgxUniforms()
+            if (currentWbMode == WhiteBalanceMode.KELVIN) {
+                uploadAgxUniforms()
+                persistWbMode()
+            }
         })
         setupSliderDoubleClickReset(tintSlider, 86) {
             kelvinState = kelvinState.copy(tint = -14f)
             tintLabel.text = "Tint  -14"
-            if (currentWbMode == WhiteBalanceMode.KELVIN) uploadAgxUniforms()
+            if (currentWbMode == WhiteBalanceMode.KELVIN) {
+                uploadAgxUniforms()
+                persistWbMode()
+            }
         }
 
         jpegSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
@@ -1486,6 +1499,34 @@ class MainActivity : AppCompatActivity() {
         WhiteBalanceMode.FLUORESCENT -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT
         WhiteBalanceMode.TWILIGHT -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_TWILIGHT
         WhiteBalanceMode.SHADE -> android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_SHADE
+    }
+
+    // White balance is global (survives lens switches and restarts), like
+    // flash mode. The user said the mode keeps getting reset on switch; the
+    // per-lens LensState snapshot must never drive WB again.
+    private fun persistWbMode() {
+        try {
+            previewResPrefs.edit()
+                .putInt(PREF_WB_MODE, currentWbMode.ordinal)
+                .putFloat(PREF_WB_KELVIN, kelvinState.kelvin)
+                .putFloat(PREF_WB_TINT, kelvinState.tint)
+                .apply()
+        } catch (e: Exception) {
+            CrashLogger.log(TAG, "persistWbMode failed: ${e.message}")
+        }
+    }
+
+    private fun loadWbModePrefs() {
+        try {
+            val ordinal = previewResPrefs.getInt(PREF_WB_MODE, WhiteBalanceMode.AUTO.ordinal)
+            currentWbMode = WhiteBalanceMode.entries[ordinal.coerceIn(0, WhiteBalanceMode.entries.size - 1)]
+            kelvinState = kelvinState.copy(
+                kelvin = previewResPrefs.getFloat(PREF_WB_KELVIN, kelvinState.kelvin),
+                tint = previewResPrefs.getFloat(PREF_WB_TINT, kelvinState.tint)
+            )
+        } catch (e: Exception) {
+            CrashLogger.log(TAG, "loadWbModePrefs failed: ${e.message}")
+        }
     }
 
     private fun updateWbUI() {
@@ -1900,6 +1941,7 @@ class MainActivity : AppCompatActivity() {
             if (mode in awbModes) {
                 camera2Manager.setWhiteBalanceMode(mode)
                 currentWbMode = wbEnum
+                persistWbMode()
                 updateWbUI()
                 syncWbSliders()
                 showModeLabel(whiteBalanceDisplayName(wbEnum))
@@ -1911,6 +1953,7 @@ class MainActivity : AppCompatActivity() {
         kelvinBtn.setOnClickListener {
             currentWbMode = WhiteBalanceMode.KELVIN
             camera2Manager.setWhiteBalanceMode(android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_OFF)
+            persistWbMode()
             updateWbUI()
             syncWbSliders()
             showModeLabel(whiteBalanceDisplayName(WhiteBalanceMode.KELVIN))
@@ -2180,7 +2223,60 @@ class MainActivity : AppCompatActivity() {
             dest.position(0)
             val ccGains = camera2Manager.latestColorCorrectionGains
             val ccMat = camera2Manager.latestColorCorrectionMatrix
-            if (ccGains != null && ccGains[1] > 0f && ccGains[2] > 0f) {
+            val gainsOk = ccGains != null &&
+                ccGains.size >= 4 &&
+                ccGains.all { it.isFinite() && it > 0f }
+
+            // Grey-world fallback for devices that report no HAL gains. It
+            // feeds a sensor neutral into the profile path; the legacy gain
+            // path below keeps consuming its smoothed channel gains directly.
+            val useEstimator = !gainsOk && currentWbMode != WhiteBalanceMode.KELVIN
+            if (useEstimator && wbEstimateFrame % 15 == 0) {
+                estimateAutoWhiteBalance(dest, rawW, rawH)
+            }
+
+            wbEstimateFrame++
+
+val neutral: FloatArray? = if (gainsOk) {
+            // The as-shot neutral is the inverse of the HAL's
+            // COLOR_CORRECTION_GAINS in every WB mode. In KELVIN the HAL is
+            // pinned to the D65 DAYLIGHT preset, so these gains describe the
+            // *scene* neutral under that fixed illuminant -- the profile must
+            // whiten it, then the app's relative Bradford CAT shifts D65 ->
+            // user Kelvin on top. Feeding SENSOR_NEUTRAL_COLOR_POINT here
+            // instead would white-bias by the D50(NCP)->D65(DAYLIGHT) gap and
+            // overcast the whole image green.
+            floatArrayOf(
+                1f / ccGains[0],
+                1f / ((ccGains[1] + ccGains[2]) * 0.5f),
+                1f / ccGains[3]
+            )
+        } else if (currentWbMode != WhiteBalanceMode.KELVIN) {
+            estimatorNeutral ?: rawNeutralSeed
+        } else {
+            rawNeutralSeed
+        }
+
+            val profileMat = neutral?.let { rawColorProfile?.srgbMatrixForNeutral(it)?.m }
+
+            if (profileMat != null) {
+                // Profile path: WB is folded into the matrix (neutral scene ->
+                // -> sRGB white), so channel gains stay neutral to avoid
+                // double-correcting on top of the matrix's white normalization.
+                previewRenderer.ccMatrix = profileMat
+                previewRenderer.wbGainR = 1f
+                previewRenderer.wbGainG = 1f
+                previewRenderer.wbGainB = 1f
+                if (wbEstimateFrame <= 3 || wbEstimateFrame % 60 == 0) {
+                    val temp = rawColorProfile?.temperatureForNeutral(neutral)
+                    CrashLogger.log(
+                        TAG, "dcp cc: frame=$wbEstimateFrame " +
+                            "temp=${temp?.toInt() ?: -1} " +
+                            "neutral=[${neutral.joinToString { String.format("%.3f", it) }}] " +
+                            "mat=[${profileMat.joinToString { String.format("%.4f", it) }}]"
+                    )
+                }
+            } else if (gainsOk) {
                 val gMean = (ccGains[1] + ccGains[2]) * 0.5f
                 if (gMean > 0f) {
                     previewRenderer.wbGainR = (ccGains[0] / gMean).coerceIn(0.3f, 8f)
@@ -2188,7 +2284,7 @@ class MainActivity : AppCompatActivity() {
                     previewRenderer.wbGainB = (ccGains[3] / gMean).coerceIn(0.3f, 8f)
                 }
                 previewRenderer.ccMatrix = ccMat
-                if (wbEstimateFrame++ % 60 == 0) {
+                if (wbEstimateFrame % 60 == 0) {
                     CrashLogger.log(
                         TAG, "hal cc: frame=$wbEstimateFrame " +
                             "gainsR=${String.format("%.3f", previewRenderer.wbGainR)} " +
@@ -2198,8 +2294,8 @@ class MainActivity : AppCompatActivity() {
                     )
                 }
             } else if (currentWbMode == WhiteBalanceMode.KELVIN) {
-                // Manual Kelvin with no HAL gains reported: stay neutral — the
-                // illumination comes only from the app's Kelvin CAT. Never run
+                // Manual Kelvin without a profile or HAL gains: stay neutral —
+                // the illumination comes from the app's Kelvin CAT. Never run
                 // the scene-adaptive estimator while in manual WB.
                 previewRenderer.wbGainR = 1f
                 previewRenderer.wbGainG = 1f
@@ -2207,9 +2303,6 @@ class MainActivity : AppCompatActivity() {
                 previewRenderer.ccMatrix = ccMat
             } else {
                 previewRenderer.ccMatrix = null
-                if (wbEstimateFrame++ % 15 == 0) {
-                    estimateAutoWhiteBalance(dest, rawW, rawH)
-                }
             }
             previewRenderer.setBayerFrame(dest, rawW, rawH, rawW)
         }
@@ -2349,18 +2442,44 @@ class MainActivity : AppCompatActivity() {
             val cm = getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
             val chars = cm.getCameraCharacteristics(lens.cameraId)
             val meta = RawMetadataParser(chars)
+            val profile = RawColorProfile(chars)
             previewRenderer.bayerColorMap = meta.bayerColorMap
             previewRenderer.bayerBlackLevelPattern = meta.blackLevelPattern
             previewRenderer.agxWhiteLevel = meta.whiteLevel.toFloat()
             previewRenderer.agxBlackLevel = meta.blackLevelAverage
-            val sensorGains = meta.sensorWhiteBalanceGains
-            previewRenderer.wbGainR = sensorGains[0]
-            previewRenderer.wbGainG = sensorGains[1]
-            previewRenderer.wbGainB = sensorGains[2]
+            rawNeutralSeed = meta.neutralColorPoint
+            estimatorNeutral = meta.neutralColorPoint
+            rawColorProfile = profile
+            if (profile.available) {
+                // WB is folded into the profile matrix: neutral scene ->
+                // -> sRGB white. Sensor-level gains stay neutral so they don't
+                // double-correct on top of the matrix's white normalization.
+                previewRenderer.wbGainR = 1f
+                previewRenderer.wbGainG = 1f
+                previewRenderer.wbGainB = 1f
+                previewRenderer.ccMatrix = profile.srgbMatrixForNeutral(meta.neutralColorPoint)?.m
+            } else {
+                rawColorProfile = null
+                val sensorGains = meta.sensorWhiteBalanceGains
+                previewRenderer.wbGainR = sensorGains[0]
+                previewRenderer.wbGainG = sensorGains[1]
+                previewRenderer.wbGainB = sensorGains[2]
+                previewRenderer.ccMatrix = null
+            }
             wbEstimateFrame = 0
-            CrashLogger.log(TAG, "applyRawMetadata: ${meta.sensorWidth}x${meta.sensorHeight} white=${meta.whiteLevel} " +
-                "blackAvg=${meta.blackLevelAverage} pattern=${meta.bayerPattern.label} " +
-                "wbGains=[${String.format("%.2f", sensorGains[0])}, ${String.format("%.2f", sensorGains[1])}, ${String.format("%.2f", sensorGains[2])}]")
+            CrashLogger.log(
+                TAG, "applyRawMetadata: ${meta.sensorWidth}x${meta.sensorHeight} white=${meta.whiteLevel} " +
+                    "blackAvg=${meta.blackLevelAverage} pattern=${meta.bayerPattern.label} " +
+                    "profile=${if (profile.available) "yes" else "no"} " +
+                    (if (profile.available)
+                        "illum=${profile.colorTemperature1.toInt()}K/${profile.colorTemperature2.toInt()}K fwd=${profile.hasForwardMatrix} " +
+                            "neutral=[${meta.neutralColorPoint.joinToString { String.format("%.3f", it) }}] " +
+                            "mat=[${previewRenderer.ccMatrix?.joinToString { String.format("%.4f", it) } ?: "null"}]"
+                    else
+                        "wbGains=[${String.format("%.2f", previewRenderer.wbGainR)}, " +
+                            "${String.format("%.2f", previewRenderer.wbGainG)}, " +
+                            "${String.format("%.2f", previewRenderer.wbGainB)}]")
+            )
             Log.d(TAG, "applyRawMetadata: ${meta.sensorWidth}x${meta.sensorHeight} white=${meta.whiteLevel} black=${meta.blackLevelAverage}")
         } catch (e: Exception) {
             Log.w(TAG, "applyRawMetadata failed: ${e.message}", e)
@@ -2376,6 +2495,9 @@ class MainActivity : AppCompatActivity() {
         previewRenderer.wbGainR = 1f
         previewRenderer.wbGainG = 1f
         previewRenderer.wbGainB = 1f
+        rawColorProfile = null
+        rawNeutralSeed = floatArrayOf(1f, 1f, 1f)
+        estimatorNeutral = null
     }
 
     private fun preparePreviewPipeline(previewSize: Size, targetAspect: Float) {
@@ -2397,6 +2519,13 @@ class MainActivity : AppCompatActivity() {
     private val rawBuffers = mutableListOf<ByteBuffer>()
     private var rawBufferFrame = 0
     private var wbEstimateFrame = 0
+
+    // Profile-derived RAW color path (static per camera; only the as-shot
+    // neutral varies frame to frame). Null when the device reports no usable
+    // sensor color transforms -- then the HAL COLOR_CORRECTION_* state is used.
+    private var rawColorProfile: RawColorProfile? = null
+    private var rawNeutralSeed = floatArrayOf(1f, 1f, 1f)
+    private var estimatorNeutral: FloatArray? = null
 
     private fun acquireRawBuffer(width: Int, height: Int): ByteBuffer {
         val needed = width * height * 2
@@ -2478,6 +2607,15 @@ class MainActivity : AppCompatActivity() {
         previewRenderer.wbGainR = previewRenderer.wbGainR + a * (targetR - previewRenderer.wbGainR)
         previewRenderer.wbGainB = previewRenderer.wbGainB + a * (targetB - previewRenderer.wbGainB)
 
+        // Feed the smoothed grey-world result as a sensor-space neutral
+        // (the inverse of the gains) for the profile-derived matrix path.
+        val prevNeutral = estimatorNeutral ?: floatArrayOf(1f, 1f, 1f)
+        estimatorNeutral = floatArrayOf(
+            prevNeutral[0] + a * (1f / targetR - prevNeutral[0]),
+            1f,
+            prevNeutral[2] + a * (1f / targetB - prevNeutral[2])
+        )
+
         if (logNow) {
             CrashLogger.log(
                 TAG, "wb estimate: frame=$wbEstimateFrame " +
@@ -2485,7 +2623,8 @@ class MainActivity : AppCompatActivity() {
                     "bAvg=${String.format("%.1f", avg[bPhase])} " +
                     "gains=${String.format("%.2f", previewRenderer.wbGainR)}," +
                     "${String.format("%.2f", previewRenderer.wbGainG)}," +
-                    "${String.format("%.2f", previewRenderer.wbGainB)}"
+                    "${String.format("%.2f", previewRenderer.wbGainB)}" +
+                    "neutral=[${estimatorNeutral?.joinToString { String.format("%.3f", it) } ?: "null"}]"
             )
         }
     }
@@ -2548,8 +2687,14 @@ class MainActivity : AppCompatActivity() {
         previewRenderer.zoomController.setZoom(restored.zoomFactor)
         previewRenderer.zoomController.pan(restored.zoomCenterX - previewRenderer.zoomController.zoomCenterX, restored.zoomCenterY - previewRenderer.zoomController.zoomCenterY)
 
-        currentWbMode = WhiteBalanceMode.entries[restored.wbModeOrdinal.coerceIn(0, WhiteBalanceMode.entries.size - 1)]
-        kelvinState = KelvinState(restored.kelvin, restored.kelvinTint)
+        // WB stays global across lens switches: never restore the target lens's
+        // saved snapshot, or the user's selected mode (e.g. Kelvin) is silently
+        // replaced by the other lens's stale AUTO. Push the current global mode
+        // to the HAL AWB request, or the new session inherits the *previous*
+        // lens's AWB mode (e.g. Kelvin's OFF) because Camera2Manager survives
+        // the close(). This must happen before openCamera builds the first
+        // request on the new device.
+        camera2Manager.setWhiteBalanceMode(wbModeToCameraMode(currentWbMode))
 
         // Flash mode is global, not per-lens: keep the current mode so the
         // torch does not get dropped when switching to a lens whose saved
@@ -3609,6 +3754,11 @@ override fun onResume() {
         private const val PREF_PREVIEW_RES_CAP = "preview_res_cap"
         private const val PREF_FOCUS_TIMEOUT = "focus_indicator_timeout"
         private const val PREF_STARTUP_PRESET = "startup_preset"
+        // White balance is a user preference, not a per-lens one: it persists
+        // across lens switches and app restarts (global, like flash mode).
+        private const val PREF_WB_MODE = "wb_mode_global"
+        private const val PREF_WB_KELVIN = "wb_kelvin_global"
+        private const val PREF_WB_TINT = "wb_tint_global"
         private const val RAW_BUFFER_POOL = 3
         // Post-processing EV roller: 0.5 EV per step over the ±10 EV range.
         private const val EV_PP_MAX_INDEX = 40
