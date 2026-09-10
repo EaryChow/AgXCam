@@ -762,7 +762,8 @@ class MainActivity : AppCompatActivity() {
                 if (focusDragging) {
                     focusDragging = false
                     // Re-scan at the dropped position so the move takes effect.
-                    applyFocusPoint(event.x, event.y, triggerScan = true)
+                    // The AE region stays where its own indicator sits.
+                    rescanFocusPoint(event.x, event.y)
                 }
                 if (aeDragging) {
                     aeDragging = false
@@ -1807,6 +1808,17 @@ class MainActivity : AppCompatActivity() {
         val lens = lensManager.activeLens ?: return
         val uv = viewToFrameCoords(viewX, viewY) ?: return
         autofocusController.moveFocusPoint(
+            uv[0], uv[1],
+            lensManager.getSensorActiveArraySize(lens),
+            previewRenderer.isFrontCamera
+        )
+    }
+
+    /** Drag-drop: re-scan focus at the drop point without moving the AE region. */
+    private fun rescanFocusPoint(viewX: Float, viewY: Float) {
+        val lens = lensManager.activeLens ?: return
+        val uv = viewToFrameCoords(viewX, viewY) ?: return
+        autofocusController.rescanFocusPoint(
             uv[0], uv[1],
             lensManager.getSensorActiveArraySize(lens),
             previewRenderer.isFrontCamera

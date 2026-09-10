@@ -632,6 +632,11 @@ class Camera2Manager(private val context: Context) {
     // once; later re-applications of the same scan omit the trigger keys (a
     // trigger acts on the first frame only and re-firing would restart the scan).
     private var scanTriggerFired = false
+    // The independent AE region's pre-capture START has been emitted once for
+    // the current landing point; later re-applications of the same region send
+    // TRIGGER_IDLE so the HAL keeps re-converging exposure as the region moves.
+    // Reset whenever a fresh region is parked (tap/drop, entering MF, clearing).
+    private var aeTriggerSent = false
     // A settled tap-to-focus lock carried on the repeating request. Once a tap
     // converges, applyPreviewRequest() re-applies CONTROL_AF_MODE_AUTO + the
     // tapped region + CONTROL_AF_TRIGGER_IDLE instead of reverting to plain
@@ -643,6 +648,7 @@ class Camera2Manager(private val context: Context) {
         if (rect == null) {
             meteringRegions = null
             aeRegions = null
+            aeTriggerSent = false
             isAfScanning = false
             tapFocusHeld = false
             applyPreviewRequest()
@@ -658,9 +664,11 @@ class Camera2Manager(private val context: Context) {
             return
         }
 
-        // A fresh tap re-merges AE with the focus region: both indicators
-        // reappear at the same spot until the user drags AE away again.
-        aeRegions = null
+        // A fresh tap seeds BOTH regions at the tap point: two independent
+        // regions (focus = AF, AE = exposure metering) that initially coincide
+        // and thereafter move independently when either indicator is dragged.
+        aeRegions = arrayOf(rect)
+        aeTriggerSent = false
         meteringRegions = arrayOf(rect)
         triggerRegionFocus(rect)
     }
@@ -687,10 +695,19 @@ class Camera2Manager(private val context: Context) {
     }
 
     /**
+     * Re-run the focus scan at the focus region after a focus-indicator drag
+     * drop. Unlike a fresh tap ([setMeteringRegion]) the independent AE region
+     * is untouched, so the AE box stays where the user left it.
+     */
+    fun rescanFocusRegion(rect: MeteringRectangle) {
+        triggerRegionFocus(rect)
+    }
+
+    /**
      * Set the independent auto-exposure metering region (auto exposure mode
-     * only). When the user taps to focus, [setMeteringRegion] clears this so AE
-     * re-merges with the tapped focus region; dragging the AE indicator sets it
-     * separately.
+     * only). A fresh tap seeds AE at the tapped focus point; dragging the AE
+     * indicator sets it separately. Moving the focus indicator never touches
+     * this region.
      */
     fun setAeRegion(rect: MeteringRectangle) {
         if (isManualExposure || focusLocked) return
@@ -699,8 +716,21 @@ class Camera2Manager(private val context: Context) {
             CrashLogger.log(TAG, "setAeRegion: device has 0 AE regions, ignoring")
             return
         }
+        val previous = aeRegions?.firstOrNull()?.rect
         aeRegions = arrayOf(rect)
+        // A fresh landing point re-kicks AE convergence (one pre-capture START).
+        // Re-parks at the same point (e.g. the zoom listener keeps the AE box
+        // glued to its indicator) must not restart that cycle.
+        if (previous == null || !sameLandingPoint(previous, rect.rect)) {
+            aeTriggerSent = false
+        }
         applyPreviewRequest()
+    }
+
+    /** True when two AE rects are parked on the same center (same landing point). */
+    private fun sameLandingPoint(a: Rect, b: Rect): Boolean {
+        return Math.abs(a.exactCenterX() - b.exactCenterX()) < 1f &&
+            Math.abs(a.exactCenterY() - b.exactCenterY()) < 1f
     }
 
     /** Live-drag: retarget the independent AE region without restarting any scan. */
@@ -795,6 +825,7 @@ class Camera2Manager(private val context: Context) {
     fun clearFocusRegion() {
         meteringRegions = null
         aeRegions = null
+        aeTriggerSent = false
         isAfScanning = false
         focusLocked = false
         tapFocusHeld = false
@@ -842,6 +873,7 @@ class Camera2Manager(private val context: Context) {
         }
         meteringRegions = null
         ++focusGeneration
+        aeTriggerSent = false
         CrashLogger.log(TAG, "setManualFocus distance=$distance minDistance=$deviceMinFocusDistance")
         applyPreviewRequest()
     }
@@ -918,19 +950,22 @@ class Camera2Manager(private val context: Context) {
                 if (currentExposureComp != 0) {
                     set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, currentExposureComp)
                 }
-                // AE regions: independent region if the user parked one, otherwise
-                // follow the tapped focus (scan/hold) region.
+                // AE region: the independent AE metering box only. A fresh tap seeds it
+                // at the tap point; only dragging the AE box moves it, and
+                // dragging the focus box does not.
                 if (deviceMaxAeRegions > 0) {
-                    val aeRegionToUse = aeRegions ?: (if (carryRegion) tapRegions else null)
+                    val aeRegionToUse = aeRegions
                     if (aeRegionToUse != null) {
                         set(CaptureRequest.CONTROL_AE_REGIONS, aeRegionToUse)
-                    }
-                }
-                if (carryRegion) {
-                    if (scanning && !scanTriggerFired) {
-                        set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
-                    } else if (useTapHold) {
-                        set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_IDLE)
+                        // Keep an AE pre-capture trigger key on the request so the
+                        // HAL re-converges exposure when the region is placed or
+                        // moves. START once per fresh landing point, IDLE afterwards.
+                        set(
+                            CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
+                            if (aeTriggerSent) CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_IDLE
+                            else CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START
+                        )
+                        aeTriggerSent = true
                     }
                 }
                 currentFlashMode.applyToRequest(this, availableAeModes)
@@ -940,7 +975,7 @@ class Camera2Manager(private val context: Context) {
 
         if (scanning) scanTriggerFired = true
 
-        if (log) CrashLogger.log(TAG, "applyPreviewRequest: awb=${awbModeName(effectiveAwbMode())} af=$afMode locked=$focusLocked tapHold=$useTapHold scan=$scanning frozenLens=${frozenLens ?: "no"} awbLocked=$isAwbLocked manual=$isManualExposure iso=$currentManualIso shutter=${currentManualExposureNs}")
+        if (log) CrashLogger.log(TAG, "applyPreviewRequest: awb=${awbModeName(effectiveAwbMode())} af=$afMode locked=$focusLocked tapHold=$useTapHold scan=$scanning frozenLens=${frozenLens ?: "no"} awbLocked=$isAwbLocked manual=$isManualExposure iso=$currentManualIso shutter=${currentManualExposureNs} aeTrigger=$aeTriggerSent aeRegions=${aeRegions?.contentToString() ?: "no"}")
 
         try {
             session.setRepeatingRequest(request.build(), aeReadoutCallback, backgroundHandler)
@@ -1399,6 +1434,7 @@ CaptureRequest.CONTROL_AWB_MODE_SHADE -> "SHADE"
 
             CrashLogger.log(TAG,
                 "onCaptureCompleted: afState=$afStateAtTop afMode=$afMode aeState=$aeState lensFocus=$lensFocusD " +
+                "iso=$iso shutter=${exposureTime?.let { formatNs(it) } ?: "n/a"} " +
                 "afRegions=${reportedAfRegions?.contentToString()} " +
                 "aeRegions=${reportedAeRegions?.contentToString()}"
             )

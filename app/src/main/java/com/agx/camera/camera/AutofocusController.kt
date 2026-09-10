@@ -43,6 +43,19 @@ class AutofocusController(
     }
 
     /**
+     * Focus-indicator drag drop: re-run the focus scan at the dropped position
+     * without re-parking the AE region (unlike a fresh tap, which seeds both).
+     */
+    fun rescanFocusPoint(u: Float, v: Float, activeArray: Rect, isFrontCamera: Boolean) {
+        if (activeArray.width() <= 0 || activeArray.height() <= 0) return
+        currentRect = normalizedToMeteringRect(u, v, activeArray, isFrontCamera)
+        if (!isLocked) {
+            val rect = currentRect ?: return
+            cameraManager.rescanFocusRegion(rect)
+        }
+    }
+
+    /**
      * Set the independent auto-exposure metering region (auto exposure mode).
      * Maps to the same 33% box geometry as the AF region.
      */
