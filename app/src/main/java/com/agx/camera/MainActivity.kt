@@ -971,32 +971,32 @@ class MainActivity : AppCompatActivity() {
 
         insetRotRSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(rotation = floatArrayOf(progressToRot(v.toFloat()), agxParams.rotation[1], agxParams.rotation[2]))
-            insetRotRLabel.text = String.format("Red Rotation  %.3f", agxParams.rotation[0])
+            insetRotRLabel.text = String.format("Red Rotation  %.2f", Math.toDegrees(agxParams.rotation[0].toDouble()))
             uploadAgxUniforms()
         })
         setupSliderDoubleClickReset(insetRotRSlider, rotToProgress(AgxParams().rotation[0])) {
             agxParams = agxParams.copy(rotation = floatArrayOf(AgxParams().rotation[0], agxParams.rotation[1], agxParams.rotation[2]))
-            insetRotRLabel.text = String.format("Red Rotation  %.3f", agxParams.rotation[0])
+            insetRotRLabel.text = String.format("Red Rotation  %.2f", Math.toDegrees(agxParams.rotation[0].toDouble()))
             uploadAgxUniforms()
         }
         insetRotGSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(rotation = floatArrayOf(agxParams.rotation[0], progressToRot(v.toFloat()), agxParams.rotation[2]))
-            insetRotGLabel.text = String.format("Green Rotation  %.3f", agxParams.rotation[1])
+            insetRotGLabel.text = String.format("Green Rotation  %.2f", Math.toDegrees(agxParams.rotation[1].toDouble()))
             uploadAgxUniforms()
         })
         setupSliderDoubleClickReset(insetRotGSlider, rotToProgress(AgxParams().rotation[1])) {
             agxParams = agxParams.copy(rotation = floatArrayOf(agxParams.rotation[0], AgxParams().rotation[1], agxParams.rotation[2]))
-            insetRotGLabel.text = String.format("Green Rotation  %.3f", agxParams.rotation[1])
+            insetRotGLabel.text = String.format("Green Rotation  %.2f", Math.toDegrees(agxParams.rotation[1].toDouble()))
             uploadAgxUniforms()
         }
         insetRotBSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(rotation = floatArrayOf(agxParams.rotation[0], agxParams.rotation[1], progressToRot(v.toFloat())))
-            insetRotBLabel.text = String.format("Blue Rotation  %.3f", agxParams.rotation[2])
+            insetRotBLabel.text = String.format("Blue Rotation  %.2f", Math.toDegrees(agxParams.rotation[2].toDouble()))
             uploadAgxUniforms()
         })
         setupSliderDoubleClickReset(insetRotBSlider, rotToProgress(AgxParams().rotation[2])) {
             agxParams = agxParams.copy(rotation = floatArrayOf(agxParams.rotation[0], agxParams.rotation[1], AgxParams().rotation[2]))
-            insetRotBLabel.text = String.format("Blue Rotation  %.3f", agxParams.rotation[2])
+            insetRotBLabel.text = String.format("Blue Rotation  %.2f", Math.toDegrees(agxParams.rotation[2].toDouble()))
             uploadAgxUniforms()
         }
 
@@ -1033,32 +1033,32 @@ class MainActivity : AppCompatActivity() {
 
         outsetRotRSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(reverseRotation = floatArrayOf(progressToRot(v.toFloat()), agxParams.reverseRotation[1], agxParams.reverseRotation[2]))
-            outsetRotRLabel.text = String.format("Reverse R  %.3f", agxParams.reverseRotation[0])
+            outsetRotRLabel.text = String.format("Reverse R  %.2f", Math.toDegrees(agxParams.reverseRotation[0].toDouble()))
             uploadAgxUniforms()
         })
         setupSliderDoubleClickReset(outsetRotRSlider, rotToProgress(AgxParams().reverseRotation[0])) {
             agxParams = agxParams.copy(reverseRotation = floatArrayOf(AgxParams().reverseRotation[0], agxParams.reverseRotation[1], agxParams.reverseRotation[2]))
-            outsetRotRLabel.text = String.format("Reverse R  %.3f", agxParams.reverseRotation[0])
+            outsetRotRLabel.text = String.format("Reverse R  %.2f", Math.toDegrees(agxParams.reverseRotation[0].toDouble()))
             uploadAgxUniforms()
         }
         outsetRotGSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(reverseRotation = floatArrayOf(agxParams.reverseRotation[0], progressToRot(v.toFloat()), agxParams.reverseRotation[2]))
-            outsetRotGLabel.text = String.format("Reverse G  %.3f", agxParams.reverseRotation[1])
+            outsetRotGLabel.text = String.format("Reverse G  %.2f", Math.toDegrees(agxParams.reverseRotation[1].toDouble()))
             uploadAgxUniforms()
         })
         setupSliderDoubleClickReset(outsetRotGSlider, rotToProgress(AgxParams().reverseRotation[1])) {
             agxParams = agxParams.copy(reverseRotation = floatArrayOf(agxParams.reverseRotation[0], AgxParams().reverseRotation[1], agxParams.reverseRotation[2]))
-            outsetRotGLabel.text = String.format("Reverse G  %.3f", agxParams.reverseRotation[1])
+            outsetRotGLabel.text = String.format("Reverse G  %.2f", Math.toDegrees(agxParams.reverseRotation[1].toDouble()))
             uploadAgxUniforms()
         }
         outsetRotBSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             agxParams = agxParams.copy(reverseRotation = floatArrayOf(agxParams.reverseRotation[0], agxParams.reverseRotation[1], progressToRot(v.toFloat())))
-            outsetRotBLabel.text = String.format("Reverse B  %.3f", agxParams.reverseRotation[2])
+            outsetRotBLabel.text = String.format("Reverse B  %.2f", Math.toDegrees(agxParams.reverseRotation[2].toDouble()))
             uploadAgxUniforms()
         })
         setupSliderDoubleClickReset(outsetRotBSlider, rotToProgress(AgxParams().reverseRotation[2])) {
             agxParams = agxParams.copy(reverseRotation = floatArrayOf(agxParams.reverseRotation[0], agxParams.reverseRotation[1], AgxParams().reverseRotation[2]))
-            outsetRotBLabel.text = String.format("Reverse B  %.3f", agxParams.reverseRotation[2])
+            outsetRotBLabel.text = String.format("Reverse B  %.2f", Math.toDegrees(agxParams.reverseRotation[2].toDouble()))
             uploadAgxUniforms()
         }
 
@@ -1381,11 +1381,11 @@ class MainActivity : AppCompatActivity() {
         val rotRange = 0.5236f
         fun rotToProgress(v: Float) = ((v + rotRange) / (rotRange * 2) * 524).toInt().coerceIn(0, 524)
         insetRotRSlider.progress = rotToProgress(agxParams.rotation[0])
-        insetRotRLabel.text = String.format("Red Rotation  %.3f", agxParams.rotation[0])
+        insetRotRLabel.text = String.format("Red Rotation  %.2f", Math.toDegrees(agxParams.rotation[0].toDouble()))
         insetRotGSlider.progress = rotToProgress(agxParams.rotation[1])
-        insetRotGLabel.text = String.format("Green Rotation  %.3f", agxParams.rotation[1])
+        insetRotGLabel.text = String.format("Green Rotation  %.2f", Math.toDegrees(agxParams.rotation[1].toDouble()))
         insetRotBSlider.progress = rotToProgress(agxParams.rotation[2])
-        insetRotBLabel.text = String.format("Blue Rotation  %.3f", agxParams.rotation[2])
+        insetRotBLabel.text = String.format("Blue Rotation  %.2f", Math.toDegrees(agxParams.rotation[2].toDouble()))
 
         insetPurRSlider.progress = agxParams.attenuation[0].toInt().coerceIn(0, 60)
         insetPurRLabel.text = String.format("Attenuation R  %.1f", agxParams.attenuation[0])
@@ -1399,11 +1399,11 @@ class MainActivity : AppCompatActivity() {
         val rotRange = 0.5236f
         fun rotToProgress(v: Float) = ((v + rotRange) / (rotRange * 2) * 524).toInt().coerceIn(0, 524)
         outsetRotRSlider.progress = rotToProgress(agxParams.reverseRotation[0])
-        outsetRotRLabel.text = String.format("Reverse R  %.3f", agxParams.reverseRotation[0])
+        outsetRotRLabel.text = String.format("Reverse R  %.2f", Math.toDegrees(agxParams.reverseRotation[0].toDouble()))
         outsetRotGSlider.progress = rotToProgress(agxParams.reverseRotation[1])
-        outsetRotGLabel.text = String.format("Reverse G  %.3f", agxParams.reverseRotation[1])
+        outsetRotGLabel.text = String.format("Reverse G  %.2f", Math.toDegrees(agxParams.reverseRotation[1].toDouble()))
         outsetRotBSlider.progress = rotToProgress(agxParams.reverseRotation[2])
-        outsetRotBLabel.text = String.format("Reverse B  %.3f", agxParams.reverseRotation[2])
+        outsetRotBLabel.text = String.format("Reverse B  %.2f", Math.toDegrees(agxParams.reverseRotation[2].toDouble()))
 
         outsetPurRSlider.progress = agxParams.purityBoost[0].toInt().coerceIn(0, 60)
         outsetPurRLabel.text = String.format("Purity Boost R  %.1f", agxParams.purityBoost[0])
