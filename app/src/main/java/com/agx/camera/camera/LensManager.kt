@@ -22,8 +22,20 @@ data class LensInfo(
     val jpegOutputSizes: Array<android.util.Size> = emptyArray(),
     val sensorActiveWidth: Int = 0,
     val sensorActiveHeight: Int = 0,
-    val maxDigitalZoom: Float = 1.0f
+    val maxDigitalZoom: Float = 1.0f,
+    val sensorWidthMm: Float = 0f,
+    val sensorHeightMm: Float = 0f
 ) {
+    val focalLength35mmEq: Float
+        get() {
+            if (focalLengthMm <= 0f) return 0f
+            val diagonal = kotlin.math.sqrt(
+                sensorWidthMm * sensorWidthMm + sensorHeightMm * sensorHeightMm
+            )
+            if (diagonal <= 0f) return 0f
+            return focalLengthMm * 43.27f / diagonal
+        }
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is LensInfo) return false
@@ -177,14 +189,16 @@ class LensManager(private val context: Context) {
                 hasRaw -> "streamConfig"
                 else -> "none"
             }
-            CrashLogger.log(TAG, "enumerate: id=$id facing=$facing level=$level focal=$focal focalLens=$allFocalLengths logicalPhysical=${logicalPhysicalIds?.joinToString() ?: "-"} physicalCameraIds=$physicalIds caps=$capNames")
+            CrashLogger.log(TAG, "enumerate: id=$id facing=$facing level=$level focal=$focal focalLens=$allFocalLengths sensor=${chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)} logicalPhysical=${logicalPhysicalIds?.joinToString() ?: "-"} physicalCameraIds=$physicalIds caps=$capNames")
             CrashLogger.log(TAG, "enumerate: id=$id hasRaw=$hasRaw rawDetect=$rawDetectMethod maxAfRegions=$maxAfRegions maxAeRegions=$maxAeRegions afModes=${afModes.toList()} minFocusDist=$minFocusDist hasFlash=$hasFlash multiKeys=$multiKeys")
 
             _lenses.add(LensInfo(id, facing, focal, hasRaw, level, "",
                 jpegOutputSizes = streamMap?.getOutputSizes(android.graphics.ImageFormat.JPEG) ?: emptyArray(),
                 sensorActiveWidth = activeArray?.width() ?: 0,
                 sensorActiveHeight = activeArray?.height() ?: 0,
-                maxDigitalZoom = (chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1.0f)
+                maxDigitalZoom = (chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1.0f),
+                sensorWidthMm = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.width ?: 0f,
+                sensorHeightMm = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.height ?: 0f
             ))
             hasSupportedLens = true
         }
@@ -296,12 +310,14 @@ class LensManager(private val context: Context) {
             return false
         }
 
-        CrashLogger.log(TAG, "enumerate: add discovered id=$id facing=$facing level=$level focal=$focal hasRaw=$hasRaw")
+        CrashLogger.log(TAG, "enumerate: add discovered id=$id facing=$facing level=$level focal=$focal sensor=${chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)} hasRaw=$hasRaw")
         _lenses.add(LensInfo(id, facing, focal, hasRaw, level, "",
             jpegOutputSizes = streamMap?.getOutputSizes(ImageFormat.JPEG) ?: emptyArray(),
             sensorActiveWidth = activeW,
             sensorActiveHeight = activeH,
-            maxDigitalZoom = chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1.0f
+            maxDigitalZoom = chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1.0f,
+            sensorWidthMm = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.width ?: 0f,
+            sensorHeightMm = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.height ?: 0f
         ))
         return true
     }

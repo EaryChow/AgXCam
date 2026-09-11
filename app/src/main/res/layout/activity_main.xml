@@ -272,6 +272,23 @@
             android:visibility="gone" />
     </FrameLayout>
 
+    <!-- Transient details about the newly selected lens, auto-dismissing -->
+    <TextView
+        android:id="@+id/lens_info_overlay"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="72dp"
+        android:background="#CC111111"
+        android:gravity="center"
+        android:lineSpacingExtra="2dp"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="10dp"
+        android:text=""
+        android:textColor="#FFFFFFFF"
+        android:textSize="13sp"
+        android:visibility="gone" />
+
     <!-- Bottom Controls — compact, no overlap -->
     <LinearLayout
         android:layout_width="match_parent"

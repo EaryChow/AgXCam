@@ -13,6 +13,7 @@ data class CaptureMetadata(
     val sensorOrientation: Int,
     val exifOrientation: Int,
     val focalLengthMm: Float,
+    val focalLength35mm: Int = 0,
     val iso: Int,
     val exposureTimeNs: Long,
     val flashMode: FlashMode,
@@ -142,6 +143,9 @@ object ExifWriter {
         tags.add(ExifTag(0x829A, TYPE_RATIONAL, longArrayOf(expNum, expDen)))
         val flNum = (metadata.focalLengthMm * 100).toInt()
         tags.add(ExifTag(0x920A, TYPE_RATIONAL, longArrayOf(flNum.toLong(), 100L)))
+        if (metadata.focalLength35mm > 0) {
+            tags.add(ExifTag(0xA405, TYPE_SHORT, longArrayOf(metadata.focalLength35mm.toLong())))
+        }
 
         tags.add(ExifTag(0x010F, TYPE_ASCII, stringData = metadata.make.toByteArray(Charsets.US_ASCII) + 0x00.toByte()))
         tags.add(ExifTag(0x0110, TYPE_ASCII, stringData = metadata.model.toByteArray(Charsets.US_ASCII) + 0x00.toByte()))

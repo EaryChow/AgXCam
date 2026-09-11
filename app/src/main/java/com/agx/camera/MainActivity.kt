@@ -116,6 +116,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var settingsPanel: ScrollView
     private lateinit var finishingCaptureOverlay: TextView
     private lateinit var lensSwitchOverlay: TextView
+    private lateinit var lensInfoOverlay: TextView
+    // Only show the transient lens-info message when trigger by an actual lens
+    // switch (set in switchToLens, consumed on the new session being ready).
+    private var pendingLensInfo = false
 
     // Shutter / Thermal
     private lateinit var shutterButton: ImageView
@@ -317,6 +321,7 @@ class MainActivity : AppCompatActivity() {
         settingsPanel = findViewById(R.id.settings_panel)
         finishingCaptureOverlay = findViewById(R.id.finishing_capture_overlay)
         lensSwitchOverlay = findViewById(R.id.lens_switch_overlay)
+        lensInfoOverlay = findViewById(R.id.lens_info_overlay)
 
         presetSpinner = findViewById(R.id.preset_spinner)
         presetAddBtn = findViewById(R.id.preset_add_btn)
@@ -605,6 +610,7 @@ class MainActivity : AppCompatActivity() {
                         ?.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
                         ?.getOrNull(0)
                 } ?: 4.0f,
+                focalLength35mm = lensManager.activeLens?.let { Math.round(it.focalLength35mmEq) } ?: 0,
                 agxSceneLinearTo709 = previewRenderer.agxSceneLinearTo709.copyOf(),
                 agxInsetMat = previewRenderer.agxInsetMat.copyOf(),
                 agxOutsetMat = previewRenderer.agxOutsetMat.copyOf(),
@@ -1941,6 +1947,57 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val lensInfoHideRunnable = Runnable {
+        lensInfoOverlay.animate().cancel()
+        lensInfoOverlay.animate().alpha(0f).setDuration(300).withEndAction {
+            lensInfoOverlay.visibility = View.GONE
+        }.start()
+    }
+
+    // Transient details of the newly switched lens: fade in, hold, fade out.
+    private fun showLensInfoMessage(text: String) {
+        if (!::lensInfoOverlay.isInitialized) return
+        lensInfoOverlay.removeCallbacks(lensInfoHideRunnable)
+        lensInfoOverlay.text = text
+        lensInfoOverlay.visibility = View.VISIBLE
+        lensInfoOverlay.animate().cancel()
+        lensInfoOverlay.alpha = 0f
+        lensInfoOverlay.animate().alpha(1f).setDuration(150).start()
+        lensInfoOverlay.postDelayed(lensInfoHideRunnable, 3000)
+    }
+
+    private fun lensDetailSummary(lens: LensInfo): String {
+        val facing = if (lens.facing == CameraCharacteristics.LENS_FACING_BACK) "Rear" else "Front"
+        val sensor = if (lens.sensorActiveWidth > 0 && lens.sensorActiveHeight > 0) {
+            "${lens.sensorActiveWidth}x${lens.sensorActiveHeight}"
+        } else {
+            lens.jpegOutputSizes.maxByOrNull { it.width.toLong() * it.height }
+                ?.let { "${it.width}x${it.height}" } ?: "?"
+        }
+        val hw = when (lens.hardwareLevel) {
+            CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY -> "LEGACY"
+            CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LIMITED -> "LIMITED"
+            CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_FULL -> "FULL"
+            CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_3 -> "LEVEL 3"
+            CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_EXTERNAL -> "EXTERNAL"
+            else -> "HW ${lens.hardwareLevel}"
+        }
+        return buildString {
+            append(facing).append(" · ").append(lens.label)
+            if (lens.focalLengthMm > 0f) {
+                val eq35 = lens.focalLength35mmEq
+                if (eq35 > 0f) {
+                    append(String.format(" · %dmm", Math.round(eq35)))
+                } else {
+                    append(String.format(" · %.1fmm", lens.focalLengthMm))
+                }
+            }
+            append('\n')
+            append(sensor).append(" · ").append(if (lens.hasRawSensor) "RAW" else "YUV")
+            append(" · ").append(hw)
+        }
+    }
+
     private fun disableTapToFocus() {
         currentLensCanTapToFocus = false
     }
@@ -2369,6 +2426,10 @@ val neutral: FloatArray? = if (gainsOk) {
 
             mainHandler.post {
                 lensSwitchOverlay.visibility = View.GONE
+                if (pendingLensInfo) {
+                    pendingLensInfo = false
+                    lensManager.activeLens?.let { showLensInfoMessage(lensDetailSummary(it)) }
+                }
                 // Re-apply the active WB mode to the fresh session. The HAL mode
                 // (Camera2Manager.currentAwbMode) does not survive a lens switch,
                 // but the restored per-lens WB state lives in currentWbMode;
@@ -2702,6 +2763,7 @@ val neutral: FloatArray? = if (gainsOk) {
 
         lensSwitchOverlay.text = "Switching to ${targetLens.label}\u2026"
         lensSwitchOverlay.visibility = View.VISIBLE
+        pendingLensInfo = true
 
         mainHandler.removeCallbacks(stallWatchdogRunnable)
 
@@ -2815,7 +2877,12 @@ val neutral: FloatArray? = if (gainsOk) {
             isFocusable = true
             setOnClickListener { if (lens.cameraId != lensManager.activeLens?.cameraId) switchToLens(lens) }
             setOnLongClickListener {
-                Toast.makeText(this@MainActivity, "${lens.label}: ${lens.focalLengthMm}mm, HW level ${lens.hardwareLevel}", Toast.LENGTH_SHORT).show()
+                val focal = if (lens.focalLength35mmEq > 0f) {
+                    "${Math.round(lens.focalLength35mmEq)}mm (${String.format("%.1f", lens.focalLengthMm)} physical)"
+                } else {
+                    "${String.format("%.1f", lens.focalLengthMm)}mm"
+                }
+                Toast.makeText(this@MainActivity, "${lens.label}: $focal, HW level ${lens.hardwareLevel}", Toast.LENGTH_SHORT).show()
                 true
             }
         }
@@ -3141,6 +3208,7 @@ override fun onResume() {
                     sensorOrientation = sensorOrientation,
                     exifOrientation = exifOrientation,
                     focalLengthMm = focalLengthMm,
+                    focalLength35mm = session.focalLength35mm,
                     iso = iso,
                     exposureTimeNs = exposureNs,
                     flashMode = session.flashMode,
@@ -3202,6 +3270,7 @@ override fun onResume() {
             sensorOrientation = session.sensorOrientation,
             exifOrientation = exifOrientation,
             focalLengthMm = session.focalLengthMm,
+            focalLength35mm = session.focalLength35mm,
             iso = rawIso,
             exposureTimeNs = rawShutterNs,
             flashMode = session.flashMode,
@@ -3290,6 +3359,7 @@ override fun onResume() {
         val deviceOrientation: Int,
         val sensorOrientation: Int,
         val focalLengthMm: Float,
+        val focalLength35mm: Int,
         val agxSceneLinearTo709: FloatArray,
         val agxInsetMat: FloatArray,
         val agxOutsetMat: FloatArray,
