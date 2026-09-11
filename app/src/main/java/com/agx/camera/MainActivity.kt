@@ -187,6 +187,9 @@ class MainActivity : AppCompatActivity() {
     // geometry, before showFocusIndicator re-centers them; used so a drag that
     // starts on the AE-only strip/bulb moves only the AE indicator.
     private var pendingGrabMode: IndicatorDragMode? = null
+    // Deferred tap on empty preview, confirmed only on ACTION_UP so a two-finger
+    // pinch is never first registered as a tap.
+    private var pendingTap = false
 
     // Pinch-to-zoom
     private var scaleGestureDetector: ScaleGestureDetector? = null
@@ -672,6 +675,12 @@ class MainActivity : AppCompatActivity() {
         textureView.setOnTouchListener { _, event ->
             scaleGestureDetector?.onTouchEvent(event) // always feed; never veto on its return value
 
+            // Any second finger (pinch) cancels a pending tap, however early.
+            if (event.actionMasked == MotionEvent.ACTION_POINTER_DOWN ||
+                event.actionMasked == MotionEvent.ACTION_POINTER_UP) {
+                pendingTap = false
+            }
+
             if (event.action == MotionEvent.ACTION_DOWN && cameraReady) {
                 if (isoPopupShowing || shutterPopupShowing || evPopupShowing) {
                     dismissAllPopups()
@@ -682,6 +691,7 @@ class MainActivity : AppCompatActivity() {
                     settingsPanel.visibility = View.GONE
                     return@setOnTouchListener true
                 }
+                pendingTap = false
                 if (!isManualFocus && !autofocusController.isLocked && currentLensCanTapToFocus) {
                     focusDragging = false
                     aeDragging = false
@@ -689,16 +699,16 @@ class MainActivity : AppCompatActivity() {
                     focusDragStartY = event.y
                     // A DOWN on any visible indicator part is a drag grab, never
                     // a tap-to-focus: grabbing the AE-only strip/bulb drags
-                    // exposure, everything else drags focus. Only a DOWN on empty
-                    // preview is a fresh tap (re-center + scan).
+                    // exposure, everything else drags focus. A DOWN on empty
+                    // preview is a tap candidate, confirmed on UP so a pinch is
+                    // not registered as a tap.
                     val grab = if (focusIndicator.visibility == View.VISIBLE &&
                         aeIndicator.visibility == View.VISIBLE) {
                         dragGrabMode(event.x, event.y)
                     } else null
                     pendingGrabMode = grab
                     if (grab == null) {
-                        showFocusIndicator(event.x, event.y)
-                        applyFocusPoint(event.x, event.y)
+                        pendingTap = true
                     }
                 } else if (isManualFocus) {
                     // MF: focus is frozen, but the auto-exposure metering region can
@@ -706,15 +716,12 @@ class MainActivity : AppCompatActivity() {
                     // drag it). Manual exposure has no AE region to move.
                     pendingGrabMode = null
                     if (!isManualMode) {
+                        focusDragStartX = event.x
+                        focusDragStartY = event.y
                         if (aeIndicator.visibility == View.VISIBLE && aeGrabArea(event.x, event.y)) {
                             pendingGrabMode = IndicatorDragMode.AE
                         } else {
-                            showAeIndicator(event.x, event.y)
-                            applyAePoint(event.x, event.y)
-                            // Keep the EV slider anchored to the AE indicator.
-                            if (evSliderContainer?.visibility == View.VISIBLE) {
-                                positionEvSliderAt()
-                            }
+                            pendingTap = true
                         }
                     }
                 }
@@ -771,15 +778,32 @@ class MainActivity : AppCompatActivity() {
                     // Drop the AE metering region at the final position.
                     applyAePoint(event.x, event.y)
                 }
-                // A grab that never became a drag is a tap on the indicator:
-                // re-center both and focus there.
-                if (event.action == MotionEvent.ACTION_UP && !dragJustEnded &&
-                    pendingGrabMode != null && !isManualFocus && !autofocusController.isLocked &&
-                    currentLensCanTapToFocus) {
-                    showFocusIndicator(event.x, event.y)
-                    applyFocusPoint(event.x, event.y)
+                // A confirmed tap happens only on ACTION_UP: a grab that never
+                // became a drag, or an empty-preview tap that no pinch cancelled.
+                if (event.action == MotionEvent.ACTION_UP && !dragJustEnded && !isScaling) {
+                    if (pendingTap) {
+                        if (isManualFocus && !isManualMode) {
+                            showAeIndicator(event.x, event.y)
+                            applyAePoint(event.x, event.y)
+                            // Keep the EV slider anchored to the AE indicator.
+                            if (evSliderContainer?.visibility == View.VISIBLE) {
+                                positionEvSliderAt()
+                            }
+                        } else if (!isManualFocus && !autofocusController.isLocked &&
+                            currentLensCanTapToFocus) {
+                            showFocusIndicator(event.x, event.y)
+                            applyFocusPoint(event.x, event.y)
+                        }
+                    } else if (pendingGrabMode != null && !isManualFocus &&
+                        !autofocusController.isLocked && currentLensCanTapToFocus) {
+                        // A grab that never became a drag is a tap on the indicator:
+                        // re-center both and focus there.
+                        showFocusIndicator(event.x, event.y)
+                        applyFocusPoint(event.x, event.y)
+                    }
                 }
                 pendingGrabMode = null
+                pendingTap = false
                 // Timeout restarts counting from 0 after the drag (never in MF: the AE
                 // indicator stays while focus is manual).
                 if (dragJustEnded && focusIndicatorTimeoutMs > 0 && !autofocusController.isLocked && !isManualFocus) {
@@ -2004,6 +2028,7 @@ class MainActivity : AppCompatActivity() {
         scaleGestureDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
                 isScaling = true
+                pendingTap = false
                 return true
             }
 
