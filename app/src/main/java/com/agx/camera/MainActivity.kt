@@ -1613,7 +1613,7 @@ class MainActivity : AppCompatActivity() {
         aeIndicator.x = x - w / 2f
         aeIndicator.y = y - h / 2f
         // Solid light bulb right below the rectangle; dragging it drags AE too.
-        val bulbSize = 14 * resources.displayMetrics.density
+        val bulbSize = 20 * resources.displayMetrics.density
         val bulbGap = 2 * resources.displayMetrics.density
         aeBulb.x = x - bulbSize / 2f
         aeBulb.y = aeIndicator.y + h + bulbGap
@@ -1641,52 +1641,64 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Decide which indicator a drag grabbed, based on the DOWN point:
-     * overlapped area / circle -> focus only; AE-only strip or light bulb -> AE only.
+     * the whole AE rectangle/bulb (with extra grab padding) drags AE, except
+     * the small core of the focus circle, which drags focus.
      */
     private fun dragGrabMode(touchX: Float, touchY: Float): IndicatorDragMode? {
-        val focusHalf = 80f * resources.displayMetrics.density / 2f
+        val density = resources.displayMetrics.density
+        val focusHalf = 40f * density
+        val focusCore = focusHalf * 0.65f
         val aeHalfW = aeRectWidthPx() / 2f
         val aeHalfH = aeRectHeightPx() / 2f
-        val bulbSize = 14 * resources.displayMetrics.density
-        val bulbGap = 2 * resources.displayMetrics.density
+        val grabPadding = 10 * density
+        val bulbSize = 20f * density
+        val bulbGap = 2f * density
 
-        val aeTop = aeCenterY - aeHalfH
-        val bulbLeft = aeCenterX - bulbSize / 2f
-        val bulbTop = aeTop + aeRectHeightPx() + bulbGap
         val aeVisible = aeIndicator.visibility == View.VISIBLE
-        val inBulb = aeVisible && touchX >= bulbLeft && touchX <= bulbLeft + bulbSize &&
-            touchY >= bulbTop && touchY <= bulbTop + bulbSize
 
-        val aeOnly = aeVisible &&
-            touchX >= aeCenterX - aeHalfW && touchX <= aeCenterX + aeHalfW &&
-            touchY >= aeCenterY - aeHalfH && touchY <= aeCenterY + aeHalfH
+        // Padded AE rectangle so the thin strip and bulb are easy to hit.
+        val inAeRect = aeVisible &&
+            touchX >= aeCenterX - aeHalfW - grabPadding && touchX <= aeCenterX + aeHalfW + grabPadding &&
+            touchY >= aeCenterY - aeHalfH - grabPadding && touchY <= aeCenterY + aeHalfH + grabPadding
 
-        val focusOnly = touchX >= focusCenterX - focusHalf && touchX <= focusCenterX + focusHalf &&
+        val bulbCx = aeCenterX
+        val bulbCy = aeCenterY + aeHalfH + bulbGap + bulbSize / 2f
+        val bulbHalf = bulbSize / 2f + grabPadding * 0.5f
+        val inBulb = aeVisible &&
+            touchX >= bulbCx - bulbHalf && touchX <= bulbCx + bulbHalf &&
+            touchY >= bulbCy - bulbHalf && touchY <= bulbCy + bulbHalf
+
+        val inFocusSquare = touchX >= focusCenterX - focusHalf && touchX <= focusCenterX + focusHalf &&
             touchY >= focusCenterY - focusHalf && touchY <= focusCenterY + focusHalf
+
+        val dx = touchX - focusCenterX
+        val dy = touchY - focusCenterY
+        val nearFocusCenter = dx * dx + dy * dy <= focusCore * focusCore
 
         return when {
             inBulb -> IndicatorDragMode.AE
-            // AE strip below the focus circle (not overlapped): AE only.
-            aeOnly && !focusOnly -> IndicatorDragMode.AE
-            // Circle / overlapped area: focus only.
-            focusOnly -> IndicatorDragMode.FOCUS
+            // Anywhere on the AE rect that isn't the focus centre grabs AE.
+            inAeRect && (!inFocusSquare || !nearFocusCenter) -> IndicatorDragMode.AE
+            inFocusSquare -> IndicatorDragMode.FOCUS
             else -> null
         }
     }
 
     /** MF-mode AE hit test: the AE rectangle or its bulb (no focus indicator present). */
     private fun aeGrabArea(touchX: Float, touchY: Float): Boolean {
+        val density = resources.displayMetrics.density
         val aeHalfW = aeRectWidthPx() / 2f
         val aeHalfH = aeRectHeightPx() / 2f
-        val bulbSize = 14 * resources.displayMetrics.density
-        val bulbGap = 2 * resources.displayMetrics.density
-        val aeTop = aeCenterY - aeHalfH
-        val bulbLeft = aeCenterX - bulbSize / 2f
-        val bulbTop = aeTop + aeRectHeightPx() + bulbGap
-        val inRect = touchX >= aeCenterX - aeHalfW && touchX <= aeCenterX + aeHalfW &&
-            touchY >= aeCenterY - aeHalfH && touchY <= aeCenterY + aeHalfH
-        val inBulb = touchX >= bulbLeft && touchX <= bulbLeft + bulbSize &&
-            touchY >= bulbTop && touchY <= bulbTop + bulbSize
+        val grabPadding = 10 * density
+        val bulbSize = 20f * density
+        val bulbGap = 2f * density
+        val inRect = touchX >= aeCenterX - aeHalfW - grabPadding && touchX <= aeCenterX + aeHalfW + grabPadding &&
+            touchY >= aeCenterY - aeHalfH - grabPadding && touchY <= aeCenterY + aeHalfH + grabPadding
+        val bulbCx = aeCenterX
+        val bulbCy = aeCenterY + aeHalfH + bulbGap + bulbSize / 2f
+        val bulbHalf = bulbSize / 2f + grabPadding * 0.5f
+        val inBulb = touchX >= bulbCx - bulbHalf && touchX <= bulbCx + bulbHalf &&
+            touchY >= bulbCy - bulbHalf && touchY <= bulbCy + bulbHalf
         return inRect || inBulb
     }
 
