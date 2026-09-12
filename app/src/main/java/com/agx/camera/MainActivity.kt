@@ -147,8 +147,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var evPpOverlay: TextView
     private lateinit var evPpPopup: View
     private lateinit var evPpRoller: ScrollingIndexBar
-    private lateinit var evPopup: LinearLayout
-    private lateinit var evSeekBar: SeekBar
     private lateinit var evSliderContainer: FrameLayout
     private lateinit var evSeekBarVertical: SeekBar
 
@@ -176,7 +174,6 @@ class MainActivity : AppCompatActivity() {
     private var isoPopupShowing = false
     private var shutterPopupShowing = false
     private var evPpPopupShowing = false
-    private var evPopupShowing = false
     private val focusIndicatorHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val focusIndicatorHideRunnable = Runnable { hideFocusIndicator() }
     private var focusDragging = false
@@ -398,8 +395,6 @@ class MainActivity : AppCompatActivity() {
         evPpOverlay = findViewById(R.id.ev_pp_overlay)
         evPpPopup = findViewById(R.id.ev_pp_popup)
         evPpRoller = findViewById(R.id.ev_pp_roller)
-        evPopup = findViewById(R.id.ev_popup)
-        evSeekBar = findViewById(R.id.ev_seekbar)
         evSliderContainer = findViewById(R.id.ev_slider_container)
         evSeekBarVertical = findViewById(R.id.ev_seekbar_vertical)
 
@@ -697,7 +692,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             if (event.action == MotionEvent.ACTION_DOWN && cameraReady) {
-                if (isoPopupShowing || shutterPopupShowing || evPopupShowing) {
+                if (isoPopupShowing || shutterPopupShowing) {
                     dismissAllPopups()
                     return@setOnTouchListener true
                 }
@@ -1822,9 +1817,6 @@ class MainActivity : AppCompatActivity() {
             })
         }
     }
-
-    // Track last EV tap time for double-tap reset
-    private var lastEvTapTime = 0L
 
     /** Maps view coordinates to normalized (0..1) coordinates in the camera frame. */
     private fun viewToFrameCoords(x: Float, y: Float): FloatArray? {
@@ -3449,8 +3441,6 @@ override fun onResume() {
         evPpOverlay = findViewById(R.id.ev_pp_overlay)
         evPpPopup = findViewById(R.id.ev_pp_popup)
         evPpRoller = findViewById(R.id.ev_pp_roller)
-        evPopup = findViewById(R.id.ev_popup)
-        evSeekBar = findViewById(R.id.ev_seekbar)
 
         focusControls = findViewById(R.id.focus_controls)
         focusModeButton = findViewById(R.id.focus_mode_button)
@@ -3525,26 +3515,6 @@ override fun onResume() {
                     updateManualExposure()
                 }
                 lastShutterTapTime = now
-            }
-            false
-        }
-        evSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
-                if (fromUser) setExposureCompFromProgress(progress)
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar) {}
-        })
-        // Double-tap on EV slider to reset
-        var lastEvTapTime = 0L
-        evSeekBar.setOnTouchListener { _, event ->
-            if (event.action == MotionEvent.ACTION_DOWN) {
-                val now = System.currentTimeMillis()
-                if (now - lastEvTapTime < 300) {
-                    evSeekBar.progress = 50
-                    setExposureCompFromProgress(50)
-                }
-                lastEvTapTime = now
             }
             false
         }
@@ -3830,24 +3800,12 @@ override fun onResume() {
         isoPopup.visibility = View.GONE
         shutterPopup.visibility = View.GONE
         evPpPopup.visibility = View.GONE
-        evPopup.visibility = View.GONE
         isoPopupShowing = false
         shutterPopupShowing = false
         evPpPopupShowing = false
-        evPopupShowing = false
-    }
-
-    private fun showEvPopup() {
-        if (!isManualMode) {
-            evPopup.visibility = View.VISIBLE
-            evSeekBar.progress = 50
-            evPopupShowing = true
-        }
     }
 
     private fun hideEvSlider() {
-        evPopup.visibility = View.GONE
-        evPopupShowing = false
         evSliderContainer?.visibility = View.GONE
     }
 
