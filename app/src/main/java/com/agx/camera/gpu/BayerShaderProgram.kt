@@ -802,6 +802,20 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
     return sum * (1.0 / 16.0);
 }
 
+// Simplified low-side (negative) compensation: lift the
+// signal so its lowest channel is zero, then rescale so the peak channel
+// (intensity) is unchanged. No-op when nothing is negative.
+vec3 compensateNegatives(vec3 rgb) {
+    float minimum = min(rgb.r, min(rgb.g, rgb.b));
+    if (minimum >= 0.0) {
+        return rgb;
+    }
+    float peak = max(rgb.r, max(rgb.g, rgb.b));
+    float liftedPeak = peak - minimum;
+    float ratio = (liftedPeak > 0.0) ? (peak / liftedPeak) : 0.0;
+    return max((rgb - minimum) * ratio, vec3(0.0));
+}
+
 void main() {
     vec2 uv = v_texCoord;
     vec2 lsSensorUV = u_cropOrigin + uv * u_cropSize;
@@ -826,7 +840,8 @@ void main() {
     if (u_clip_atten_factor > 0.0) {
         float clipScalar = max(u_white_level - u_black_level, 1.0);
         vec3 norm = linearRGB / clipScalar;
-        float luma = dot(u_luma_coeffs, norm);
+        norm = compensateNegatives(norm);
+        float luma = max(dot(u_luma_coeffs, norm), 0.0);
         float peak = max(norm.r, max(norm.g, norm.b));
         float inverted = max(1.0 - luma, 0.0);
         float attenuation = pow(inverted, u_clip_atten_factor * 5.0);
