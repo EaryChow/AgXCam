@@ -110,7 +110,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     // Y row when no camera-native -> XYZ map is available.
     @Volatile var nativeLumaCoeffs = floatArrayOf(0.2126f, 0.7152f, 0.0722f)
     // Leading factor of the clipping-neutralization exponent (factor * 5).
-    @Volatile var clipAttenFactor = 0.1f
+    @Volatile var clipAttenFactor = 0.2f
     var bayerLensShadingData: ShortArray? = null
     var bayerLensShadingWidth = 1
     private var bayerLensShadingHeight = 1

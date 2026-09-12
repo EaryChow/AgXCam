@@ -426,7 +426,7 @@ class BayerShaderProgram {
         private val DEFAULT_LUMA_COEFFS = floatArrayOf(0.2126f, 0.7152f, 0.0722f)
 
         // Leading factor of the clip-neutralization exponent (u_clip_atten_factor * 5).
-        private const val CLIP_ATTEN_DEFAULT = 0.1f
+        private const val CLIP_ATTEN_DEFAULT = 0.2f
 
         private val QUAD_COORDS = floatArrayOf(
             -1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f

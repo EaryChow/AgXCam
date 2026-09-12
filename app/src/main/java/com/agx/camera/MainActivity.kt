@@ -68,7 +68,7 @@ class MainActivity : AppCompatActivity() {
     private var agxParams = AgxParams()
     private var photoOutput = PhotoOutputSettings()
     // Leading factor of the demosaic clipping-neutralization exponent (factor * 5).
-    private var clipAttenFactor = 0.1f
+    private var clipAttenFactor = 0.2f
     private var cameraReady = false
     private var openingCamera = false
     private var settingsPanelOpen = false
@@ -428,7 +428,7 @@ class MainActivity : AppCompatActivity() {
         previewResCapMaxDim = previewResPrefs.getInt(PREF_PREVIEW_RES_CAP, 1280)
         focusIndicatorTimeoutMs = previewResPrefs.getLong(PREF_FOCUS_TIMEOUT, 0L)
         maxPreviewDimensions = getMaxPreviewDimensions()
-        clipAttenFactor = previewResPrefs.getFloat(PREF_CLIP_ATTEN, 0.1f).coerceIn(0f, 1f)
+        clipAttenFactor = previewResPrefs.getFloat(PREF_CLIP_ATTEN, 0.2f).coerceIn(0f, 1f)
 
         developerSwitch = DeveloperSwitch(this) { useRaw ->
             CrashLogger.log(TAG, "Developer switch toggled: useRaw=$useRaw")
@@ -1182,11 +1182,11 @@ class MainActivity : AppCompatActivity() {
             previewRenderer.clipAttenFactor = clipAttenFactor
             previewResPrefs.edit().putFloat(PREF_CLIP_ATTEN, clipAttenFactor).apply()
         })
-        setupSliderDoubleClickReset(clipAttenSlider, 10) {
-            clipAttenFactor = 0.1f
-            clipAttenLabel.text = "Neutralize  0.10"
+        setupSliderDoubleClickReset(clipAttenSlider, 20) {
+            clipAttenFactor = 0.2f
+            clipAttenLabel.text = "Neutralize  0.20"
             previewRenderer.clipAttenFactor = clipAttenFactor
-            previewResPrefs.edit().putFloat(PREF_CLIP_ATTEN, 0.1f).apply()
+            previewResPrefs.edit().putFloat(PREF_CLIP_ATTEN, 0.2f).apply()
         }
 
         kelvinSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
