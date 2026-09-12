@@ -126,6 +126,22 @@ class RawColorProfile(chars: CameraCharacteristics) {
         )
     }
 
+    /**
+     * White-balance gains, the WB-removed camera-native -> linear-sRGB matrix,
+     * and camera-native luminance coefficients for the given as-shot neutral.
+     * Null when the profile has no usable transform.
+     */
+    fun neutralTransformForNeutral(neutralSensorRgb: FloatArray): RawColorMath.NeutralTransform? {
+        if (!available) return null
+        return RawColorMath.neutralTransform(
+            colorMatrix1, colorMatrix2,
+            calibration1, calibration2,
+            forwardMatrix1, forwardMatrix2,
+            colorTemperature1, colorTemperature2,
+            neutralSensorRgb
+        )
+    }
+
     companion object {
         private const val TAG = "RawColorProfile"
 
@@ -292,9 +308,9 @@ object RawColorMath {
     }
 
     /**
-     * Camera-RGB -> linear-sRGB for the given as-shot neutral. See
-     * [RawColorProfile] for the pipeline description. Returns null for a
-     * degenerate neutral.
+     * Camera-RGB -> linear-sRGB for the given as-shot neutral, with the white
+     * balance folded in. See [RawColorProfile] for the pipeline description.
+     * Returns null for a degenerate neutral.
      */
     fun srgbMatrix(
         colorMatrix1: Mat3,
@@ -306,7 +322,79 @@ object RawColorMath {
         temperature1: Float,
         temperature2: Float,
         neutralSensorRgb: FloatArray
-    ): Mat3? {
+    ): Mat3? = neutralCore(
+        colorMatrix1, colorMatrix2, calibration1, calibration2,
+        forwardMatrix1, forwardMatrix2, temperature1, temperature2,
+        neutralSensorRgb
+    )?.colorMatrix
+
+    /**
+     * White balance gains (green-normalized), the camera-native -> linear-sRGB
+     * matrix with that white balance REMOVED, and the luminance (Y) row of the
+     * camera-native -> XYZ map. Splitting the folded srgb matrix lets a
+     * pipeline insert processing between the white-balance stage and the
+     * native-to-sRGB color matrix. Applying [wbGains] first and then
+     * [colorMatrix] reproduces [srgbMatrix] exactly. [lumaCoeffs] is the Y row
+     * of the camera-native -> XYZ matrix, which dots with the white-balanced
+     * camera-native signal to give CIE luminance of the gray axis.
+     */
+    data class NeutralTransform(
+        val wbGains: FloatArray,
+        val colorMatrix: Mat3,
+        val lumaCoeffs: FloatArray
+    )
+
+    fun neutralTransform(
+        colorMatrix1: Mat3,
+        colorMatrix2: Mat3,
+        calibration1: Mat3,
+        calibration2: Mat3,
+        forwardMatrix1: Mat3?,
+        forwardMatrix2: Mat3?,
+        temperature1: Float,
+        temperature2: Float,
+        neutralSensorRgb: FloatArray
+    ): NeutralTransform? {
+        val core = neutralCore(
+            colorMatrix1, colorMatrix2, calibration1, calibration2,
+            forwardMatrix1, forwardMatrix2, temperature1, temperature2,
+            neutralSensorRgb
+        ) ?: return null
+        val neutral = core.neutral
+        // Green-normalized gains that whiten the as-shot neutral in camera
+        // native space; g * neutral == (1,1,1).
+        val wbGains = floatArrayOf(neutral[1] / neutral[0], 1f, neutral[1] / neutral[2])
+        // Undo those gains on the folded matrix column-wise so that
+        // colorMatrix * diag(wbGains) == folded matrix.
+        val gInv = ColorMatrix.diagonal(1f / wbGains[0], 1f, 1f / wbGains[2])
+        return NeutralTransform(
+            wbGains,
+            ColorMatrix.multiply(core.colorMatrix, gInv),
+            floatArrayOf(
+                core.cameraToXyz.m[3],
+                core.cameraToXyz.m[4],
+                core.cameraToXyz.m[5]
+            )
+        )
+    }
+
+    private data class NeutralCore(
+        val colorMatrix: Mat3,
+        val cameraToXyz: Mat3,
+        val neutral: FloatArray
+    )
+
+    private fun neutralCore(
+        colorMatrix1: Mat3,
+        colorMatrix2: Mat3,
+        calibration1: Mat3,
+        calibration2: Mat3,
+        forwardMatrix1: Mat3?,
+        forwardMatrix2: Mat3?,
+        temperature1: Float,
+        temperature2: Float,
+        neutralSensorRgb: FloatArray
+    ): NeutralCore? {
         val neutral = normalize(neutralSensorRgb) ?: return null
 
         val lowColor = normalizeColorMatrix(colorMatrix1)
@@ -351,7 +439,7 @@ object RawColorMath {
             adapted.m.map { it / scale }.toFloatArray()
         )
 
-        val cameraToPcs: Mat3 = if (fwd != null) {
+        val cameraToXyz: Mat3 = if (fwd != null) {
             val individualToReference = ColorMatrix.inverse(cal)
             val refCameraWhite = ColorMatrix.mulMatVec(individualToReference, cw)
             val d = ColorMatrix.diagonal(
@@ -367,7 +455,11 @@ object RawColorMath {
             ColorMatrix.inverse(pcsToCamera)
         }
 
-        return ColorMatrix.multiply(pcsToSrgb(), cameraToPcs)
+        return NeutralCore(
+            ColorMatrix.multiply(pcsToSrgb(), cameraToXyz),
+            cameraToXyz,
+            neutral
+        )
     }
 
     /**

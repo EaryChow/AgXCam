@@ -105,6 +105,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     @Volatile var wbGainG = 1f
     @Volatile var wbGainB = 1f
     @Volatile var ccMatrix: FloatArray? = null
+    // Luminance (Y) coefficients of the camera-native RGB space; used by the
+    // demosaic shader's clipping-neutralization step. Defaults to the Rec.709
+    // Y row when no camera-native -> XYZ map is available.
+    @Volatile var nativeLumaCoeffs = floatArrayOf(0.2126f, 0.7152f, 0.0722f)
+    // Leading factor of the clipping-neutralization exponent (factor * 5).
+    @Volatile var clipAttenFactor = 0.1f
     var bayerLensShadingData: ShortArray? = null
     var bayerLensShadingWidth = 1
     private var bayerLensShadingHeight = 1
@@ -512,7 +518,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             scaleFactor = maxOf(
                 crop[2] / demosaicFboWidth.toFloat(),
                 crop[3] / demosaicFboHeight.toFloat()
-            )
+            ),
+            lumaCoeffs = nativeLumaCoeffs,
+            clipAttenFactor = clipAttenFactor
         )
         logGlError("after drawDemosaic", bayerRenderCount)
 
@@ -821,7 +829,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         scaleFactor = maxOf(
                             rawCaptureReq.rawW.toFloat() / rawDemosaicFboWidth.toFloat(),
                             rawCaptureReq.rawH.toFloat() / rawDemosaicFboHeight.toFloat()
-                        )
+                        ),
+                        lumaCoeffs = nativeLumaCoeffs,
+                        clipAttenFactor = clipAttenFactor
                     )
                     logGlError("raw after drawDemosaic", bayerRenderCount)
 

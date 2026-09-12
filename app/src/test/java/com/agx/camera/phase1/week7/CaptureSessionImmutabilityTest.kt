@@ -28,7 +28,8 @@ class CaptureSessionImmutabilityTest {
         agxContrast = 1.0f,
         agxToe = 0.5f,
         agxShoulder = 0.5f,
-        agxVibrance = 0.5f
+        agxVibrance = 0.5f,
+        focalLength35mm = 0
     )
 
     @Test

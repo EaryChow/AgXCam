@@ -69,6 +69,8 @@ class BayerShaderProgram {
     private var dUDenoisedTexLoc = 0
     private var dUDenoiseActiveLoc = 0
     private var dUScaleFactorLoc = 0
+    private var dULumaCoeffsLoc = 0
+    private var dUClipAttenLoc = 0
 
     private var sensorWidth = 0
     private var sensorHeight = 0
@@ -150,6 +152,8 @@ class BayerShaderProgram {
         dUDenoisedTexLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_denoisedTex")
         dUDenoiseActiveLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_denoise_active")
         dUScaleFactorLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_scale_factor")
+        dULumaCoeffsLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_luma_coeffs")
+        dUClipAttenLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_clip_atten_factor")
 
         val textures = IntArray(2)
         GLES20.glGenTextures(2, textures, 0)
@@ -322,7 +326,9 @@ class BayerShaderProgram {
         colorMat: FloatArray? = null,
         denoisedTextureId: Int = 0,
         denoiseActive: Boolean = false,
-        scaleFactor: Float = 1f
+        scaleFactor: Float = 1f,
+        lumaCoeffs: FloatArray = DEFAULT_LUMA_COEFFS,
+        clipAttenFactor: Float = CLIP_ATTEN_DEFAULT
     ) {
         GLES20.glUseProgram(demosaicProgramId)
 
@@ -368,6 +374,8 @@ class BayerShaderProgram {
         GLES20.glUniformMatrix3fv(dUColorMatLoc, 1, true, colorMat ?: COLOR_IDENTITY_9, 0)
         GLES20.glUniform1f(dUWhiteLevelLoc, whiteLevel)
         GLES20.glUniform1f(dUBlackLevelLoc, blackLevel)
+        GLES20.glUniform3f(dULumaCoeffsLoc, lumaCoeffs[0], lumaCoeffs[1], lumaCoeffs[2])
+        GLES20.glUniform1f(dUClipAttenLoc, clipAttenFactor)
 
         val posHandle = GLES20.glGetAttribLocation(demosaicProgramId, "a_position")
         val texHandle = GLES20.glGetAttribLocation(demosaicProgramId, "a_texCoord")
@@ -412,6 +420,13 @@ class BayerShaderProgram {
             0f, 1f, 0f,
             0f, 0f, 1f
         )
+
+        // Rec.709 Y row of RGB->XYZ(D65); fallback when no camera-native ->
+        // XYZ map exists (YUV end of the app or unknown sensor).
+        private val DEFAULT_LUMA_COEFFS = floatArrayOf(0.2126f, 0.7152f, 0.0722f)
+
+        // Leading factor of the clip-neutralization exponent (u_clip_atten_factor * 5).
+        private const val CLIP_ATTEN_DEFAULT = 0.1f
 
         private val QUAD_COORDS = floatArrayOf(
             -1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f
@@ -638,6 +653,8 @@ uniform float u_white_level;
 uniform float u_black_level;
 uniform vec3 u_wb_gains;
 uniform mat3 u_color_mat;
+uniform vec3 u_luma_coeffs;
+uniform float u_clip_atten_factor;
 
 ${AgxCoreGlsl.CORE_HELPERS}
 
@@ -795,6 +812,24 @@ void main() {
 
     vec3 linearRGB = demosaicBilinear(u_bayerTex, sensorUV, lsSensorUV);
     linearRGB *= u_wb_gains;
+
+    // Clipping neutralization: the sensor clips in the Bayer domain, so after
+    // demosaic + white balance the clipped regions pick up a color cast
+    // (often magenta). Normalize to the sensor clipping value,
+    // blend the signal toward its luminance by an attenuation factor that
+    // fades in as the luminance approaches the clip, then undo the
+    // normalization. The exponent's leading factor (u_clip_atten_factor) is
+    // a slider. At factor == 0 the step is skipped entirely.
+    if (u_clip_atten_factor > 0.0) {
+        float clipScalar = max(u_white_level - u_black_level, 1.0);
+        vec3 norm = linearRGB / clipScalar;
+        float luma = dot(u_luma_coeffs, norm);
+        float inverted = max(1.0 - luma, 0.0);
+        float attenuation = pow(inverted, u_clip_atten_factor * 5.0);
+        linearRGB = (norm - vec3(luma)) * attenuation + vec3(luma);
+        linearRGB *= clipScalar;
+    }
+
     linearRGB = u_color_mat * linearRGB;
     linearRGB = linearRGB / max(u_white_level - u_black_level, 1.0);
     fragColor = vec4(linearRGB, 1.0);

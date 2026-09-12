@@ -67,6 +67,8 @@ class MainActivity : AppCompatActivity() {
     private var kelvinState = KelvinState()
     private var agxParams = AgxParams()
     private var photoOutput = PhotoOutputSettings()
+    // Leading factor of the demosaic clipping-neutralization exponent (factor * 5).
+    private var clipAttenFactor = 0.1f
     private var cameraReady = false
     private var openingCamera = false
     private var settingsPanelOpen = false
@@ -270,6 +272,9 @@ class MainActivity : AppCompatActivity() {
     // NR
     private lateinit var nrLabel: TextView; private lateinit var nrSlider: SeekBar
 
+    // Sensor clip neutralization
+    private lateinit var clipAttenLabel: TextView; private lateinit var clipAttenSlider: SeekBar
+
     // WB
     private lateinit var kelvinLabel: TextView; private lateinit var kelvinSlider: SeekBar
     private lateinit var tintLabel: TextView; private lateinit var tintSlider: SeekBar
@@ -362,6 +367,8 @@ class MainActivity : AppCompatActivity() {
 
         nrLabel = findViewById(R.id.nr_label); nrSlider = findViewById(R.id.nr_slider)
 
+        clipAttenLabel = findViewById(R.id.clip_atten_label); clipAttenSlider = findViewById(R.id.clip_atten_slider)
+
         kelvinLabel = findViewById(R.id.kelvin_label); kelvinSlider = findViewById(R.id.kelvin_slider)
         tintLabel = findViewById(R.id.tint_label); tintSlider = findViewById(R.id.tint_slider)
 
@@ -421,6 +428,7 @@ class MainActivity : AppCompatActivity() {
         previewResCapMaxDim = previewResPrefs.getInt(PREF_PREVIEW_RES_CAP, 1280)
         focusIndicatorTimeoutMs = previewResPrefs.getLong(PREF_FOCUS_TIMEOUT, 0L)
         maxPreviewDimensions = getMaxPreviewDimensions()
+        clipAttenFactor = previewResPrefs.getFloat(PREF_CLIP_ATTEN, 0.1f).coerceIn(0f, 1f)
 
         developerSwitch = DeveloperSwitch(this) { useRaw ->
             CrashLogger.log(TAG, "Developer switch toggled: useRaw=$useRaw")
@@ -507,6 +515,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         previewRenderer = PreviewRenderer(textureView).apply {
+            clipAttenFactor = this@MainActivity.clipAttenFactor
             onFirstFrameRendered = { Log.d(TAG, "First frame rendered") }
             onFrameRendered = { ms -> thermalManager.onFrameRendered(ms.toFloat()) }
             onDegradedModeChanged = { banner ->
@@ -1167,6 +1176,19 @@ class MainActivity : AppCompatActivity() {
             uploadAgxUniforms()
         }
 
+        clipAttenSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
+            clipAttenFactor = v / 100f
+            clipAttenLabel.text = String.format("Neutralize  %.2f", clipAttenFactor)
+            previewRenderer.clipAttenFactor = clipAttenFactor
+            previewResPrefs.edit().putFloat(PREF_CLIP_ATTEN, clipAttenFactor).apply()
+        })
+        setupSliderDoubleClickReset(clipAttenSlider, 10) {
+            clipAttenFactor = 0.1f
+            clipAttenLabel.text = "Neutralize  0.10"
+            previewRenderer.clipAttenFactor = clipAttenFactor
+            previewResPrefs.edit().putFloat(PREF_CLIP_ATTEN, 0.1f).apply()
+        }
+
         kelvinSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             kelvinState = kelvinState.copy(kelvin = 2000f + v * 100f)
             kelvinLabel.text = String.format("Kelvin  %.0fK", kelvinState.kelvin)
@@ -1395,6 +1417,9 @@ class MainActivity : AppCompatActivity() {
 
         nrSlider.progress = (agxParams.nrStrength * 100).toInt().coerceIn(0, 100)
         nrLabel.text = String.format("NR Strength  %.1f", agxParams.nrStrength)
+
+        clipAttenSlider.progress = (clipAttenFactor * 100).toInt().coerceIn(0, 100)
+        clipAttenLabel.text = String.format("Neutralize  %.2f", clipAttenFactor)
 
         kelvinSlider.progress = ((kelvinState.kelvin - 2000f) / 100f).toInt().coerceIn(0, 80)
         kelvinLabel.text = String.format("Kelvin  %.0fK", kelvinState.kelvin)
@@ -2351,23 +2376,28 @@ val neutral: FloatArray? = if (gainsOk) {
             rawNeutralSeed
         }
 
-            val profileMat = neutral?.let { rawColorProfile?.srgbMatrixForNeutral(it)?.m }
+            val profileTransform = neutral?.let { rawColorProfile?.neutralTransformForNeutral(it) }
 
-            if (profileMat != null) {
-                // Profile path: WB is folded into the matrix (neutral scene ->
-                // -> sRGB white), so channel gains stay neutral to avoid
-                // double-correcting on top of the matrix's white normalization.
-                previewRenderer.ccMatrix = profileMat
-                previewRenderer.wbGainR = 1f
-                previewRenderer.wbGainG = 1f
-                previewRenderer.wbGainB = 1f
+            if (profileTransform != null) {
+                // Profile path: split into sensor-space white-balance gains and
+                // the WB-removed native->sRGB matrix so the demosaic shader can
+                // neutralize clipped regions between the two stages. The
+                // matrix no longer folds in the WB, and its Y row provides the
+                // camera-native luminance coefficients for the neutralization.
+                previewRenderer.ccMatrix = profileTransform.colorMatrix.m
+                previewRenderer.wbGainR = profileTransform.wbGains[0]
+                previewRenderer.wbGainG = profileTransform.wbGains[1]
+                previewRenderer.wbGainB = profileTransform.wbGains[2]
+                previewRenderer.nativeLumaCoeffs = profileTransform.lumaCoeffs
                 if (wbEstimateFrame <= 3 || wbEstimateFrame % 60 == 0) {
                     val temp = rawColorProfile?.temperatureForNeutral(neutral)
                     CrashLogger.log(
                         TAG, "dcp cc: frame=$wbEstimateFrame " +
                             "temp=${temp?.toInt() ?: -1} " +
                             "neutral=[${neutral.joinToString { String.format("%.3f", it) }}] " +
-                            "mat=[${profileMat.joinToString { String.format("%.4f", it) }}]"
+                            "wb=[${previewRenderer.wbGainR}, ${previewRenderer.wbGainG}, ${previewRenderer.wbGainB}] " +
+                            "mat=[${profileTransform.colorMatrix.m.joinToString { String.format("%.4f", it) }}] " +
+                            "luma=[${previewRenderer.nativeLumaCoeffs.joinToString { String.format("%.4f", it) }}]"
                     )
                 }
             } else if (gainsOk) {
@@ -2378,6 +2408,7 @@ val neutral: FloatArray? = if (gainsOk) {
                     previewRenderer.wbGainB = (ccGains[3] / gMean).coerceIn(0.3f, 8f)
                 }
                 previewRenderer.ccMatrix = ccMat
+                previewRenderer.nativeLumaCoeffs = luminanceFromSrgbMatrix(ccMat)
                 if (wbEstimateFrame % 60 == 0) {
                     CrashLogger.log(
                         TAG, "hal cc: frame=$wbEstimateFrame " +
@@ -2395,8 +2426,10 @@ val neutral: FloatArray? = if (gainsOk) {
                 previewRenderer.wbGainG = 1f
                 previewRenderer.wbGainB = 1f
                 previewRenderer.ccMatrix = ccMat
+                previewRenderer.nativeLumaCoeffs = luminanceFromSrgbMatrix(ccMat)
             } else {
                 previewRenderer.ccMatrix = null
+                previewRenderer.nativeLumaCoeffs = DEFAULT_LUMA_COEFFS.copyOf()
             }
             previewRenderer.setBayerFrame(dest, rawW, rawH, rawW)
         }
@@ -2549,13 +2582,26 @@ val neutral: FloatArray? = if (gainsOk) {
             estimatorNeutral = meta.neutralColorPoint
             rawColorProfile = profile
             if (profile.available) {
-                // WB is folded into the profile matrix: neutral scene ->
-                // -> sRGB white. Sensor-level gains stay neutral so they don't
-                // double-correct on top of the matrix's white normalization.
-                previewRenderer.wbGainR = 1f
-                previewRenderer.wbGainG = 1f
-                previewRenderer.wbGainB = 1f
-                previewRenderer.ccMatrix = profile.srgbMatrixForNeutral(meta.neutralColorPoint)?.m
+                val tr = profile.neutralTransformForNeutral(meta.neutralColorPoint)
+                if (tr != null) {
+                    // Split white balance (sensor-space gains) from the
+                    // WB-removed native->sRGB matrix; the demosaic shader
+                    // neutralizes clipped regions in between. The matrix
+                    // no longer folds in the WB.
+                    previewRenderer.ccMatrix = tr.colorMatrix.m
+                    previewRenderer.wbGainR = tr.wbGains[0]
+                    previewRenderer.wbGainG = tr.wbGains[1]
+                    previewRenderer.wbGainB = tr.wbGains[2]
+                    previewRenderer.nativeLumaCoeffs = tr.lumaCoeffs
+                } else {
+                    // Degenerate neutral: fall back to gains-neutral and the
+                    // plain matrix, keeping the pre-split behaviour.
+                    previewRenderer.wbGainR = 1f
+                    previewRenderer.wbGainG = 1f
+                    previewRenderer.wbGainB = 1f
+                    previewRenderer.ccMatrix = profile.srgbMatrixForNeutral(meta.neutralColorPoint)?.m
+                    previewRenderer.nativeLumaCoeffs = DEFAULT_LUMA_COEFFS.copyOf()
+                }
             } else {
                 rawColorProfile = null
                 val sensorGains = meta.sensorWhiteBalanceGains
@@ -2563,6 +2609,7 @@ val neutral: FloatArray? = if (gainsOk) {
                 previewRenderer.wbGainG = sensorGains[1]
                 previewRenderer.wbGainB = sensorGains[2]
                 previewRenderer.ccMatrix = null
+                previewRenderer.nativeLumaCoeffs = DEFAULT_LUMA_COEFFS.copyOf()
             }
             wbEstimateFrame = 0
             CrashLogger.log(
@@ -2593,9 +2640,20 @@ val neutral: FloatArray? = if (gainsOk) {
         previewRenderer.wbGainR = 1f
         previewRenderer.wbGainG = 1f
         previewRenderer.wbGainB = 1f
+        previewRenderer.nativeLumaCoeffs = DEFAULT_LUMA_COEFFS.copyOf()
         rawColorProfile = null
         rawNeutralSeed = floatArrayOf(1f, 1f, 1f)
         estimatorNeutral = null
+    }
+
+    // Luminance (Y) coefficients of the camera-native RGB space, derived from a
+    // camera-native -> linear-sRGB matrix (the HAL COLOR_CORRECTION_TRANSFORM).
+    // The Y row of rgbToXYZ(REC709) * matrix maps the camera-space signal onto
+    // the D65 XYZ luminance axis used by the demosaic clipping neutralization.
+    private fun luminanceFromSrgbMatrix(mat: FloatArray?): FloatArray {
+        if (mat == null) return DEFAULT_LUMA_COEFFS.copyOf()
+        val camToXyz = ColorMatrix.multiply(ColorMatrix.rgbToXYZ(ColorMatrix.REC709), ColorMatrix.Mat3(mat))
+        return floatArrayOf(camToXyz.m[3], camToXyz.m[4], camToXyz.m[5])
     }
 
     private fun preparePreviewPipeline(previewSize: Size, targetAspect: Float) {
@@ -3856,6 +3914,9 @@ override fun onResume() {
 
     companion object {
         private const val TAG = "MainActivity"
+        // Rec.709 Y row of RGB->XYZ(D65); fallback camera-native luminance
+        // coefficients when no native->XYZ map is available.
+        private val DEFAULT_LUMA_COEFFS = floatArrayOf(0.2126f, 0.7152f, 0.0722f)
         private const val REQUEST_CAMERA = 100
         private const val FOCUS_ROLLER_MAX_INDEX = 100
         private const val PREF_PREVIEW_RES_CAP = "preview_res_cap"
@@ -3867,6 +3928,8 @@ override fun onResume() {
         private const val PREF_WB_KELVIN = "wb_kelvin_global"
         private const val PREF_WB_TINT = "wb_tint_global"
         private const val RAW_BUFFER_POOL = 3
+        // Leading factor of the demosaic clipping-neutralization exponent.
+        private const val PREF_CLIP_ATTEN = "clip_atten_factor"
         // Post-processing EV roller: 0.5 EV per step over the ±10 EV range.
         private const val EV_PP_MAX_INDEX = 40
         private const val EV_PP_MID_INDEX = 20
