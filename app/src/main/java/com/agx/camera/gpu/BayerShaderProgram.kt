@@ -815,18 +815,22 @@ void main() {
 
     // Clipping neutralization: the sensor clips in the Bayer domain, so after
     // demosaic + white balance the clipped regions pick up a color cast
-    // (often magenta). Normalize to the sensor clipping value,
-    // blend the signal toward its luminance by an attenuation factor that
-    // fades in as the luminance approaches the clip, then undo the
-    // normalization. The exponent's leading factor (u_clip_atten_factor) is
-    // a slider. At factor == 0 the step is skipped entirely.
+    // (often magenta). Normalize to the sensor clipping value, collapse the
+    // chrominance toward an intensity-preserving neutral (the peak channel,
+    // max(r,g,b)) by an attenuation factor that fades in as the luminance
+    // approaches the clip, then undo the normalization. Peak-preserving
+    // keeps the clipped regions' intensity intact instead of dragging them to
+    // the luminance average (which reads as darker). The exponent's leading
+    // factor (u_clip_atten_factor) is a slider. At factor == 0 the step is
+    // skipped.
     if (u_clip_atten_factor > 0.0) {
         float clipScalar = max(u_white_level - u_black_level, 1.0);
         vec3 norm = linearRGB / clipScalar;
         float luma = dot(u_luma_coeffs, norm);
+        float peak = max(norm.r, max(norm.g, norm.b));
         float inverted = max(1.0 - luma, 0.0);
         float attenuation = pow(inverted, u_clip_atten_factor * 5.0);
-        linearRGB = (norm - vec3(luma)) * attenuation + vec3(luma);
+        linearRGB = (norm - vec3(peak)) * attenuation + vec3(peak);
         linearRGB *= clipScalar;
     }
 
