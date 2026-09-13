@@ -704,7 +704,7 @@ ivec2 mappedOutCoord(ivec2 clampedCoord) {
     return clamp(oc, ivec2(0), ivec2(u_outputResolution) - ivec2(1));
 }
 
-// Romanenko-NR-aware RAW sample.  When the output-driven denoiser produced a
+// Spatial-NR-aware RAW sample.  When the output-driven denoiser produced a
 // denoised mosaiced frame, invert the reverse map (sensor -> output grid) and
 // take the denoised value for the requested CFA phase.  The denoiser writes
 // one spatial estimate per phase into r/g/b/a of every output texel (which is

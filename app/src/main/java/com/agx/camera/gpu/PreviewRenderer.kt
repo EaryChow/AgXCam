@@ -48,7 +48,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var rawDemosaicFboWidth = 0
     private var rawDemosaicFboHeight = 0
 
-    // Romanenko-NR output-driven denoise buffers: single RGBA32F texture
+    // Spatial-NR output-driven denoise buffers: single RGBA32F texture
     // holding the denoised 4-phase mosaic (R,G1,G2,B), written every frame
     // and consumed by the demosaic pass in the SAME frame via the reverse
     // map.  Spatial-only — no history, no MRT.
@@ -57,7 +57,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var denoiseFboWidth = 0
     private var denoiseFboHeight = 0
 
-    // Capture (still) Romanenko buffers: same spatial-only Bayer-domain pass
+    // Capture (still) spatial-NR buffers: same spatial-only Bayer-domain pass
     // at the capture output resolution; the denoised mosaic is RGBA16F to
     // halve the memory footprint of a full-res still.
     private var captureDenoiseFboId = 0
@@ -511,7 +511,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         bayerShader.uploadBayer(buffer.duplicate(), bayerWidth, bayerHeight, bayerStridePixels)
         logGlError("after uploadBayer", bayerRenderCount)
 
-        // Romanenko Bayer-domain spatial denoise pass (pre-demosaic).
+        // Bayer-domain spatial denoise pass (pre-demosaic).
         // Samples the R16UI sensor frame directly; no temporal state.
         if (nrEnabled) {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, denoiseFboId)
@@ -527,10 +527,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 bitDepth = bayerBitDepth,
                 nrStrength = bayerNrStrength.coerceIn(0f, 1f)
             )
-            logGlError("after romanenko.draw", bayerRenderCount)
+            logGlError("after spatialNr.draw", bayerRenderCount)
         }
 
-        // The Romanenko pass left the denoise FBO bound; put back the demosaic
+        // The denoise pass left the denoise FBO bound; put back the demosaic
         // target FBO + viewport so drawDemosaic renders into the right place.
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, demosaicFboId)
         GLES20.glViewport(0, 0, demosaicFboWidth, demosaicFboHeight)
@@ -826,7 +826,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         ensureCaptureDenoiseBuffers(rawDemosaicFboWidth, rawDemosaicFboHeight)
                     }
 
-                    // Romanenko NR on the still: the same spatial-only Bayer-domain pass
+                    // Spatial NR on the still: the same spatial-only Bayer-domain pass
                     // as the preview, run once at capture resolution.  The
                     // capture history outputs are discarded (the capture FBO
                     // lists a single draw buffer).
@@ -852,7 +852,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                             bitDepth = bayerBitDepth,
                             nrStrength = rcStrength,
                         )
-                        logGlError("raw after romanenko.draw", bayerRenderCount)
+                        logGlError("raw after spatialNr.draw", bayerRenderCount)
                     }
 
                     // Restore the demosaic target FBO + viewport (the denoise
@@ -1357,7 +1357,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         CrashLogger.log(TAG, "Denoise FBO created RGBA32F: ${width}x${height}")
     }
 
-    // Capture/still Romanenko: single spatial pass at the capture output
+    // Capture/still spatial-NR: single spatial pass at the capture output
     // resolution; the denoised mosaic is RGBA16F to halve the memory
     // footprint of a full-res still.
     private fun allocRgba16fTexture(width: Int, height: Int): Int {
