@@ -46,6 +46,16 @@ import com.agx.camera.CrashLogger
 import java.nio.ByteBuffer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.io.File
+import java.io.FileOutputStream
+import org.json.JSONArray
+import org.json.JSONObject
+
+// Which map the lens-shading correction consumes.
+private enum class LensShadingSourceMode { STOCK, SAMPLED }
+
+// Whether the device HAL ever emitted a usable (non-identity) lens shading map.
+private enum class HalMapStatus { UNKNOWN, AVAILABLE, MISSING }
 
 class MainActivity : AppCompatActivity() {
 
@@ -98,6 +108,43 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var rawFrameDelivered = false
     private var rawFrameLogCount = 0
     private var rawFallbackRunnable: Runnable? = null
+
+    // Lens-shading correction: HAL/driver "stock" maps vs the live sampled
+    // estimator map. The source is user-selectable (Auto/Stock/Sampled), but
+    // a device that can't emit a non-identity HAL map is pinned to Sampled.
+    private lateinit var lensShadingEstimator: LensShadingEstimator
+    @Volatile private var lensShadingSourceMode: LensShadingSourceMode? = null
+    @Volatile private var halMapStatus = HalMapStatus.UNKNOWN
+    @Volatile private var lensShadingStrength = 1f
+    @Volatile private var lastHalMapPixels: ShortArray? = null
+    @Volatile private var lastHalMapWidth = 0
+    @Volatile private var lastHalMapHeight = 0
+    private var lastEstimatorMap: LensShadingData? = null
+    private var lensShadingUiFrameCount = 0
+    // One-shot startup notice that live sampling exists: shown only once per
+    // launch when no HAL map is available and no learned map exists yet, never
+    // on lens switch or manual sampling.
+    private var lensShadingNoticeShown = false
+    private var rawSessionCountSinceLaunch = 0
+    // The learned map was already persisted this run; avoids re-serializing on
+    // every converged frame.
+    private var lensShadingMapPersisted = false
+    private var rawSensorWidth = 0
+    private var rawSensorHeight = 0
+    private var rawBayerPattern = BayerPattern.RGGB
+    private var rawWhiteLevel = 1023
+    private var rawBlackLevel = 64f
+
+    private lateinit var lensShadingStatusPill: TextView
+    private lateinit var lensShadingStartBtn: TextView
+    private lateinit var lensShadingPauseBtn: TextView
+    private lateinit var lensShadingResumeBtn: TextView
+    private lateinit var lensShadingResetBtn: TextView
+    private lateinit var lensShadingStrengthLabel: TextView
+    private lateinit var lensShadingStrengthSlider: SeekBar
+    private lateinit var lensShadingStockBtn: TextView
+    private lateinit var lensShadingSampledBtn: TextView
+    private lateinit var lensShadingNoticeOverlay: TextView
 
     private lateinit var orientationListener: OrientationEventListener
 
@@ -321,6 +368,16 @@ class MainActivity : AppCompatActivity() {
         zoomRow = findViewById(R.id.zoom_row)
         lensSelector = findViewById(R.id.lens_selector)
         settingsPanel = findViewById(R.id.settings_panel)
+        lensShadingStatusPill = findViewById(R.id.lens_shading_status_pill)
+        lensShadingStartBtn = findViewById(R.id.lens_shading_start_btn)
+        lensShadingPauseBtn = findViewById(R.id.lens_shading_pause_btn)
+        lensShadingResumeBtn = findViewById(R.id.lens_shading_resume_btn)
+        lensShadingResetBtn = findViewById(R.id.lens_shading_reset_btn)
+        lensShadingStrengthLabel = findViewById(R.id.lens_shading_strength_label)
+        lensShadingStrengthSlider = findViewById(R.id.lens_shading_strength_slider)
+        lensShadingStockBtn = findViewById(R.id.lens_shading_stock_btn)
+        lensShadingSampledBtn = findViewById(R.id.lens_shading_sampled_btn)
+        lensShadingNoticeOverlay = findViewById(R.id.lens_shading_notice_overlay)
         finishingCaptureOverlay = findViewById(R.id.finishing_capture_overlay)
         lensSwitchOverlay = findViewById(R.id.lens_switch_overlay)
         lensInfoOverlay = findViewById(R.id.lens_info_overlay)
@@ -934,6 +991,91 @@ class MainActivity : AppCompatActivity() {
                 }
                 consumed
             }
+        }
+
+        // --- Lens Shading Correction controls (user-facing) ---
+        lensShadingEstimator = LensShadingEstimator()
+
+        // null source mode = auto: stock map when the device provides one, sampled otherwise.
+        lensShadingSourceMode = when (previewResPrefs.getInt(PREF_LS_SOURCE_MODE, -1)) {
+            LensShadingSourceMode.STOCK.ordinal -> LensShadingSourceMode.STOCK
+            LensShadingSourceMode.SAMPLED.ordinal -> LensShadingSourceMode.SAMPLED
+            else -> null
+        }
+        // Remember whether this device ever produced a usable (non-identity)
+        // HAL map; if we know it can't, the toggle is pinned to Sampled.
+        halMapStatus = if (previewResPrefs.contains(PREF_LS_HAL_MAP)) {
+            if (previewResPrefs.getBoolean(PREF_LS_HAL_MAP, false)) HalMapStatus.AVAILABLE else HalMapStatus.MISSING
+        } else {
+            HalMapStatus.UNKNOWN
+        }
+        lensShadingStrength = previewResPrefs.getFloat(PREF_LS_STRENGTH, 1f).coerceIn(0f, 1f)
+        lensShadingStrengthSlider.progress = (lensShadingStrength * 100f).toInt()
+        lensShadingStrengthLabel.text = String.format("Strength  %d%%", (lensShadingStrength * 100f).toInt())
+
+        fun wireSourceModeBtn(btn: TextView, mode: LensShadingSourceMode) {
+            btn.setOnClickListener { selectLensShadingSourceMode(mode) }
+        }
+        wireSourceModeBtn(lensShadingStockBtn, LensShadingSourceMode.STOCK)
+        wireSourceModeBtn(lensShadingSampledBtn, LensShadingSourceMode.SAMPLED)
+
+        lensShadingStartBtn.setOnClickListener {
+            if (useStockMap) {
+                Toast.makeText(this, "Stock HAL map active - estimator disabled", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val lens = lensManager.activeLens
+            val w = rawSensorWidth
+            val h = rawSensorHeight
+            if (lens == null || w <= 0 || h <= 0) {
+                Toast.makeText(this, "Open a RAW session first", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            lastEstimatorMap = null
+            lensShadingUiFrameCount = 0
+            lensShadingMapPersisted = false
+            CrashLogger.log(
+                TAG, "lensShading: start sampling ${w}x${h} lens=${lens.cameraId} " +
+                    "pattern=${rawBayerPattern.label} white=$rawWhiteLevel"
+            )
+            lensShadingEstimator.start(w, h, rawBayerPattern, rawWhiteLevel, rawBlackLevel)
+            if (!useStockMap) previewRenderer.resetLensShading()
+            updateLensShadingUI()
+        }
+
+        lensShadingPauseBtn.setOnClickListener {
+            lensShadingEstimator.pause()
+            saveLearnedLensShading()
+            updateLensShadingUI()
+        }
+
+        lensShadingResumeBtn.setOnClickListener {
+            lensShadingEstimator.resume()
+            updateLensShadingUI()
+        }
+
+        lensShadingResetBtn.setOnClickListener {
+            val lens = lensManager.activeLens
+            lastEstimatorMap = null
+            lensShadingMapPersisted = false
+            lensShadingEstimator.reset()
+            if (lens != null) deleteLensShadingPersistence(lens.cameraId)
+            if (!useStockMap) previewRenderer.resetLensShading()
+            CrashLogger.log(TAG, "lensShading: reset")
+            updateLensShadingUI()
+        }
+
+        lensShadingStrengthSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
+            lensShadingStrength = v / 100f
+            lensShadingStrengthLabel.text = String.format("Strength  %d%%", v)
+            previewResPrefs.edit().putFloat(PREF_LS_STRENGTH, lensShadingStrength).apply()
+            applyLensShadingStrengthLive()
+        })
+        setupSliderDoubleClickReset(lensShadingStrengthSlider, 100) {
+            lensShadingStrength = 1f
+            lensShadingStrengthLabel.text = "Strength  100%"
+            previewResPrefs.edit().putFloat(PREF_LS_STRENGTH, 1f).apply()
+            applyLensShadingStrengthLive()
         }
 
         contrastSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
@@ -2297,41 +2439,56 @@ class MainActivity : AppCompatActivity() {
             val dest = acquireRawBuffer(rawW, rawH)
             val src = plane.buffer
 
-            if (rawFrameLogCount == 0 || rawFrameLogCount % 150 == 0) {
-                var sampleMin = 0xFFFF
-                var sampleMax = 0
-                var sampleCount = 0
-                var r = 0
-                while (r < rawH) {
-                    var c = 0
-                    while (c < rawW) {
-                        val v = (src.get(r * stride + c * 2).toInt() and 0xFF) or
-                            ((src.get(r * stride + c * 2 + 1).toInt() and 0xFF) shl 8)
-                        if (v < sampleMin) sampleMin = v
-                        if (v > sampleMax) sampleMax = v
-                        sampleCount++
-                        c += 64
+            // The raw copy (below) can race the camera teardown: onPause closes
+            // the ImageReader while a frame is being imported, freeing the
+            // plane buffer mid-read. Drop such frames instead of crashing.
+            if (!runCatching {
+                    fun pixelValue(row: Int, col: Int): Int {
+                        val p = row * stride + col * 2
+                        return (src.get(p).toInt() and 0xFF) or ((src.get(p + 1).toInt() and 0xFF) shl 8)
                     }
-                    r += 64
-                }
-                CrashLogger.log(
-                    TAG, "onRawFrameAvailable: #$rawFrameLogCount ${rawW}x${rawH} " +
-                        "stride=$stride pixelStride=${plane.pixelStride} " +
-                        "samples=$sampleCount min=$sampleMin max=$sampleMax"
-                )
-                Log.d(TAG, "onRawFrameAvailable: ${rawW}x${rawH} min=$sampleMin max=$sampleMax")
-            }
-            rawFrameLogCount++
 
-            var offset = 0
-            for (row in 0 until rawH) {
-                src.position(row * stride)
-                src.limit(row * stride + rawW * 2)
-                dest.position(offset)
-                dest.put(src)
-                offset += rawW * 2
+                    if (rawFrameLogCount == 0 || rawFrameLogCount % 150 == 0) {
+                        var sampleMin = 0xFFFF
+                        var sampleMax = 0
+                        var sampleCount = 0
+                        var r = 0
+                        while (r < rawH) {
+                            var c = 0
+                            while (c < rawW) {
+                                val v = pixelValue(r, c)
+                                if (v < sampleMin) sampleMin = v
+                                if (v > sampleMax) sampleMax = v
+                                sampleCount++
+                                c += 64
+                            }
+                            r += 64
+                        }
+                        CrashLogger.log(
+                            TAG, "onRawFrameAvailable: #$rawFrameLogCount ${rawW}x${rawH} " +
+                                "format=${image.format} stride=$stride pixelStride=${plane.pixelStride} " +
+                                "samples=$sampleCount min=$sampleMin max=$sampleMax"
+                        )
+                        Log.d(TAG, "onRawFrameAvailable: ${rawW}x${rawH} min=$sampleMin max=$sampleMax")
+                    }
+                    rawFrameLogCount++
+
+                    var offset = 0
+                    for (row in 0 until rawH) {
+                        src.position(row * stride)
+                        src.limit(row * stride + rawW * 2)
+                        dest.position(offset)
+                        dest.put(src)
+                        offset += rawW * 2
+                    }
+                    dest.position(0)
+                }.isSuccess
+            ) {
+                return@rawHandler
             }
-            dest.position(0)
+
+            feedLensShadingEstimator(dest, rawW, rawH)
+
             val ccGains = camera2Manager.latestColorCorrectionGains
             val ccMat = camera2Manager.latestColorCorrectionMatrix
             val gainsOk = ccGains != null &&
@@ -2536,6 +2693,24 @@ val neutral: FloatArray? = if (gainsOk) {
             }
         }
 
+        camera2Manager.onLensShadingMapAvailable = { pixels, w, h ->
+            // A usable (non-identity) HAL map exists on this device: record it,
+            // cancel the "no map" grace timer, and in AUTO mode let the stock
+            // map take over. If the user has explicitly chosen the sampled map,
+            // the estimator stays in charge (their choice wins).
+            halMapStatus = HalMapStatus.AVAILABLE
+            previewResPrefs.edit().putBoolean(PREF_LS_HAL_MAP, true).apply()
+            mainHandler.removeCallbacks(lensShadingGraceRunnable)
+            lastHalMapPixels = pixels
+            lastHalMapWidth = w
+            lastHalMapHeight = h
+            if (useStockMap) {
+                if (::lensShadingEstimator.isInitialized) lensShadingEstimator.pause()
+                previewRenderer.submitLensShadingMap(pixels, w, h)
+            }
+            mainHandler.post { updateLensShadingUI() }
+        }
+
         camera2Manager.startBackgroundThread()
 
         try {
@@ -2562,6 +2737,7 @@ val neutral: FloatArray? = if (gainsOk) {
 
     private fun applyRawMetadata(lens: LensInfo) {
         try {
+            rawSessionCountSinceLaunch++
             val cm = getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
             val chars = cm.getCameraCharacteristics(lens.cameraId)
             val meta = RawMetadataParser(chars)
@@ -2604,6 +2780,38 @@ val neutral: FloatArray? = if (gainsOk) {
                 previewRenderer.nativeLumaCoeffs = DEFAULT_LUMA_COEFFS.copyOf()
             }
             wbEstimateFrame = 0
+            // A new lens on the same renderer: start from the identity no-op
+            // until its own shading map arrives with the first CaptureResults.
+            previewRenderer.resetLensShading()
+
+            // Lens shading: fresh estimator per lens; restore a previously learned
+            // map from disk. In AUTO/STOCK on a device that emits a usable HAL
+            // map, the HAL map takes over when its first CaptureResult arrives;
+            // otherwise the sampled estimator auto-starts if correction is
+            // enabled and no map exists yet.
+            rawBayerPattern = meta.bayerPattern
+            rawWhiteLevel = meta.whiteLevel
+            rawBlackLevel = meta.blackLevelAverage
+            rawSensorWidth = meta.sensorWidth
+            rawSensorHeight = meta.sensorHeight
+            armHalMapGraceCheck()
+            lastEstimatorMap = null
+            lensShadingMapPersisted = false
+            if (::lensShadingEstimator.isInitialized) {
+                lensShadingEstimator.reset()
+                val saved = loadLensShadingMap(lens.cameraId)
+                if (saved != null) {
+                    lastEstimatorMap = saved
+                    if (!useStockMap) submitSampledMap(saved)
+                    CrashLogger.log(
+                        TAG, "lensShading: restored saved map for lens ${lens.cameraId} " +
+                            "${saved.width}x${saved.height}"
+                    )
+                }
+                autoStartSamplingIfNeeded()
+                maybeShowLensShadingNotice()
+                mainHandler.post { updateLensShadingUI() }
+            }
             CrashLogger.log(
                 TAG, "applyRawMetadata: ${meta.sensorWidth}x${meta.sensorHeight} white=${meta.whiteLevel} " +
                     "blackAvg=${meta.blackLevelAverage} pattern=${meta.bayerPattern.label} " +
@@ -2636,6 +2844,15 @@ val neutral: FloatArray? = if (gainsOk) {
         rawColorProfile = null
         rawNeutralSeed = floatArrayOf(1f, 1f, 1f)
         estimatorNeutral = null
+        mainHandler.removeCallbacks(lensShadingGraceRunnable)
+        lastEstimatorMap = null
+        lensShadingMapPersisted = false
+        if (::lensShadingEstimator.isInitialized) {
+            lensShadingEstimator.reset()
+            rawSensorWidth = 0
+            rawSensorHeight = 0
+            mainHandler.post { updateLensShadingUI() }
+        }
     }
 
     // Luminance (Y) coefficients of the camera-native RGB space, derived from a
@@ -2777,9 +2994,268 @@ val neutral: FloatArray? = if (gainsOk) {
         }
     }
 
+    // --- Lens Shading estimator plumbing ---
+
+    private fun feedLensShadingEstimator(buffer: ByteBuffer, w: Int, h: Int) {
+        if (useStockMap || !::lensShadingEstimator.isInitialized) return
+        // Accumulate only for the lens geometry we started with.
+        if (rawSensorWidth <= 0 || rawSensorWidth != w || rawSensorHeight != h) return
+        val map = lensShadingEstimator.addFrame(buffer) ?: return
+        lastEstimatorMap = map
+        if (lensShadingEstimator.mapDelta > 0.005f || lensShadingEstimator.sampledFrames <= 2) {
+            submitSampledMap(map)
+        }
+        if (lensShadingUiFrameCount % 12 == 0) {
+            mainHandler.post { updateLensShadingUI() }
+        }
+        lensShadingUiFrameCount++
+        if (lensShadingEstimator.currentState == LensShadingState.CONVERGED && !lensShadingMapPersisted) {
+            saveLearnedLensShading()
+        }
+    }
+
+    private fun submitSampledMap(map: LensShadingData) {
+        if (useStockMap) return
+        val scaled = scaleLensShadingGains(map, lensShadingStrength)
+        previewRenderer.submitLensShadingMap(
+            scaled.toRgba16fFlipped(rawBayerPattern), scaled.width, scaled.height
+        )
+    }
+
+    private fun applyLensShadingStrengthLive() {
+        if (useStockMap) return
+        lastEstimatorMap?.let { submitSampledMap(it) }
+    }
+
+    private fun saveLearnedLensShading() {
+        if (useStockMap) return
+        val lens = lensManager.activeLens ?: return
+        val map = lastEstimatorMap ?: return
+        if (lensShadingEstimator.sampledFrames < 5 || !map.available) return
+        if (persistLensShadingMap(lens.cameraId, map)) lensShadingMapPersisted = true
+    }
+
+    private fun lensShadingFile(lensId: String): File = File(filesDir, "lens_shading_$lensId.json")
+
+    private fun persistLensShadingMap(lensId: String, map: LensShadingData): Boolean {
+        return try {
+            val obj = JSONObject()
+            obj.put("w", map.width)
+            obj.put("h", map.height)
+            obj.put("r", flattenGains(map.rGains))
+            obj.put("gr", flattenGains(map.grGains))
+            obj.put("gb", flattenGains(map.gbGains))
+            obj.put("b", flattenGains(map.bGains))
+            val f = lensShadingFile(lensId)
+            FileOutputStream(f).use { it.write(obj.toString().toByteArray(Charsets.UTF_8)) }
+            CrashLogger.log(TAG, "lensShading: saved map for lens $lensId ${map.width}x${map.height}")
+            true
+        } catch (e: Exception) {
+            CrashLogger.log(TAG, "lensShading: save failed ${e.message}")
+            false
+        }
+    }
+
+    private fun loadLensShadingMap(lensId: String): LensShadingData? {
+        val f = lensShadingFile(lensId)
+        if (!f.exists()) return null
+        return try {
+            val obj = JSONObject(f.readText(Charsets.UTF_8))
+            val w = obj.getInt("w")
+            val h = obj.getInt("h")
+            if (w <= 0 || h <= 0) return null
+            fun gains(key: String): Array<FloatArray> {
+                val arr = obj.getJSONArray(key)
+                return Array(h) { r ->
+                    FloatArray(w) { c -> arr.getDouble(r * w + c).toFloat() }
+                }
+            }
+            val r = gains("r")
+            val gr = gains("gr")
+            val gb = gains("gb")
+            val b = gains("b")
+            val maxGain = (r + gr + gb + b).maxOf { row -> row.maxOrNull() ?: 1f }
+            LensShadingData(r, gr, gb, b, w, h, maxGain > 1.02f)
+        } catch (e: Exception) {
+            CrashLogger.log(TAG, "lensShading: load failed ${e.message}")
+            null
+        }
+    }
+
+    private fun deleteLensShadingPersistence(lensId: String) {
+        try {
+            val f = lensShadingFile(lensId)
+            if (f.exists()) f.delete()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun flattenGains(rows: Array<FloatArray>): JSONArray {
+        val arr = JSONArray()
+        for (row in rows) for (v in row) arr.put(v.toDouble())
+        return arr
+    }
+
+    private fun updateLensShadingUI() {
+        val frames = lensShadingEstimator.sampledFrames
+        var text: String
+        var color: Int
+        when {
+            useStockMap -> {
+                text = "Stock map (HAL)"; color = 0xFF26A69A.toInt()
+            }
+            lensShadingEstimator.currentState == LensShadingState.SAMPLING -> {
+                text = "Learning"; color = 0xFFFFA726.toInt()
+            }
+            lensShadingEstimator.currentState == LensShadingState.PAUSED -> {
+                text = "Paused"; color = 0xFF42A5F5.toInt()
+            }
+            lensShadingEstimator.currentState == LensShadingState.CONVERGED -> {
+                text = "Applied"; color = 0xFF7CB342.toInt()
+            }
+            lensShadingEstimator.currentState == LensShadingState.IDLE && lastEstimatorMap != null -> {
+                text = "Applied (saved)"; color = 0xFF7CB342.toInt()
+            }
+            else -> {
+                text = "Idle"; color = 0xFF757575.toInt()
+            }
+        }
+        if (!useStockMap) {
+            if (frames > 0) text += " · $frames"
+            val elapsedS = lensShadingEstimator.elapsedMillis / 1000
+            if (elapsedS >= 1 && lensShadingEstimator.currentState != LensShadingState.IDLE) text += " · ${elapsedS}s"
+        }
+        lensShadingStatusPill.text = text
+        lensShadingStatusPill.setBackgroundColor(color)
+        lensShadingStartBtn.isEnabled = !useStockMap
+        updateLensShadingToggle()
+    }
+
+    // Stock map source: only devices that emit a usable (non-identity) HAL map
+    // and are not pinned to the sampled map use the HAL map.
+    private val useStockMap: Boolean
+        get() = halMapStatus == HalMapStatus.AVAILABLE && lensShadingSourceMode != LensShadingSourceMode.SAMPLED
+
+    private fun updateLensShadingToggle() {
+        val forcedSampled = halMapStatus == HalMapStatus.MISSING
+        val selected = if (useStockMap) LensShadingSourceMode.STOCK else LensShadingSourceMode.SAMPLED
+        val enabled = !forcedSampled
+        lensShadingStockBtn.isEnabled = enabled
+        lensShadingSampledBtn.isEnabled = enabled
+        lensShadingStockBtn.alpha = if (enabled) 1f else 0.5f
+        lensShadingSampledBtn.alpha = if (enabled) 1f else 0.5f
+        fun style(btn: TextView, active: Boolean) {
+            btn.background = android.graphics.drawable.ColorDrawable(if (active) 0xFFFFA726.toInt() else 0xFF333333.toInt())
+            btn.setTextColor(if (active) 0xFF000000.toInt() else 0xFFCCCCCC.toInt())
+        }
+        style(lensShadingStockBtn, selected == LensShadingSourceMode.STOCK)
+        style(lensShadingSampledBtn, selected == LensShadingSourceMode.SAMPLED)
+    }
+
+    private val lensShadingNoticeHideRunnable = Runnable {
+        lensShadingNoticeOverlay.animate().cancel()
+        lensShadingNoticeOverlay.animate().alpha(0f).setDuration(300).withEndAction {
+            lensShadingNoticeOverlay.visibility = View.GONE
+        }.start()
+    }
+
+    private fun maybeShowLensShadingNotice() {
+        if (lensShadingNoticeShown) return
+        if (rawSessionCountSinceLaunch != 1) return
+        if (halMapStatus != HalMapStatus.MISSING) return
+        if (useStockMap) return
+        if (lastEstimatorMap != null) return
+        if (lensShadingEstimator.currentState != LensShadingState.SAMPLING) return
+        lensShadingNoticeShown = true
+        lensShadingNoticeOverlay.removeCallbacks(lensShadingNoticeHideRunnable)
+        lensShadingNoticeOverlay.animate().cancel()
+        lensShadingNoticeOverlay.text =
+            "This device can't provide a lens shading map - auto-sampling the lens\n" +
+                "shading now. Check the Lens Shading settings to adjust."
+        lensShadingNoticeOverlay.alpha = 0f
+        lensShadingNoticeOverlay.visibility = View.VISIBLE
+        lensShadingNoticeOverlay.animate().alpha(1f).setDuration(200).withEndAction {
+            lensShadingNoticeOverlay.postDelayed(lensShadingNoticeHideRunnable, 10_000)
+        }.start()
+    }
+
+    private fun selectLensShadingSourceMode(mode: LensShadingSourceMode) {
+        if (halMapStatus == HalMapStatus.MISSING) return
+        if (mode == lensShadingSourceMode) {
+            updateLensShadingUI()
+            return
+        }
+        lensShadingSourceMode = mode
+        previewResPrefs.edit().putInt(PREF_LS_SOURCE_MODE, mode.ordinal).apply()
+        CrashLogger.log(
+            TAG, "lensShading: source mode=$mode stockPinned=${halMapStatus == HalMapStatus.MISSING} " +
+                "halMapStatus=$halMapStatus"
+        )
+        if (useStockMap) {
+            lensShadingEstimator.pause()
+            val pixels = lastHalMapPixels
+            if (pixels != null) {
+                previewRenderer.submitLensShadingMap(pixels, lastHalMapWidth, lastHalMapHeight)
+            } else {
+                previewRenderer.resetLensShading()
+            }
+        } else {
+            lensShadingEstimator.resume()
+            autoStartSamplingIfNeeded()
+            val m = lastEstimatorMap
+            if (m != null) submitSampledMap(m) else previewRenderer.resetLensShading()
+        }
+        updateLensShadingUI()
+    }
+
+    // Grace window: if a freshly opened RAW session never emits a usable HAL map,
+    // the device is pinned to the sampled map. Covers both "no map at all" and
+    // "identity-only" HALs (the parser drops identity maps upstream).
+    private val lensShadingGraceRunnable = Runnable {
+        if (halMapStatus != HalMapStatus.UNKNOWN) return@Runnable
+        halMapStatus = HalMapStatus.MISSING
+        previewResPrefs.edit().putBoolean(PREF_LS_HAL_MAP, false).apply()
+        CrashLogger.log(
+            TAG, "lensShading: no non-identity HAL map within ${HAL_MAP_GRACE_MS}ms - " +
+                "pinning to sampled map"
+        )
+        if (::lensShadingEstimator.isInitialized) {
+            autoStartSamplingIfNeeded()
+            maybeShowLensShadingNotice()
+            updateLensShadingUI()
+        }
+    }
+
+    private fun armHalMapGraceCheck() {
+        if (halMapStatus != HalMapStatus.UNKNOWN) return
+        mainHandler.removeCallbacks(lensShadingGraceRunnable)
+        mainHandler.postDelayed(lensShadingGraceRunnable, HAL_MAP_GRACE_MS)
+    }
+
+    // Auto-start the sampled estimator when correction is enabled, no map exists
+    // yet for this lens, and we are not in stock mode. Strength 0 means "user
+    // turned correction off" — never force it back on at startup.
+    private fun autoStartSamplingIfNeeded() {
+        if (useStockMap) return
+        if (lensShadingStrength <= 0f) return
+        if (lastEstimatorMap != null) return
+        if (rawSensorWidth <= 0 || rawSensorHeight <= 0) return
+        if (lensShadingEstimator.currentState == LensShadingState.SAMPLING) return
+        lensShadingEstimator.start(rawSensorWidth, rawSensorHeight, rawBayerPattern, rawWhiteLevel, rawBlackLevel)
+        lensShadingUiFrameCount = 0
+        lastEstimatorMap = null
+        lensShadingMapPersisted = false
+        if (!useStockMap) previewRenderer.resetLensShading()
+        CrashLogger.log(
+            TAG, "lensShading: auto-start sampling ${rawSensorWidth}x${rawSensorHeight} " +
+                "pattern=${rawBayerPattern.label} strength=${lensShadingStrength}"
+        )
+    }
+
     private fun restartCamera() {
         CrashLogger.log(TAG, "restartCamera")
         mainHandler.removeCallbacks(stallWatchdogRunnable)
+        mainHandler.removeCallbacks(lensShadingGraceRunnable)
         val lens = lensManager.activeLens ?: lensManager.selectPrimary() ?: return
         camera2Manager.close()
         camera2Manager.stopBackgroundThread()
@@ -2816,6 +3292,7 @@ val neutral: FloatArray? = if (gainsOk) {
         pendingLensInfo = true
 
         mainHandler.removeCallbacks(stallWatchdogRunnable)
+        mainHandler.removeCallbacks(lensShadingGraceRunnable)
 
         lensManager.saveCurrentState(
             currentLens.cameraId,
@@ -3132,6 +3609,7 @@ override fun onResume() {
 
     private fun performCleanup() {
         mainHandler.removeCallbacks(stallWatchdogRunnable)
+        mainHandler.removeCallbacks(lensShadingGraceRunnable)
         camera2Manager.close()
         camera2Manager.stopBackgroundThread()
         cameraReady = false
@@ -3888,6 +4366,16 @@ override fun onResume() {
         private const val RAW_BUFFER_POOL = 3
         // Leading factor of the demosaic clipping-neutralization exponent.
         private const val PREF_CLIP_ATTEN = "clip_atten_factor"
+        // Lens shading correction strength (0.0..1.0) of the estimated map.
+        private const val PREF_LS_STRENGTH = "lens_shading_strength"
+        // Lens shading source policy, persisted so the user's explicit choice is
+        // not overridden by the device type on the next launch.
+        private const val PREF_LS_SOURCE_MODE = "lens_shading_source_mode"
+        // Whether this device ever produced a usable (non-identity) HAL map.
+        private const val PREF_LS_HAL_MAP = "lens_shading_hal_map"
+        // After a RAW session opens with no HAL map yet, wait this long before
+        // declaring the device incapable of a usable lens shading map.
+        private const val HAL_MAP_GRACE_MS = 5_000L
         // Post-processing EV roller: 0.5 EV per step over the ±10 EV range.
         private const val EV_PP_MAX_INDEX = 40
         private const val EV_PP_MID_INDEX = 20

@@ -66,6 +66,23 @@ class Camera2Manager(private val context: Context) {
 
     private var ccLogCount = 0
 
+    // Lens shading (vignette) correction. The HAL is asked to compute the
+    // per-frame lens-shading map statistic on every request (§15.1); the first
+    // valid non-identity map is pushed to the renderer, and refreshed at a low
+    // rate in case the HAL updates it with focus distance. The callback carries
+    // RGBA16F half-float pixels already permuted per CFA and Y-flipped, ready
+    // for a single glTexImage2D upload.
+    var onLensShadingMapAvailable: ((ShortArray, Int, Int) -> Unit)? = null
+    private var lsmParser: RawMetadataParser? = null
+    private var lsmMapAvailable = false
+    private var lsmFrameCount = 0
+    private var lsmLogCount = 0
+    // The static SENSOR_INFO_LENS_SHADING_APPLIED characteristic: TRUE means
+    // this HAL bakes shading into RAW by default — which is why the per-frame
+    // map is null/identity unless we also request applied=FALSE on each request
+    // (see applyLensShadingMapMode). Informational/logging only.
+    private var staticLensShadingApplied = false
+
     private var sessionRetryCount = 0
     private val maxSessionRetries = 1
 
@@ -181,6 +198,12 @@ class Camera2Manager(private val context: Context) {
 
         rawSize = Size(0, 0)
 
+        // Fresh lens: drop the previous lens's parsing state so the new map is
+        // captured from this device's first results, not the old one's.
+        lsmParser = null
+        lsmMapAvailable = false
+        lsmFrameCount = 0
+
         try {
             previewReader = ImageReader.newInstance(
                 previewSize.width, previewSize.height,
@@ -191,6 +214,25 @@ class Camera2Manager(private val context: Context) {
 
             val chars = cameraManager.getCameraCharacteristics(lens.cameraId)
             cameraCharacteristics = chars
+
+            // One-shot lens-shading diagnostics: tells us whether the HAL can
+            // deliver a usable map and whether the RAW is already corrected.
+            try {
+                staticLensShadingApplied = chars.get(CameraCharacteristics.SENSOR_INFO_LENS_SHADING_APPLIED) ?: false
+            } catch (_: Exception) {}
+            val shadingMapModes = try {
+                chars.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_LENS_SHADING_MAP_MODES)?.toList()
+            } catch (_: Exception) { null }
+            val shadingMapSize = try {
+                val keyField = CameraCharacteristics::class.java.getField("LENS_INFO_SHADING_MAP_SIZE")
+                @Suppress("UNCHECKED_CAST")
+                val key = keyField.get(null) as CameraCharacteristics.Key<android.util.Size>
+                chars.get(key)
+            } catch (_: Exception) { null }
+            CrashLogger.log(TAG,
+                "shading: staticLensShadingApplied=$staticLensShadingApplied (request override=FALSE sent) " +
+                "mapModes=${shadingMapModes ?: "n/a"} mapSize=${shadingMapSize ?: "n/a"}")
+
             availableAfModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: intArrayOf()
             availableAeModes = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES) ?: intArrayOf()
             availableAwbModes = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.toSet() ?: emptySet()
@@ -247,6 +289,7 @@ class Camera2Manager(private val context: Context) {
             )
 
             if (useRaw && lens.hasRawSensor) {
+                // RAW_SENSOR (16-bit): the single bulk-copy import path.
                 val rawSizes = map?.getOutputSizes(ImageFormat.RAW_SENSOR) ?: emptyArray()
                 val selected = rawSizes.maxByOrNull { it.width.toLong() * it.height.toLong() }
                 if (selected != null) {
@@ -260,8 +303,8 @@ class Camera2Manager(private val context: Context) {
                     Log.d(TAG, "RAW stream created: ${rawSize.width}x${rawSize.height}")
                     CrashLogger.log(TAG, "RAW stream ${rawSize.width}x${rawSize.height}")
                 } else {
-                    Log.w(TAG, "RAW preview requested but no RAW_SENSOR output sizes available")
-                    CrashLogger.log(TAG, "RAW requested but no RAW_SENSOR sizes")
+                    Log.w(TAG, "RAW preview requested but no RAW output sizes available")
+                    CrashLogger.log(TAG, "RAW requested but no RAW sizes")
                 }
             }
         } catch (e: Exception) {
@@ -558,6 +601,7 @@ class Camera2Manager(private val context: Context) {
             set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureTimeNs)
             applyFlashForManualExposure()
             applyPreviewCrop()
+            applyLensShadingMapMode()
         }
 
         try {
@@ -604,6 +648,29 @@ class Camera2Manager(private val context: Context) {
     private fun CaptureRequest.Builder.applyCropRegion() {
         val crop = computeCropRegion() ?: return
         set(CaptureRequest.SCALER_CROP_REGION, crop)
+    }
+
+    /** Ask the HAL to (a) run ISP shading so it emits a stats map, and
+     *  (b) leave the RAW uncorrected and hand back the real per-frame map,
+     *  which we apply ourselves (§15.1).
+     *
+     *  Most OEM HALs (incl. this Xiaomi) bake lens shading into RAW by default
+     *  (SENSOR_INFO_LENS_SHADING_APPLIED=true) and then report a null/identity
+     *  map, so there is nothing to correct. Requesting the applied flag be
+     *  FALSE makes the HAL deliver uncorrected RAW plus the genuine map. The
+     *  key uses the raw vendor tag name (no public Java constant exists) and
+     *  is ignored safely on HALs that don't expose it as a request key. */
+    private fun CaptureRequest.Builder.applyLensShadingMapMode() {
+        set(CaptureRequest.SHADING_MODE, CaptureRequest.SHADING_MODE_FAST)
+        set(
+            CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE,
+            CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE_ON
+        )
+        // NOT setting android.sensor.info.lensShadingApplied: on this Xiaomi HAL
+        // it is a proven no-op. The flag is echoed back in the result but the
+        // pixel output is byte-identical with or without it, and SLMS is never
+        // produced on any stream (RAW16) or request (preview/still). The
+        // RAW therefore always carries the pure optics vignette.
     }
 
     fun updateZoom(factor: Float, centerX: Float, centerY: Float) {
@@ -971,6 +1038,7 @@ class Camera2Manager(private val context: Context) {
                 currentFlashMode.applyToRequest(this, availableAeModes)
             }
             applyPreviewCrop()
+            applyLensShadingMapMode()
         }
 
         if (scanning) scanTriggerFired = true
@@ -1061,6 +1129,7 @@ class Camera2Manager(private val context: Context) {
                 currentFlashMode.applyToRequest(this, availableAeModes)
             }
             applyPreviewCrop()
+            applyLensShadingMapMode()
         }
 
         try {
@@ -1134,6 +1203,7 @@ class Camera2Manager(private val context: Context) {
                 currentFlashMode.applyToRequest(this, availableAeModes)
             }
             applyPreviewCrop()
+            applyLensShadingMapMode()
         }
 
         try {
@@ -1228,6 +1298,7 @@ class Camera2Manager(private val context: Context) {
                 }
             }
             applyCropRegion()
+            applyLensShadingMapMode()
         }
 
         try {
@@ -1412,6 +1483,60 @@ CaptureRequest.CONTROL_AWB_MODE_SHADE -> "SHADE"
                 )
             }
 
+            // Lens shading map: the map arrives as a per-frame statistic. Parse
+            // it as soon as the HAL produces one, then refresh at a low rate —
+            // it is static per lens on most devices, but some HALs update it
+            // with focus distance. A non-identity map is pushed to the renderer
+            // (identity maps are treated as "unavailable" per §15.1).
+            lsmFrameCount++
+            if (lsmParser == null) {
+                cameraCharacteristics?.let { chars ->
+                    try { lsmParser = RawMetadataParser(chars) } catch (_: Exception) {}
+                }
+            }
+            val parser = lsmParser
+            // Cadence: refresh an available map at a low rate (some HALs update
+            // it with focus distance), but also throttle the pre-first-map probe
+            // so identity-only HALs don't reallocate 4 gain grids every frame.
+            val parseThisFrame = if (lsmMapAvailable) lsmFrameCount % 120 == 0 else lsmFrameCount % 15 == 0
+            if (parser != null && parseThisFrame) {
+                try {
+                    val data = parser.parseLensShadingMap(result)
+                    if (data != null && data.available) {
+                        onLensShadingMapAvailable?.invoke(
+                            data.toRgba16fFlipped(parser.bayerPattern),
+                            data.width, data.height
+                        )
+                        if (!lsmMapAvailable) {
+                            lsmMapAvailable = true
+                            val r2 = data.height / 2
+                            val c2 = data.width / 2
+                            CrashLogger.log(TAG,
+                                "Lens shading map available: ${data.width}x${data.height} " +
+                                "staticApplied=$staticLensShadingApplied " +
+                                "tl=[${fmt(data.rGains[0][0])},${fmt(data.grGains[0][0])},${fmt(data.gbGains[0][0])},${fmt(data.bGains[0][0])}] " +
+                                "c=[${fmt(data.rGains[r2][c2])},${fmt(data.grGains[r2][c2])},${fmt(data.gbGains[r2][c2])},${fmt(data.bGains[r2][c2])}] " +
+                                "br=[${fmt(data.rGains[data.height - 1][data.width - 1])},${fmt(data.grGains[data.height - 1][data.width - 1])},${fmt(data.gbGains[data.height - 1][data.width - 1])},${fmt(data.bGains[data.height - 1][data.width - 1])}]"
+                            )
+                        }
+                    } else if (!lsmMapAvailable && lsmLogCount < 20) {
+                        lsmLogCount++
+                        val why = if (data == null) "absent" else "identity"
+                        val resultShadingMode = result.get(CaptureResult.SHADING_MODE)
+                        val resultStatsMode = result.get(CaptureResult.STATISTICS_LENS_SHADING_MAP_MODE)
+                        CrashLogger.log(TAG,
+                            "Lens shading map $why (frame $lsmFrameCount, resultShadingMode=$resultShadingMode, " +
+                            "resultStatsMode=$resultStatsMode, " +
+                            "resultApplied=${resultLensShadingApplied(result)})")
+                    }
+                } catch (e: Exception) {
+                    if (lsmLogCount < 20) {
+                        lsmLogCount++
+                        CrashLogger.log(TAG, "Lens shading map parse failed: ${e.message}")
+                    }
+                }
+            }
+
             val now = SystemClock.elapsedRealtime()
             if (now - lastAeReadoutTime < 500) return
             lastAeReadoutTime = now
@@ -1443,6 +1568,19 @@ CaptureRequest.CONTROL_AWB_MODE_SHADE -> "SHADE"
 
     companion object {
         private const val TAG = "Camera2Manager"
+
+        private fun fmt(v: Float): String = String.format("%.3f", v)
+
+        /** Echoes the per-frame SENSOR_INFO_LENS_SHADING_APPLIED the HAL reports,
+         *  so we can verify the applied=FALSE override actually took effect. */
+        private fun resultLensShadingApplied(result: CaptureResult): Boolean? {
+            return try {
+                val key = CaptureResult.Key<Byte>(
+                    "android.sensor.info.lensShadingApplied", Byte::class.javaObjectType
+                )
+                result.get(key)?.let { it.toInt() != 0 }
+            } catch (_: Exception) { null }
+        }
 
         private val COLOR_IDENTITY_9 = floatArrayOf(
             1f, 0f, 0f,

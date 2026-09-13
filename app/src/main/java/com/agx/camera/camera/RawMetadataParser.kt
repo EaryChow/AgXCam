@@ -98,28 +98,26 @@ class RawMetadataParser(
             null
         } ?: return null
 
-        val mapSize = try {
-            val key = CameraCharacteristics::class.java.getField("LENS_INFO_SHADING_MAP_SIZE")
-                .get(null) as android.hardware.camera2.CameraCharacteristics.Key<*>
-            characteristics.get(key) as? android.util.Size
-        } catch (e: Exception) {
-            Log.w(TAG, "LENS_INFO_SHADING_MAP_SIZE not available: ${e.message}")
-            null
-        } ?: return null
+        // Dimensions come from the map object itself — the informational
+        // LENS_INFO_SHADING_MAP_SIZE characteristic is absent on some OEM
+        // devices even when the per-frame map is delivered.
+        val rows = map.getRowCount()
+        val cols = map.getColumnCount()
+        if (rows <= 0 || cols <= 0) return null
 
-        if (mapSize.width <= 0 || mapSize.height <= 0) return null
+        val rGains = Array(rows) { FloatArray(cols) }
+        val grGains = Array(rows) { FloatArray(cols) }
+        val gbGains = Array(rows) { FloatArray(cols) }
+        val bGains = Array(rows) { FloatArray(cols) }
 
-        val rGains = Array(mapSize.height) { FloatArray(mapSize.width) }
-        val grGains = Array(mapSize.height) { FloatArray(mapSize.width) }
-        val gbGains = Array(mapSize.height) { FloatArray(mapSize.width) }
-        val bGains = Array(mapSize.height) { FloatArray(mapSize.width) }
-
-        for (row in 0 until mapSize.height) {
-            for (col in 0 until mapSize.width) {
-                rGains[row][col] = map.getGainFactor(0, row, col)
-                grGains[row][col] = map.getGainFactor(1, row, col)
-                gbGains[row][col] = map.getGainFactor(2, row, col)
-                bGains[row][col] = map.getGainFactor(3, row, col)
+        for (row in 0 until rows) {
+            for (col in 0 until cols) {
+                // LensShadingMap.getGainFactor(channel, column, row): the
+                // column index is the second argument, row is third.
+                rGains[row][col] = map.getGainFactor(0, col, row)
+                grGains[row][col] = map.getGainFactor(1, col, row)
+                gbGains[row][col] = map.getGainFactor(2, col, row)
+                bGains[row][col] = map.getGainFactor(3, col, row)
             }
         }
 
@@ -133,8 +131,8 @@ class RawMetadataParser(
             grGains = grGains,
             gbGains = gbGains,
             bGains = bGains,
-            width = mapSize.width,
-            height = mapSize.height,
+            width = cols,
+            height = rows,
             available = !allIdentity
         )
     }

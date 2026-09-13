@@ -111,9 +111,14 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     @Volatile var nativeLumaCoeffs = floatArrayOf(0.2126f, 0.7152f, 0.0722f)
     // Leading factor of the clipping-neutralization exponent (factor * 5).
     @Volatile var clipAttenFactor = 0.1f
-    var bayerLensShadingData: ShortArray? = null
-    var bayerLensShadingWidth = 1
-    private var bayerLensShadingHeight = 1
+    // Lens shading (vignette) gain map for the Bayer/RAW pipeline: RGBA16F
+    // half-float pixels, CFA-permuted and Y-flipped, uploaded to
+    // u_lens_shading_map by initGlResources() or the GL thread whenever a new
+    // map arrives post-init. Null means identity (no correction).
+    @Volatile var bayerLensShadingData: ShortArray? = null
+    @Volatile var bayerLensShadingWidth = 1
+    @Volatile private var bayerLensShadingHeight = 1
+    @Volatile private var lensShadingUploadPending = false
 
     private var renderThread: Thread? = null
     private val renderLock = ReentrantLock()
@@ -377,6 +382,32 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         }
     }
 
+    /** Push a freshly-parsed lens shading gain map (§15.1). [pixelsRgba16f] is
+     *  RGBA16F half-float data, already permuted per the active CFA and
+     *  Y-flipped for direct glTexImage2D upload. If GL is not initialized yet,
+     *  initGlResources() picks it up; otherwise the upload runs on the GL
+     *  thread before the next frame. */
+    fun submitLensShadingMap(pixelsRgba16f: ShortArray, width: Int, height: Int) {
+        if (width <= 0 || height <= 0 || pixelsRgba16f.size < width * height * 4) return
+        bayerLensShadingData = pixelsRgba16f
+        bayerLensShadingWidth = width
+        bayerLensShadingHeight = height
+        lensShadingUploadPending = true
+        requestRender()
+    }
+
+    /** Drop the current lens shading map back to the identity no-op. Used when
+     *  a different lens is opened — its own calibration arrives with the first
+     *  CaptureResults, and applying the previous lens's map in between would
+     *  vignette the preview wrong. */
+    fun resetLensShading() {
+        bayerLensShadingData = null
+        bayerLensShadingWidth = 1
+        bayerLensShadingHeight = 1
+        lensShadingUploadPending = true
+        requestRender()
+    }
+
     fun start() {
         running = true
         renderThread = Thread({ renderLoop() }, "PreviewRenderer").also { it.start() }
@@ -384,6 +415,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
     fun stop() {
         running = false
+        lensShadingUploadPending = false
         renderLock.withLock {
             frameCondition.signal()
         }
@@ -685,6 +717,20 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
             if (!glInitialized) {
                 initGlResources()
+            }
+
+            // A lens shading map arrived after GL init: upload it on the render
+            // thread (textures can only be mutated with the context current).
+            if (lensShadingUploadPending) {
+                lensShadingUploadPending = false
+                val data = bayerLensShadingData
+                if (data != null) {
+                    bayerShader.uploadLensShadingMap(data, bayerLensShadingWidth, bayerLensShadingHeight)
+                    CrashLogger.log(TAG, "lens shading map uploaded ${bayerLensShadingWidth}x${bayerLensShadingHeight}")
+                } else {
+                    bayerShader.uploadIdentityLensShading()
+                    CrashLogger.log(TAG, "lens shading reset to identity")
+                }
             }
 
             val viewW = textureView.width

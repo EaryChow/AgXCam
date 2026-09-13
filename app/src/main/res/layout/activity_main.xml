@@ -289,6 +289,24 @@
         android:textSize="13sp"
         android:visibility="gone" />
 
+    <!-- Auto-sampling notice for devices without a HAL lens shading map, shown
+         on the camera screen while the sampled estimator is learning -->
+    <TextView
+        android:id="@+id/lens_shading_notice_overlay"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="120dp"
+        android:background="#CC111111"
+        android:gravity="center"
+        android:lineSpacingExtra="2dp"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="10dp"
+        android:text=""
+        android:textColor="#FFFFAA00"
+        android:textSize="13sp"
+        android:visibility="gone" />
+
     <!-- Bottom Controls — compact, no overlap -->
     <LinearLayout
         android:layout_width="match_parent"
@@ -902,6 +920,156 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="Indicator stays visible when focus is locked"
+                android:textColor="#FF888888"
+                android:textSize="10sp"
+                android:layout_marginBottom="8dp" />
+
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
+
+            <!-- Lens Shading Correction (user-facing) -->
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Lens Shading Correction" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
+
+            <TextView
+                android:id="@+id/lens_shading_status_pill"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="#FF444444"
+                android:gravity="center"
+                android:paddingHorizontal="10dp"
+                android:paddingVertical="3dp"
+                android:text="Idle"
+                android:textColor="#FFFFFFFF"
+                android:textSize="11sp"
+                android:layout_marginBottom="4dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="4dp">
+
+                <TextView
+                    android:id="@+id/lens_shading_stock_btn"
+                    android:layout_width="0dp"
+                    android:layout_height="30dp"
+                    android:layout_weight="1"
+                    android:background="#333333"
+                    android:gravity="center"
+                    android:text="Stock map"
+                    android:textColor="#FFCCCCCC"
+                    android:textSize="11sp"
+                    android:clickable="true"
+                    android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/lens_shading_sampled_btn"
+                    android:layout_width="0dp"
+                    android:layout_height="30dp"
+                    android:layout_weight="1"
+                    android:layout_marginStart="4dp"
+                    android:background="#333333"
+                    android:gravity="center"
+                    android:text="Sampled"
+                    android:textColor="#FFCCCCCC"
+                    android:textSize="11sp"
+                    android:clickable="true"
+                    android:focusable="true" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="4dp">
+
+                <TextView
+                    android:id="@+id/lens_shading_start_btn"
+                    android:layout_width="0dp"
+                    android:layout_height="32dp"
+                    android:layout_weight="1"
+                    android:background="#444444"
+                    android:gravity="center"
+                    android:text="Start"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="11sp"
+                    android:paddingHorizontal="6dp"
+                    android:clickable="true"
+                    android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/lens_shading_pause_btn"
+                    android:layout_width="0dp"
+                    android:layout_height="32dp"
+                    android:layout_weight="1"
+                    android:layout_marginStart="4dp"
+                    android:background="#444444"
+                    android:gravity="center"
+                    android:text="Pause"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="11sp"
+                    android:paddingHorizontal="6dp"
+                    android:clickable="true"
+                    android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/lens_shading_resume_btn"
+                    android:layout_width="0dp"
+                    android:layout_height="32dp"
+                    android:layout_weight="1"
+                    android:layout_marginStart="4dp"
+                    android:background="#444444"
+                    android:gravity="center"
+                    android:text="Resume"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="11sp"
+                    android:paddingHorizontal="6dp"
+                    android:clickable="true"
+                    android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/lens_shading_reset_btn"
+                    android:layout_width="0dp"
+                    android:layout_height="32dp"
+                    android:layout_weight="1"
+                    android:layout_marginStart="4dp"
+                    android:background="#444444"
+                    android:gravity="center"
+                    android:text="Reset"
+                    android:textColor="#FFFF6666"
+                    android:textSize="11sp"
+                    android:paddingHorizontal="6dp"
+                    android:clickable="true"
+                    android:focusable="true" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:layout_marginBottom="4dp">
+
+                <TextView
+                    android:id="@+id/lens_shading_strength_label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Strength  100%"
+                    android:textColor="#FFAAAAAA"
+                    android:textSize="11sp" />
+
+                <SeekBar
+                    android:id="@+id/lens_shading_strength_slider"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:max="100"
+                    android:progress="100" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Auto-sampling runs up to ~2 minutes until it stabilizes. Double-tap Strength to reset."
                 android:textColor="#FF888888"
                 android:textSize="10sp"
                 android:layout_marginBottom="8dp" />
