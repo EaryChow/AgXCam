@@ -9,7 +9,7 @@ import java.nio.FloatBuffer
 /**
  * Focus-peak composite pass.
  *
- * Takes the fully tone-mapped preview (which already contains the zoom crop) and
+ * Takes the fully formed picture preview (which already contains the zoom crop) and
  * tints the sharp edges green. Two contrast measures are combined:
  *
  *  - a screen-pixel ring at [radius] (in viewport px) — this is the band detector,
