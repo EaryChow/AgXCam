@@ -74,11 +74,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
     /** Green focus-peak overlay on the final blit. Enabled while the MF roller is
      *  actively editable (focus panel open + manual focus). [focusPeakRadius] is the
-     *  screen-pixel band radius; sharpness is additionally checked at a source-
+     *  screen-pixel support radius; sharpness is additionally checked at a source-
      *  anchored distance so peaks stay visible when zoomed or on a tele lens. */
     @Volatile var focusPeakEnabled = false
     @Volatile var focusPeakRadius = 3f
-    @Volatile var focusPeakThreshold = 0.75f
+    @Volatile var focusPeakThreshold = 0.55f
     @Volatile var focusPeakStrength = 0.8f
 
     @Volatile var useBayerPath = false

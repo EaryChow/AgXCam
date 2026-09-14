@@ -10,17 +10,23 @@ import java.nio.FloatBuffer
  * Focus-peak composite pass.
  *
  * Takes the fully formed picture preview (which already contains the zoom crop) and
- * tints the sharp edges green. Two contrast measures are combined:
+ * tints the sharp edges green. A pixel scores on the *adjacent* gradient — the
+ * largest luminance step to its immediate ring neighbours — normalised by the local
+ * luminance. Out-of-focus content only produces gradual intensity ramps, whose
+ * per-pixel gradient is tiny no matter how big the total edge amplitude is, so it
+ * can never pass the threshold; a genuinely sharp edge has a hard per-pixel step.
+ * Each score is gated by a support check: the gradient must also be visible at a
+ * wider span ([radius] texels), which confirms the response comes from a real edge
+ * and rejects isolated single-pixel noise. Two scales are combined:
  *
- *  - a screen-pixel ring at [radius] (in viewport px) — this is the band detector,
- *    it makes the highlight a fixed width in screen pixels and is unaffected by
- *    zoom/thickness;
+ *  - a screen-anchored ring at 1 texel, confirmed out to [radius] texels — the
+ *    band detector, tracking the displayed image regardless of zoom/thickness;
  *  - a source-anchored ring at [sharpOffsetX]/[sharpOffsetY] (in UV units that
  *    correspond to a fixed distance in SOURCE pixels, so it scales inversely to
  *    the zoom). This keeps detecting truly sharp edges even after magnification
  *    dilutes their per-screen-pixel gradient.
  *
- * The max of the two passes the threshold, so zooming or switching to a tele lens
+ * The max of the two passes the threshold so zooming or switching to a tele lens
  * can no longer make in-focus edges drop out of the highlight. Everything else is
  * passed through untouched. Runs on the displayed FBO content, so it also tracks
  * crop and aspect letterbox.
@@ -63,8 +69,9 @@ class FocusPeakShaderProgram {
     /**
      * Composite the preview [textureId] with the green focus-peak overlay.
      * [screenWidth]/[screenHeight] are the viewport pixels the FBO is displayed in
-     * (texel size = 1/screen), so [radius] is a screen-pixel radius and the line
-     * stays a fixed pixel thickness whatever the zoom.
+     * (texel size = 1/screen), [radius] is the support radius in screen pixels — the
+     * span over which an edge must stay consistent — and the band stays a fixed
+     * pixel thickness whatever the zoom.
      * [sharpOffsetX]/[sharpOffsetY] are UV steps (in the FBO texture) that span a
      * fixed distance in SOURCE pixels, inverse-scaled by zoom, so the sharpness
      * criterion survives magnification.
@@ -156,66 +163,76 @@ uniform float u_threshold;
 uniform float u_strength;
 uniform vec3 u_color;
 
+const float LUM_FLOOR = 0.12;
+const float GATE_LO = 0.35;
+const float GATE_HI = 0.8;
+
 float lum(vec3 c) {
     return dot(c, vec3(0.299, 0.587, 0.114));
 }
 
-float ringEdge(vec2 uv, vec2 step, out float sumLum) {
-    float e = 0.0;
+// nearG = largest luminance step from the center to its adjacent ring (at `step`);
+// farG  = same gradient re-measured at the wider `farStep` span;
+// nearMean = mean of the 9 center+ring samples, used for a symmetric normalization.
+void edgeStats(vec2 uv, vec2 step, vec2 farStep, out float nearG, out float farG, out float nearMean) {
+    float c = lum(texture2D(u_texture, uv).rgb);
     float s = 0.0;
     float v;
-    vec2 off;
-    off = vec2(-1.0, -1.0);
-    v = lum(texture2D(u_texture, uv + off * step).rgb);
-    e = max(e, abs(lum(texture2D(u_texture, uv).rgb) - v));
-    s += v;
-    off = vec2( 0.0, -1.0);
-    v = lum(texture2D(u_texture, uv + off * step).rgb);
-    e = max(e, abs(lum(texture2D(u_texture, uv).rgb) - v));
-    s += v;
-    off = vec2( 1.0, -1.0);
-    v = lum(texture2D(u_texture, uv + off * step).rgb);
-    e = max(e, abs(lum(texture2D(u_texture, uv).rgb) - v));
-    s += v;
-    off = vec2(-1.0,  0.0);
-    v = lum(texture2D(u_texture, uv + off * step).rgb);
-    e = max(e, abs(lum(texture2D(u_texture, uv).rgb) - v));
-    s += v;
-    off = vec2( 1.0,  0.0);
-    v = lum(texture2D(u_texture, uv + off * step).rgb);
-    e = max(e, abs(lum(texture2D(u_texture, uv).rgb) - v));
-    s += v;
-    off = vec2(-1.0,  1.0);
-    v = lum(texture2D(u_texture, uv + off * step).rgb);
-    e = max(e, abs(lum(texture2D(u_texture, uv).rgb) - v));
-    s += v;
-    off = vec2( 0.0,  1.0);
-    v = lum(texture2D(u_texture, uv + off * step).rgb);
-    e = max(e, abs(lum(texture2D(u_texture, uv).rgb) - v));
-    s += v;
-    off = vec2( 1.0,  1.0);
-    v = lum(texture2D(u_texture, uv + off * step).rgb);
-    e = max(e, abs(lum(texture2D(u_texture, uv).rgb) - v));
-    s += v;
-    sumLum = s;
-    return e;
+    nearG = 0.0;
+    farG = 0.0;
+    vec2 o;
+
+    o = vec2(-1.0, -1.0);
+    v = lum(texture2D(u_texture, uv + o * step).rgb);    nearG = max(nearG, abs(c - v)); s += v;
+    v = lum(texture2D(u_texture, uv + o * farStep).rgb);  farG = max(farG, abs(c - v));
+    o = vec2( 0.0, -1.0);
+    v = lum(texture2D(u_texture, uv + o * step).rgb);    nearG = max(nearG, abs(c - v)); s += v;
+    v = lum(texture2D(u_texture, uv + o * farStep).rgb);  farG = max(farG, abs(c - v));
+    o = vec2( 1.0, -1.0);
+    v = lum(texture2D(u_texture, uv + o * step).rgb);    nearG = max(nearG, abs(c - v)); s += v;
+    v = lum(texture2D(u_texture, uv + o * farStep).rgb);  farG = max(farG, abs(c - v));
+    o = vec2(-1.0,  0.0);
+    v = lum(texture2D(u_texture, uv + o * step).rgb);    nearG = max(nearG, abs(c - v)); s += v;
+    v = lum(texture2D(u_texture, uv + o * farStep).rgb);  farG = max(farG, abs(c - v));
+    o = vec2( 1.0,  0.0);
+    v = lum(texture2D(u_texture, uv + o * step).rgb);    nearG = max(nearG, abs(c - v)); s += v;
+    v = lum(texture2D(u_texture, uv + o * farStep).rgb);  farG = max(farG, abs(c - v));
+    o = vec2(-1.0,  1.0);
+    v = lum(texture2D(u_texture, uv + o * step).rgb);    nearG = max(nearG, abs(c - v)); s += v;
+    v = lum(texture2D(u_texture, uv + o * farStep).rgb);  farG = max(farG, abs(c - v));
+    o = vec2( 0.0,  1.0);
+    v = lum(texture2D(u_texture, uv + o * step).rgb);    nearG = max(nearG, abs(c - v)); s += v;
+    v = lum(texture2D(u_texture, uv + o * farStep).rgb);  farG = max(farG, abs(c - v));
+    o = vec2( 1.0,  1.0);
+    v = lum(texture2D(u_texture, uv + o * step).rgb);    nearG = max(nearG, abs(c - v)); s += v;
+    v = lum(texture2D(u_texture, uv + o * farStep).rgb);  farG = max(farG, abs(c - v));
+
+    nearMean = (c + s) / 9.0;
 }
 
 void main() {
     vec4 color = texture2D(u_texture, v_texCoord);
-    // Screen-anchored band: constant pixel thickness, weaker under zoom.
-    float sumLong;
-    float edgeLong = ringEdge(v_texCoord, u_radius * u_texelSize, sumLong);
-    // Source-anchored sharpness: a fixed distance in source pixels, so it keeps
-    // firing while the screen gradient is diluted by the zoom.
-    float sumShort;
-    float edgeShort = ringEdge(v_texCoord, u_sharpOffset, sumShort);
-    float relLong = edgeLong / max((lum(texture2D(u_texture, v_texCoord).rgb) + sumLong) / 9.0, 0.08);
-    float relShort = edgeShort / max((lum(texture2D(u_texture, v_texCoord).rgb) + sumShort) / 9.0, 0.08);
-    // Pure relative contrast: exposure-invariant, blur rejects at ~10-15% contrast,
-    // sharp edges fire at ~30%+ regardless of overall brightness.
-    float score = max(relLong, relShort);
-    float boost = smoothstep(u_threshold * 0.97, u_threshold * 1.03, score);
+    float c = lum(color.rgb);
+    float base;
+
+    // Screen-anchored band: crisp 1-texel transitions, spread over u_radius texels.
+    float nA, fA, mA;
+    edgeStats(v_texCoord, u_texelSize, u_radius * u_texelSize, nA, fA, mA);
+    base = max(max(c, mA), LUM_FLOOR);
+    float relA = nA / base;
+    float gateA = smoothstep(GATE_LO, GATE_HI, clamp(fA / (nA + 1e-4), 0.0, 1.0));
+
+    // Source-anchored sharpness: a 2 source-pixel transition survives zoom dilation.
+    float nB, fB, mB;
+    edgeStats(v_texCoord, u_sharpOffset, u_sharpOffset * 3.0, nB, fB, mB);
+    base = max(max(c, mB), LUM_FLOOR);
+    float relB = nB / base;
+    float gateB = smoothstep(GATE_LO, GATE_HI, clamp(fB / (nB + 1e-4), 0.0, 1.0));
+
+    // Relative adjacent contrast: exposure-invariant, and blur ramps never reach it
+    // because their per-pixel step is small. The support gate drops noise only.
+    float score = max(relA * gateA, relB * gateB);
+    float boost = smoothstep(u_threshold * 0.95, u_threshold * 1.05, score);
     color.rgb = mix(color.rgb, u_color, boost * u_strength);
     gl_FragColor = color;
 }
