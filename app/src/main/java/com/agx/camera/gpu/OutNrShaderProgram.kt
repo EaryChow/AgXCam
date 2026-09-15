@@ -26,6 +26,9 @@ import java.nio.FloatBuffer
  * (C1/C2) uses an independent large scale (plan: ×6~16) because C1/C2
  * variance is compressed but strongly spatially correlated → chroma bends to
  * the dense chroma box at the pixel to kill low-frequency chromatic blotches.
+ * The host-side S5 slider is a final linear blend between the (beta-composed)
+ * input and this filtered result: `mix(rgbIn, outRgb, u_strength)`, so 0..100
+ * maps to 0%..100% of the full-strength filter.
  */
 class OutNrShaderProgram {
 
@@ -60,6 +63,7 @@ class OutNrShaderProgram {
     private var mIsoModelBLoc = 0
     private var mWinScaleLoc = 0
     private var mEpsBoostLoc = 0
+    private var mStrengthLoc = 0
 
     private val quadVertices: FloatBuffer = ByteBuffer.allocateDirect(QUAD_COORDS.size * 4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer().put(QUAD_COORDS).also { it.position(0) }
@@ -102,6 +106,7 @@ class OutNrShaderProgram {
         mIsoModelBLoc = GLES20.glGetUniformLocation(mainProgramId, "u_iso_model_b")
         mWinScaleLoc = GLES20.glGetUniformLocation(mainProgramId, "u_win_scale")
         mEpsBoostLoc = GLES20.glGetUniformLocation(mainProgramId, "u_eps_boost")
+        mStrengthLoc = GLES20.glGetUniformLocation(mainProgramId, "u_strength")
 
         ready = true
         Log.d(TAG, "Stage-5 denoise programs created: h=$statsHProgramId v=$statsVProgramId m=$mainProgramId")
@@ -156,7 +161,8 @@ class OutNrShaderProgram {
         inverseRange2: Float, epsScale: Float,
         useIsoSigma: Boolean = false,
         isoModelA: Float = 0f, isoModelB: Float = 0f,
-        winScale: Float = 1f, epsBoost: Float = 1f
+        winScale: Float = 1f, epsBoost: Float = 1f,
+        strength: Float = 1f
     ) {
         if (mainProgramId == 0) return
         GLES20.glUseProgram(mainProgramId)
@@ -185,6 +191,7 @@ class OutNrShaderProgram {
         GLES20.glUniform1f(mIsoModelBLoc, isoModelB)
         GLES20.glUniform1f(mWinScaleLoc, winScale)
         GLES20.glUniform1f(mEpsBoostLoc, epsBoost)
+        GLES20.glUniform1f(mStrengthLoc, strength)
         drawQuad(mainProgramId)
     }
 
@@ -322,6 +329,7 @@ uniform float u_epsScale;
 // preview does.
 uniform float u_win_scale;
 uniform float u_eps_boost;
+uniform float u_strength;
 uniform float u_use_iso_sigma;
 uniform float u_iso_model_a;
 uniform float u_iso_model_b;
@@ -481,7 +489,7 @@ void main() {
     float outC1 = aC * yccIn.y + (1.0 - aC) * cm.x;
     float outC2 = aC * yccIn.z + (1.0 - aC) * cm.y;
 
-    outColor = vec4(rgbOf(vec3(outY, outC1, outC2)), 1.0);
+    outColor = vec4(mix(rgbIn, rgbOf(vec3(outY, outC1, outC2)), u_strength), 1.0);
 }
 """
 

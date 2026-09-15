@@ -835,13 +835,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val sigmaW = gridW.toFloat()
         val sigmaH = gridH.toFloat()
         val s = outNrStrength.coerceIn(0f, 1f)
-        // Decoupled luma/chroma response.  ε_Y uses a moderate scale (≈1.0-1.4) so
-        // luminance is smoothed a little while keeping texture; ε_C uses a very
-        // large independent scale (≈16-64) so chroma bends hard toward the
-        // strided window mean, collapsing the dark-region chromatic blotches.
-        // Scale both with the slider: 0 → luma 1.0 / chroma 16, 1 → 1.4 / 64.
-        val lumaEpsScale = 1.0f + 0.4f * s
-        val chromaEpsScale = 16.0f + 48.0f * s
+        // Decoupled luma/chroma response.  eps is fixed at design maximum;
+        // the slider controls a linear blend toward the filtered result so
+        // strength 0..100 maps to 0%..100% denoise (0% = identity,
+        // 100% = full SWGF at epsY≈1.4, epsC≈64).
+        val lumaEpsScale = 1.4f
+        val chromaEpsScale = 64.0f
         val beta = 0.3f
         // Stage-4 sparse-demosaic residual variance (plan §3: σ_dm ≈ 3~4 DN).
         val sigmaDm2 = 10f
@@ -881,7 +880,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             beta, lumaEpsScale, chromaEpsScale, sigmaDm2,
             inverseRange2, sigmaScale,
             useIsoSigma, s5IsoA, s5IsoB,
-            winScale, epsBoost
+            winScale, epsBoost, strength = s
         )
         logGlError("stage5 main1", bayerRenderCount)
 
@@ -901,7 +900,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             beta, 1.96f * lumaEpsScale, 1.96f * chromaEpsScale, sigmaDm2,
             inverseRange2, sigmaScale,
             useIsoSigma, s5IsoA, s5IsoB,
-            winScale, epsBoost
+            winScale, epsBoost, strength = s
         )
         logGlError("stage5 main2", bayerRenderCount)
 

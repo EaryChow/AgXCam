@@ -21,8 +21,10 @@ import org.junit.Test
  *     (boxAA, WB, clip-attenuation, identity colour matrix) at 960x720, then
  *     fed to S5.  This is the faithful reproduction the fix must prove on.
  *
- * Parameters mirror PreviewRenderer.runStage5 at ISO 800, s5 slider 0.6
- * (lumaEpsScale=1.24, chromaEpsScale=44.8), winScale=1.
+ * Parameters mirror PreviewRenderer.runStage5 at ISO 800, s5 slider at full
+ * strength (lumaEpsScale=1.4, chromaEpsScale=64, epsilon fixed at design
+ * max; the slider is a final linear blend toward this filtered result),
+ * winScale=1.
  */
 class S5ReproTest {
 
@@ -38,8 +40,8 @@ class S5ReproTest {
     private val sigmaScale = 1f / 32f
     private val whiteRange = 1023f
     private val inverseRange2 = 1f / (whiteRange * whiteRange)
-    private val lumaEpsScale = 1.24f
-    private val chromaEpsScale = 44.8f
+    private val lumaEpsScale = 1.4f
+    private val chromaEpsScale = 64.0f
     private val iso = 800
     private val windowCenters = arrayOf(
         intArrayOf(-2, 0), intArrayOf(2, 0), intArrayOf(0, -2), intArrayOf(0, 2),
