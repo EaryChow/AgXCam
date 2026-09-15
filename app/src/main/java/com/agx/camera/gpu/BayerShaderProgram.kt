@@ -71,6 +71,32 @@ class BayerShaderProgram {
     private var dUScaleFactorLoc = 0
     private var dULumaCoeffsLoc = 0
     private var dUClipAttenLoc = 0
+    private var dUDpStrengthLoc = 0
+    private var dURawNrStrengthLoc = 0
+    private var dUIsoModelALoc = 0
+    private var dUIsoModelBLoc = 0
+
+    // S1/S3 same-colour pack fallback program: precomputes the S3 filter once
+    // per texel per CFA phase into an RGBA32F denoised mosaic, which the
+    // demosaic then reverse-maps. The primary preview path runs the identical
+    // 12-tap filter inline per demosaiced sample instead; this precomputed
+    // pack is only used when the DPC/GF shaders are not ready (fallback).
+    private var s3PackProgramId = 0
+    private var pUTextureLoc = 0
+    private var pUTransformMatrixLoc = 0
+    private var pUSensorSizeLoc = 0
+    private var pUCropOriginLoc = 0
+    private var pUCropSizeLoc = 0
+    private var pUOutputResolutionLoc = 0
+    private var pUBlackLevelPatternLoc = 0
+    private var pUBitDepthLoc = 0
+    private var pUDpStrengthLoc = 0
+    private var pURawNrStrengthLoc = 0
+    private var pUIsoModelALoc = 0
+    private var pUIsoModelBLoc = 0
+    private var pUWhiteLevelLoc = 0
+    private var pUBlackLevelLoc = 0
+    private var pUPackWbGainsLoc = 0
 
     private var sensorWidth = 0
     private var sensorHeight = 0
@@ -154,6 +180,32 @@ class BayerShaderProgram {
         dUScaleFactorLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_scale_factor")
         dULumaCoeffsLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_luma_coeffs")
         dUClipAttenLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_clip_atten_factor")
+        dUDpStrengthLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_dp_strength")
+        dURawNrStrengthLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_raw_nr_strength")
+        dUIsoModelALoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_iso_model_a")
+        dUIsoModelBLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_iso_model_b")
+
+        s3PackProgramId = createProgram(VERTEX_SHADER, S3_PACK_FRAGMENT_SHADER)
+        if (s3PackProgramId == 0) {
+            Log.e(TAG, "Failed to create S1/S3 pack shader program")
+            com.agx.camera.CrashLogger.log(TAG, "Failed to create S1/S3 pack shader program")
+            return
+        }
+        pUTextureLoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_bayerTex")
+        pUTransformMatrixLoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_transformMatrix")
+        pUSensorSizeLoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_sensorSize")
+        pUCropOriginLoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_cropOrigin")
+        pUCropSizeLoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_cropSize")
+        pUOutputResolutionLoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_outputResolution")
+        pUBlackLevelPatternLoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_black_level_pattern")
+        pUBitDepthLoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_bit_depth")
+        pUDpStrengthLoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_dp_strength")
+        pURawNrStrengthLoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_raw_nr_strength")
+        pUIsoModelALoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_iso_model_a")
+        pUIsoModelBLoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_iso_model_b")
+        pUWhiteLevelLoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_white_level")
+        pUBlackLevelLoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_black_level")
+        pUPackWbGainsLoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_pack_wb_gains")
 
         val textures = IntArray(2)
         GLES20.glGenTextures(2, textures, 0)
@@ -200,6 +252,15 @@ class BayerShaderProgram {
     fun currentCropRegion(): FloatArray = floatArrayOf(cropOriginX, cropOriginY, cropSizeX, cropSizeY)
 
     fun uploadBayer(buffer: ByteBuffer, width: Int, height: Int, stridePixels: Int) {
+        // u_sensorSize must match the ACTUAL uploaded texture dimensions (it is
+        // the clamp bound for every texelFetch on u_bayerTex). The physical
+        // sensor size passed to create() only happens to equal the texture size
+        // on the real path; the synthetic 192x160 frame would otherwise sample
+        // out of bounds (u_sensorSize still 4096x3072) and demosaic emits
+        // garbage/denormals.
+        sensorWidth = width
+        sensorHeight = height
+
         GLES30.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES30.glBindTexture(GLES20.GL_TEXTURE_2D, bayerTextureId)
 
@@ -328,7 +389,11 @@ class BayerShaderProgram {
         denoiseActive: Boolean = false,
         scaleFactor: Float = 1f,
         lumaCoeffs: FloatArray = DEFAULT_LUMA_COEFFS,
-        clipAttenFactor: Float = CLIP_ATTEN_DEFAULT
+        clipAttenFactor: Float = CLIP_ATTEN_DEFAULT,
+        dpStrength: Float = 0f,
+        rawNrStrength: Float = 0f,
+        isoModelA: Float = 0f,
+        isoModelB: Float = 0f
     ) {
         GLES20.glUseProgram(demosaicProgramId)
 
@@ -376,6 +441,10 @@ class BayerShaderProgram {
         GLES20.glUniform1f(dUBlackLevelLoc, blackLevel)
         GLES20.glUniform3f(dULumaCoeffsLoc, lumaCoeffs[0], lumaCoeffs[1], lumaCoeffs[2])
         GLES20.glUniform1f(dUClipAttenLoc, clipAttenFactor)
+        GLES20.glUniform1f(dUDpStrengthLoc, dpStrength)
+        GLES20.glUniform1f(dURawNrStrengthLoc, rawNrStrength)
+        GLES20.glUniform1f(dUIsoModelALoc, isoModelA)
+        GLES20.glUniform1f(dUIsoModelBLoc, isoModelB)
 
         val posHandle = GLES20.glGetAttribLocation(demosaicProgramId, "a_position")
         val texHandle = GLES20.glGetAttribLocation(demosaicProgramId, "a_texCoord")
@@ -392,9 +461,75 @@ class BayerShaderProgram {
         GLES20.glDisableVertexAttribArray(texHandle)
     }
 
-    fun isReady(): Boolean = programId != 0 && demosaicProgramId != 0 && bayerTextureId != 0
+    // S1/S3 same-colour pack fallback: renders the S3 filter (12-tap α-trimmed
+    // mean + DPC correction) once per texel and CFA phase into the caller-bound
+    // RGBA32F FBO. The demosaic then serves as the cheap reverse-map sampler.
+    // Only used when the DPC/GF shaders are unavailable; the normal path runs
+    // sampleSameColorNR inline inside the demosaic.
+    fun drawS3Pack(
+        transformMatrix: FloatArray,
+        blackLevelPattern: IntArray,
+        bitDepth: Int,
+        whiteLevel: Float,
+        blackLevel: Float,
+        dpStrength: Float,
+        rawNrStrength: Float,
+        isoModelA: Float,
+        isoModelB: Float,
+        outputWidth: Float,
+        outputHeight: Float,
+        wbGains: FloatArray = floatArrayOf(1f, 1f, 1f)
+    ) {
+        if (s3PackProgramId == 0) return
+        GLES20.glUseProgram(s3PackProgramId)
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES20.GL_TEXTURE_2D, bayerTextureId)
+        GLES20.glUniform1i(pUTextureLoc, 0)
+
+        GLES20.glUniformMatrix4fv(pUTransformMatrixLoc, 1, false, transformMatrix, 0)
+        GLES20.glUniform2f(pUSensorSizeLoc, sensorWidth.toFloat(), sensorHeight.toFloat())
+        GLES20.glUniform2f(pUCropOriginLoc, cropOriginX, cropOriginY)
+        GLES20.glUniform2f(pUCropSizeLoc, cropSizeX, cropSizeY)
+        GLES20.glUniform2f(pUOutputResolutionLoc, outputWidth, outputHeight)
+        GLES20.glUniform4i(pUBlackLevelPatternLoc,
+            blackLevelPattern[0], blackLevelPattern[1],
+            blackLevelPattern[2], blackLevelPattern[3])
+        GLES20.glUniform1i(pUBitDepthLoc, bitDepth)
+        GLES20.glUniform1f(pUDpStrengthLoc, dpStrength)
+        GLES20.glUniform1f(pURawNrStrengthLoc, rawNrStrength)
+        GLES20.glUniform1f(pUIsoModelALoc, isoModelA)
+        GLES20.glUniform1f(pUIsoModelBLoc, isoModelB)
+        GLES20.glUniform1f(pUWhiteLevelLoc, whiteLevel)
+        GLES20.glUniform1f(pUBlackLevelLoc, blackLevel)
+        GLES20.glUniform4f(pUPackWbGainsLoc, wbGains[0], wbGains[1], wbGains[1], wbGains[2])
+
+        val posHandle = GLES20.glGetAttribLocation(s3PackProgramId, "a_position")
+        val texHandle = GLES20.glGetAttribLocation(s3PackProgramId, "a_texCoord")
+
+        GLES20.glEnableVertexAttribArray(posHandle)
+        GLES20.glVertexAttribPointer(posHandle, 2, GLES20.GL_FLOAT, false, 0, quadVertices)
+
+        GLES20.glEnableVertexAttribArray(texHandle)
+        GLES20.glVertexAttribPointer(texHandle, 2, GLES20.GL_FLOAT, false, 0, quadTexCoords)
+
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+        GLES20.glDisableVertexAttribArray(posHandle)
+        GLES20.glDisableVertexAttribArray(texHandle)
+    }
+
+    fun isReady(): Boolean = programId != 0 && demosaicProgramId != 0 && s3PackProgramId != 0 && bayerTextureId != 0
+
+    fun rawProgramId(): Int = programId
+
+    fun rawDemosaicProgramId(): Int = demosaicProgramId
 
     fun bayerTextureHandle(): Int = bayerTextureId
+
+    fun sensorWidth(): Int = sensorWidth
+
+    fun sensorHeight(): Int = sensorHeight
 
     fun destroy() {
         if (programId != 0) {
@@ -404,6 +539,10 @@ class BayerShaderProgram {
         if (demosaicProgramId != 0) {
             GLES20.glDeleteProgram(demosaicProgramId)
             demosaicProgramId = 0
+        }
+        if (s3PackProgramId != 0) {
+            GLES20.glDeleteProgram(s3PackProgramId)
+            s3PackProgramId = 0
         }
         val textures = intArrayOf(bayerTextureId, lensShadingTextureId, fallbackFloatTextureId)
         GLES20.glDeleteTextures(3, textures, 0)
@@ -655,6 +794,10 @@ uniform vec3 u_wb_gains;
 uniform mat3 u_color_mat;
 uniform vec3 u_luma_coeffs;
 uniform float u_clip_atten_factor;
+uniform float u_dp_strength;
+uniform float u_raw_nr_strength;
+uniform float u_iso_model_a;
+uniform float u_iso_model_b;
 
 ${AgxCoreGlsl.CORE_HELPERS}
 
@@ -704,6 +847,74 @@ ivec2 mappedOutCoord(ivec2 clampedCoord) {
     return clamp(oc, ivec2(0), ivec2(u_outputResolution) - ivec2(1));
 }
 
+// Per-sample same-colour neighbourhood filter for the preview S1/S3 sliders.
+// Runs inside the demosaic loop, so the CFA phase is implied by each sample's
+// own coordinate (no fixed grid, no grid->sensor collapse).  Ring 1 is the
+// 8 step-2 neighbours (radius 2); ring 2 adds the 4 axis-neighbours at step 4
+// so the S3 mean spans roughly 9x9 sensor pixels -- wider than the box-AA
+// average, which is what keeps S3 visually effective on top of it.
+//   S1 = defect correction: centre outside the neighbour range AND beyond
+//        band -> replaced by the α-trimmed neighbour mean.
+//   S3 = blend toward that same trimmed mean.  The trim (drop 1 max & 1 min)
+//        is what keeps defective neighbour values from inflating the smoothing
+//        average, and the outlier guard below also engages at high S3 so a hot
+//        centre can't be re-injected by the blending.
+float sampleSameColorNR(ivec2 coord) {
+    float c = sampleBayerRaw(coord);
+    if (u_dp_strength <= 0.0 && u_raw_nr_strength <= 0.0) return c;
+
+    float nE  = sampleBayerRaw(coord + ivec2( 2, 0));
+    float nW  = sampleBayerRaw(coord + ivec2(-2, 0));
+    float nN  = sampleBayerRaw(coord + ivec2( 0,-2));
+    float nS  = sampleBayerRaw(coord + ivec2( 0, 2));
+    float nNE = sampleBayerRaw(coord + ivec2( 2,-2));
+    float nNW = sampleBayerRaw(coord + ivec2(-2,-2));
+    float nSE = sampleBayerRaw(coord + ivec2( 2, 2));
+    float nSW = sampleBayerRaw(coord + ivec2(-2, 2));
+    float nEE = sampleBayerRaw(coord + ivec2( 4, 0));
+    float nWW = sampleBayerRaw(coord + ivec2(-4, 0));
+    float nNN = sampleBayerRaw(coord + ivec2( 0,-4));
+    float nSS = sampleBayerRaw(coord + ivec2( 0, 4));
+
+    // Bright-pixel guard (clip-safe but mean-stable): the sensor clips in the
+    // Bayer domain, so a genuinely chromatic centre must NOT be dragged down
+    // toward the filtered mean — that was the "softening" at hotspots.  The
+    // final S3 blend is therefore skipped when the centre itself sits at/above
+    // the clip, keeping a clipped plateau/specular at its measured brightness.
+    // The α-trim mean itself stays the full 12-member form: excluding clipped
+    // members would starve the mean right at the plateau edge, turning it
+    // per-pixel noisy (blocky water-stain patches radiating from highlights).
+    // S1 (DPC) is unchanged and never skipped.  Non-clip pixels are
+    // bit-identical to the baseline filter.
+    float clipLo = max(u_white_level - u_black_level, 1.0);
+
+    float sumN = nE + nW + nN + nS + nNE + nNW + nSE + nSW + nEE + nWW + nNN + nSS;
+    float mn = min(min(min(min(min(nE, nW), min(nN, nS)), min(nNE, nNW)), min(nSE, nSW)),
+                  min(min(nEE, nWW), min(nNN, nSS)));
+    float mx = max(max(max(max(max(nE, nW), max(nN, nS)), max(nNE, nNW)), max(nSE, nSW)),
+                  max(max(nEE, nWW), max(nNN, nSS)));
+    float iavg = (sumN - mn - mx) * (1.0 / 10.0);
+
+    float sigma = sqrt(max(u_iso_model_a * max(iavg, 0.0) + u_iso_model_b, 1.0));
+    float band = max((0.1 + 0.3 * u_dp_strength) * max(iavg, 0.0),
+                     (2.0 + 2.0 * u_dp_strength) * sigma);
+
+    float corrStrength = max(u_dp_strength, 0.85 * u_raw_nr_strength);
+    float center = c;
+    if (corrStrength > 0.0) {
+        bool hot = (c > mx) && (c - iavg) > band;
+        bool cold = (c < mn) && (iavg - c) > band;
+        if (hot || cold) {
+            center = mix(c, iavg, corrStrength);
+        }
+    }
+
+    if (c < clipLo) {
+        return mix(center, iavg, 0.98 * u_raw_nr_strength);
+    }
+    return center;
+}
+
 // Spatial-NR-aware RAW sample.  When the output-driven denoiser produced a
 // denoised mosaiced frame, invert the reverse map (sensor -> output grid) and
 // take the denoised value for the requested CFA phase.  The denoiser writes
@@ -713,15 +924,52 @@ ivec2 mappedOutCoord(ivec2 clampedCoord) {
 float denoisedSampleRaw(ivec2 sensorCoord) {
     ivec2 clampedCoord = clamp(sensorCoord, ivec2(0), ivec2(u_sensorSize) - ivec2(1));
     if (u_denoise_active > 0.5) {
-        ivec2 oc = mappedOutCoord(clampedCoord);
-        vec4 den = texelFetch(u_denoisedTex, oc, 0);
+        // Extreme resize capture (a whole filter footprint << one output texel,
+        // k >= 16) cannot be represented by one per-texel mosaic cell, so defer
+        // to the inline per-sample filter there; below that the mosaic is the
+        // cheap and validated read at every zoom (this guard also covers a
+        // stale pack from a previous frame).
+        vec2 kk = u_cropSize / u_outputResolution;
+        if (max(kk.x, kk.y) < 16.0) {
+        // The mosaic holds one filter estimate per output texel + CFA phase.
+        // A NEAREST read would collate every sensor coord that maps inside an
+        // output texel onto THAT single estimate, quantizing the preview to
+        // per-texel steps the instant S1/S3 turn on.  Sample bilinearly
+        // instead: at 1:1 the read falls exactly on a texel centre
+        // (bit-identical), and at any other zoom it smoothly blends the four
+        // surrounding per-phase estimates — continuous like the raw box-AA
+        // demosaic (see the boxed plain phase means in the pack at k>=3.5),
+        // but lower-noise and artifact-free.
+        // (GL_LINEAR itself is illegal on RGBA32F in ES 3.0, so the blend is
+        // done with 4 texelFetch + linear weights — matches the model 1:1 and
+        // works on any float format including the RGBA16F capture mosaic.)
+        vec2 inv = (vec2(clampedCoord) - u_cropOrigin) / u_cropSize;
+        vec4 frag = u_inverseTransformMatrix * vec4(inv, 0.0, 1.0);
+        // Manual 4-tap bilinear via texelFetch.  GL_LINEAR is ILLEGAL on the
+        // RGBA32F mosaic (ES 3.0 float textures don't filter past 16 bits), so
+        // the hardware silently degraded the read to NEAREST -> per-texel
+        // quantized phase estimates (blocky "magenta mosaic" at 1..3.5x zoom).
+        // texelFetch is format-agnostic, matches the model 1:1, and 1:1 zoom
+        // still lands exactly on a texel centre (w = 0) for bit-identical
+        // capture.
+        vec2 tc = clamp(frag.xy * u_outputResolution + 0.5, vec2(0.5), u_outputResolution - 0.5);
+        vec2 t0f = floor(tc - 0.5);
+        vec2 t0 = clamp(t0f, vec2(0.0), u_outputResolution - 1.0);
+        vec2 t1 = min(t0 + 1.0, u_outputResolution - 1.0);
+        vec2 wts = clamp(tc - (t0 + 0.5), vec2(0.0), vec2(1.0));
+        vec4 d00 = texelFetch(u_denoisedTex, ivec2(t0), 0);
+        vec4 d10 = texelFetch(u_denoisedTex, ivec2(int(t1.x), int(t0.y)), 0);
+        vec4 d01 = texelFetch(u_denoisedTex, ivec2(int(t0.x), int(t1.y)), 0);
+        vec4 d11 = texelFetch(u_denoisedTex, ivec2(t1), 0);
+        vec4 den = mix(mix(d00, d10, wts.x), mix(d01, d11, wts.x), wts.y);
         int want = safePhase(clampedCoord.x, clampedCoord.y);
         if (want == 0) return den.r;
         if (want == 1) return den.g;
         if (want == 2) return den.b;
         return den.a;
+        }
     }
-    return sampleBayerRaw(clampedCoord);
+    return sampleSameColorNR(clampedCoord);
 }
 
 vec3 demosaicAt(ivec2 sensorCoord, vec2 lsSensorUV) {
@@ -852,6 +1100,262 @@ void main() {
     linearRGB = u_color_mat * linearRGB;
     linearRGB = linearRGB / max(u_white_level - u_black_level, 1.0);
     fragColor = vec4(linearRGB, 1.0);
+}
+"""
+
+        // S1/S3 same-colour pack fallback: precomputes sampleSameColorNR (12-tap α-
+        // trimmed same-colour mean + DPC outlier correction, identical GLSL to
+        // the demosaic's inline filter) once per output texel and CFA phase.
+        // The phase is derived from the texel's own sensor cell parity so the
+        // demosaic's per-phase channel lookup (safePhase of the reverse-mapped
+        // coordinate) returns exactly the value computed for that position —
+        // phase correctness is guaranteed at pack time, never by rewiring
+        // stored channels.  Renders to the caller-bound RGBA32F target, where
+        // the demosaic reverse-maps it as a fallback when the DPC/GF chain is
+        // unavailable; otherwise the identical filter runs inline per sample.
+        private const val S3_PACK_FRAGMENT_SHADER = """
+#version 300 es
+precision highp float;
+precision highp usampler2D;
+precision highp int;
+
+in vec2 v_texCoord;
+out vec4 outDenoised;
+
+uniform usampler2D u_bayerTex;
+uniform vec2 u_sensorSize;
+uniform vec2 u_cropOrigin;
+uniform vec2 u_cropSize;
+uniform vec2 u_outputResolution;
+uniform mat4 u_transformMatrix;
+uniform ivec4 u_black_level_pattern;
+uniform int u_bit_depth;
+uniform float u_dp_strength;
+uniform float u_raw_nr_strength;
+uniform float u_iso_model_a;
+uniform float u_iso_model_b;
+uniform float u_white_level;
+uniform float u_black_level;
+uniform vec4 u_pack_wb_gains;
+
+float unpackRaw(uint rawPacked) {
+    uint mask;
+    if (u_bit_depth <= 10) {
+        mask = 0x3FFu;
+    } else if (u_bit_depth <= 12) {
+        mask = 0xFFFu;
+    } else if (u_bit_depth <= 14) {
+        mask = 0x3FFFu;
+    } else {
+        mask = 0xFFFFu;
+    }
+    return float(rawPacked & mask);
+}
+
+float sampleBayerRaw(ivec2 coord) {
+    ivec2 clamped = clamp(coord, ivec2(0), ivec2(u_sensorSize) - ivec2(1));
+    uint raw = texelFetch(u_bayerTex, clamped, 0).r;
+    float val = unpackRaw(raw);
+    int phase = abs(clamped.x % 2) + abs(clamped.y % 2) * 2;
+    val -= float(u_black_level_pattern[phase]);
+    return max(val, 0.0);
+}
+
+float sampleSameColorNR(ivec2 coord) {
+    float c = sampleBayerRaw(coord);
+    if (u_dp_strength <= 0.0 && u_raw_nr_strength <= 0.0) return c;
+
+    float nE  = sampleBayerRaw(coord + ivec2( 2, 0));
+    float nW  = sampleBayerRaw(coord + ivec2(-2, 0));
+    float nN  = sampleBayerRaw(coord + ivec2( 0,-2));
+    float nS  = sampleBayerRaw(coord + ivec2( 0, 2));
+    float nNE = sampleBayerRaw(coord + ivec2( 2,-2));
+    float nNW = sampleBayerRaw(coord + ivec2(-2,-2));
+    float nSE = sampleBayerRaw(coord + ivec2( 2, 2));
+    float nSW = sampleBayerRaw(coord + ivec2(-2, 2));
+    float nEE = sampleBayerRaw(coord + ivec2( 4, 0));
+    float nWW = sampleBayerRaw(coord + ivec2(-4, 0));
+    float nNN = sampleBayerRaw(coord + ivec2( 0,-4));
+    float nSS = sampleBayerRaw(coord + ivec2( 0, 4));
+
+    // Bright-pixel guard (clip-safe but mean-stable): the sensor clips in the
+    // Bayer domain, so a genuinely clipped centre must NOT be dragged down
+    // toward the filtered mean — that was the "softening" at hotspots.  The
+    // final S3 blend is therefore skipped when the centre itself sits at/above
+    // the clip, keeping a clipped plateau/specular at its measured brightness.
+    // The α-trim mean itself stays the full 12-member form: excluding clipped
+    // members would starve the mean right at the plateau edge, turning it
+    // per-pixel noisy (blocky water-stain patches radiating from highlights).
+    // S1 (DPC) is unchanged and never skipped.  Non-clip pixels are
+    // bit-identical to the baseline filter.
+    float clipLo = max(u_white_level - u_black_level, 1.0);
+
+    float sumN = nE + nW + nN + nS + nNE + nNW + nSE + nSW + nEE + nWW + nNN + nSS;
+    float mn = min(min(min(min(min(nE, nW), min(nN, nS)), min(nNE, nNW)), min(nSE, nSW)),
+                  min(min(nEE, nWW), min(nNN, nSS)));
+    float mx = max(max(max(max(max(nE, nW), max(nN, nS)), max(nNE, nNW)), max(nSE, nSW)),
+                  max(max(nEE, nWW), max(nNN, nSS)));
+    float iavg = (sumN - mn - mx) * (1.0 / 10.0);
+
+    float sigma = sqrt(max(u_iso_model_a * max(iavg, 0.0) + u_iso_model_b, 1.0));
+    float band = max((0.1 + 0.3 * u_dp_strength) * max(iavg, 0.0),
+                     (2.0 + 2.0 * u_dp_strength) * sigma);
+
+    float corrStrength = max(u_dp_strength, 0.85 * u_raw_nr_strength);
+    float center = c;
+    if (corrStrength > 0.0) {
+        bool hot = (c > mx) && (c - iavg) > band;
+        bool cold = (c < mn) && (iavg - c) > band;
+        if (hot || cold) {
+            center = mix(c, iavg, corrStrength);
+        }
+    }
+
+    if (c < clipLo) {
+        return mix(center, iavg, 0.98 * u_raw_nr_strength);
+    }
+    return center;
+}
+
+// Boxed mosaic estimate: the texel's whole sensor footprint is averaged per
+// CFA phase BEFORE any noise correction (box-average-before-filter).  At wide
+// zoom a phase box holds many cells and is averaged to a single estimate per
+// phase (plain = already phase-targeted noise-free samples, so the mean is
+// lower-noise than inline per-sample filtering) — the interpolated read keeps
+// it continuous.  At 1:1 the box covers exactly one 2x2 cell and the anchored
+// per-phase path is preserved (bit-identical capture).  Only a whole filter
+// footprint smaller than one output texel (k>=16, extreme resize capture)
+// skips the pack in favour of the inline filter (see denoisedSampleRaw).
+vec4 boxedBlend(vec4 b) {
+    // Cross-phase trim/drag must operate in photometrically NEUTRAL space: the
+    // four per-phase box means sit at each CFA base (R < G ≈ G > B on a real
+    // sensor under neutral light), so a raw-space iavg pulls the R/B means
+    // toward the green phases and the demosaic WB gains later magnify that
+    // residual into a magenta cast.  Normalizing each phase by its WB gain
+    // makes the drag a fixed point on any WB-correct neutral field while
+    // keeping the DPC hot/cold pull pixel-photometric.
+    vec4 bN = b * u_pack_wb_gains;
+    float mn = min(min(min(bN.r, bN.g), bN.b), bN.a);
+    float mxx = max(max(max(bN.r, bN.g), bN.b), bN.a);
+    float iavg = (bN.r + bN.g + bN.b + bN.a - mn - mxx) * 0.5;
+
+    float sigma = sqrt(max(u_iso_model_a * max(iavg, 0.0) + u_iso_model_b, 1.0));
+    float band = max((0.1 + 0.3 * u_dp_strength) * max(iavg, 0.0),
+                     (2.0 + 2.0 * u_dp_strength) * sigma);
+    float corr = max(u_dp_strength, 0.85 * u_raw_nr_strength);
+    float clipLo = max(u_white_level - u_black_level, 1.0);
+
+    vec4 omxx = vec4(max(max(bN.g, bN.b), bN.a),
+                     max(max(bN.r, bN.b), bN.a),
+                     max(max(bN.r, bN.g), bN.a),
+                     max(max(bN.r, bN.g), bN.b));
+    vec4 omn = vec4(min(min(bN.g, bN.b), bN.a),
+                    min(min(bN.r, bN.b), bN.a),
+                    min(min(bN.r, bN.g), bN.a),
+                    min(min(bN.r, bN.g), bN.b));
+
+    vec4 o;
+    for (int p = 0; p < 4; p++) {
+        float c = bN[p];
+        float center = c;
+        if (corr > 0.0) {
+            bool hot = (c > omxx[p]) && (c - iavg) > band;
+            bool cold = (c < omn[p]) && (iavg - c) > band;
+            if (hot || cold) center = c + (iavg - c) * corr;
+        }
+        float outN = (b[p] < clipLo) ? center + (iavg - center) * (0.98 * u_raw_nr_strength) : center;
+        o[p] = outN / u_pack_wb_gains[p];
+    }
+    return o;
+}
+
+void main() {
+    // This pass renders into the demosaic-sized FBO, so gl_FragCoord.xy-0.5 is
+    // the output texel index.  The footprint must use the SAME mapping the
+    // demosaic inverts (u_inverseTransformMatrix on normalized crop coords), so
+    // the box is derived through the forward view transform — otherwise any
+    // mirror/rotation in the preview matches a horizontally flipped footprint
+    // (magenta channel-mix overlay on mirrored/rotated sensors).
+    vec2 texelIdx = gl_FragCoord.xy - vec2(0.5);
+    vec2 n0 = (u_transformMatrix * vec4(texelIdx / u_outputResolution, 0.0, 1.0)).xy;
+    vec2 n1 = (u_transformMatrix * vec4((texelIdx + 1.0) / u_outputResolution, 0.0, 1.0)).xy;
+    vec2 loRaw = u_cropOrigin + n0 * u_cropSize;
+    vec2 hiRaw = u_cropOrigin + n1 * u_cropSize;
+    // Affine view transforms (mirror/flip/rotate) can swap the order of the two
+    // footprints; the cell set is the span between them either way.
+    vec2 lo = min(loRaw, hiRaw);
+    vec2 hi = max(loRaw, hiRaw);
+    ivec2 b0 = ivec2(floor(lo));
+    ivec2 b1 = max(ivec2(floor(hi)) - 1, b0);
+    ivec2 boxN = max(b1 - b0 + 1, ivec2(1));
+    int nCells = boxN.x * boxN.y;
+
+    if (nCells <= 1) {
+        // 1:1 capture / zoom-in: anchored per-phase filter, exactly the current
+        // pack behaviour (bit-identical to the pre-boxed path at identity).
+        // Anchor at the texel CENTRE (like the old v_texCoord read) so the cell
+        // matches the reverse-map midpoint for fractional zooms.
+        vec2 n0c = (u_transformMatrix * vec4((texelIdx + vec2(0.5)) / u_outputResolution, 0.0, 1.0)).xy;
+        vec2 sensorUV = u_cropOrigin + n0c * u_cropSize;
+        sensorUV = clamp(sensorUV, vec2(0.0), u_sensorSize - vec2(1.0));
+        ivec2 sc = ivec2(floor(sensorUV));
+
+        int parityX = abs(sc.x % 2);
+        int parityY = abs(sc.y % 2);
+
+        vec4 result = vec4(0.0);
+        for (int p = 0; p < 4; p++) {
+            int phaseX = p & 1;
+            int phaseY = p >> 1;
+            // Phase p's sensor pixel within this texel's 2x2 cell: flip the cell
+            // origin's parity where it does not match p, so safePhase(cc) == p.
+            ivec2 cc = sc + ivec2(parityX ^ phaseX, parityY ^ phaseY);
+            cc = clamp(cc, ivec2(0), ivec2(u_sensorSize) - ivec2(1));
+            result[p] = sampleSameColorNR(cc);
+        }
+        outDenoised = result;
+        return;
+    }
+
+    // Box-average-before-filter per CFA phase (max 16x16 box, matching the
+    // host pack range k < 16; beyond that the demosaic read defers to inline).
+    float pSum[4];
+    int pN[4];
+    for (int p = 0; p < 4; p++) { pSum[p] = 0.0; pN[p] = 0; }
+    for (int iy = 0; iy < 16; iy++) {
+        if (b0.y + iy > b1.y) break;
+        int yy = clamp(b0.y + iy, 0, int(u_sensorSize.y) - 1);
+        for (int ix = 0; ix < 16; ix++) {
+            if (b0.x + ix > b1.x) break;
+            int xx = clamp(b0.x + ix, 0, int(u_sensorSize.x) - 1);
+            int phase = abs(xx % 2) + abs(yy % 2) * 2;
+            pSum[phase] += sampleBayerRaw(ivec2(xx, yy));
+            pN[phase]++;
+        }
+    }
+    // A phase with no cells in an odd-shaped footprint borrows the mean of the
+    // phases that ARE present, so every channel stays populated.
+    float tot = 0.0;
+    int tn = 0;
+    for (int p = 0; p < 4; p++) {
+        if (pN[p] > 0) { tot += pSum[p] / float(pN[p]); tn++; }
+    }
+    if (tn == 0) { tot = 0.0; tn = 1; }
+    float fbk = tot / float(tn);
+    for (int p = 0; p < 4; p++) {
+        if (pN[p] == 0) { pN[p] = 1; pSum[p] = fbk; }
+    }
+    vec4 b = vec4(pSum[0] / float(pN[0]), pSum[1] / float(pN[1]),
+                  pSum[2] / float(pN[2]), pSum[3] / float(pN[3]));
+
+    if (nCells >= 16) {
+        // Strong zoom-out: the box already averages most of the sensor texture;
+        // further trim-blending re-introduces phase-subset aliasing.  Store the
+        // plain phase area means (colour intact, no added noise).
+        outDenoised = b;
+    } else {
+        outDenoised = boxedBlend(b);
+    }
 }
 """
 

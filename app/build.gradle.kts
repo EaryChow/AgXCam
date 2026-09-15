@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
 }
@@ -20,14 +22,20 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField("boolean", "AGX_ENABLE_YUV_FALLBACK", "true")
+        // Permanent synthetic-Bayer harness (DIFF oracle). Off for normal builds;
+        // flip to "true" to run SYNTH/DIFF on the 192x160 fixed-seed sensor.
+        buildConfigField("boolean", "AGX_SYNTHETIC_BAYER", "false")
     }
 
     signingConfigs {
         create("release") {
+            val props = Properties()
+            val f = rootProject.file("keystore.properties")
+            if (f.exists()) props.load(f.inputStream())
             storeFile = rootProject.file("release.keystore")
-            storePassword = "agxcam123"
-            keyAlias = "agxcam"
-            keyPassword = "agxcam123"
+            storePassword = props.getProperty("storePassword", "")
+            keyAlias = props.getProperty("keyAlias", "")
+            keyPassword = props.getProperty("keyPassword", "")
         }
     }
 
@@ -35,6 +43,7 @@ android {
         release {
             isMinifyEnabled = false
             buildConfigField("boolean", "AGX_ENABLE_YUV_FALLBACK", "false")
+            buildConfigField("boolean", "AGX_SYNTHETIC_BAYER", "false")
             signingConfig = signingConfigs.getByName("release")
         }
     }

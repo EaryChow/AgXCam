@@ -847,6 +847,17 @@
             <TextView android:id="@+id/nr_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="NR Strength  0.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
             <SeekBar android:id="@+id/nr_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="100" android:progress="0" android:layout_marginBottom="8dp" />
 
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Multi-Stage Denoise" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
+
+            <TextView android:id="@+id/s1_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="S1 DPC  0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/s1_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="100" android:progress="0" android:layout_marginBottom="8dp" />
+
+            <TextView android:id="@+id/s3_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="S3 RAW  0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/s3_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="100" android:progress="0" android:layout_marginBottom="8dp" />
+
+            <TextView android:id="@+id/s5_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="S5 OUT  0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/s5_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="100" android:progress="0" android:layout_marginBottom="8dp" />
+
             <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
 
             <!-- Sensor Clip Neutralization -->

@@ -72,6 +72,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var developerSwitch: DeveloperSwitch
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    private var pendingDebugSave: Runnable? = null
+
     private var currentFlashMode = FlashMode.OFF
     private var currentWbMode = WhiteBalanceMode.AUTO
     private var kelvinState = KelvinState()
@@ -216,6 +218,11 @@ class MainActivity : AppCompatActivity() {
     private var isManualMode = false
     private var lastAutoIso = 200
     private var lastAutoShutterNs = 33_333_333L
+    // Multi-stage denoise strengths (0..1, 0 = bypass): S1 DPC, S3 RAW
+    // green-guided GF, S5 output-domain SWGF. Persisted in agxcam_settings.
+    private var dpcStrength = 0f
+    private var rawNrStrength = 0f
+    private var outNrStrength = 0f
     private var lastIsoTapTime = 0L
     private var lastShutterTapTime = 0L
     private var isoPopupShowing = false
@@ -315,6 +322,11 @@ class MainActivity : AppCompatActivity() {
 
     // NR
     private lateinit var nrLabel: TextView; private lateinit var nrSlider: SeekBar
+
+    // Multi-stage denoise (Plan v1.2 Phase A): independent S1/S3/S5 sliders.
+    private lateinit var s1Label: TextView; private lateinit var s1Slider: SeekBar
+    private lateinit var s3Label: TextView; private lateinit var s3Slider: SeekBar
+    private lateinit var s5Label: TextView; private lateinit var s5Slider: SeekBar
 
     // Sensor clip neutralization
     private lateinit var clipAttenLabel: TextView; private lateinit var clipAttenSlider: SeekBar
@@ -421,6 +433,10 @@ class MainActivity : AppCompatActivity() {
 
         nrLabel = findViewById(R.id.nr_label); nrSlider = findViewById(R.id.nr_slider)
 
+        s1Label = findViewById(R.id.s1_label); s1Slider = findViewById(R.id.s1_slider)
+        s3Label = findViewById(R.id.s3_label); s3Slider = findViewById(R.id.s3_slider)
+        s5Label = findViewById(R.id.s5_label); s5Slider = findViewById(R.id.s5_slider)
+
         clipAttenLabel = findViewById(R.id.clip_atten_label); clipAttenSlider = findViewById(R.id.clip_atten_slider)
 
         kelvinLabel = findViewById(R.id.kelvin_label); kelvinSlider = findViewById(R.id.kelvin_slider)
@@ -481,6 +497,9 @@ class MainActivity : AppCompatActivity() {
         focusIndicatorTimeoutMs = previewResPrefs.getLong(PREF_FOCUS_TIMEOUT, 0L)
         maxPreviewDimensions = getMaxPreviewDimensions()
         clipAttenFactor = previewResPrefs.getFloat(PREF_CLIP_ATTEN, 0.1f).coerceIn(0f, 1f)
+        dpcStrength = previewResPrefs.getFloat(PREF_S1_DPC, 0f).coerceIn(0f, 1f)
+        rawNrStrength = previewResPrefs.getFloat(PREF_S3_RAW, 0f).coerceIn(0f, 1f)
+        outNrStrength = previewResPrefs.getFloat(PREF_S5_OUT, 0f).coerceIn(0f, 1f)
 
         developerSwitch = DeveloperSwitch(this) { useRaw ->
             CrashLogger.log(TAG, "Developer switch toggled: useRaw=$useRaw")
@@ -538,8 +557,14 @@ class MainActivity : AppCompatActivity() {
             findViewById(R.id.developer_banner)
         )
         findViewById<TextView>(R.id.save_debug_log_btn).setOnClickListener {
-            CrashLogger.saveDebugLogToDownloads(this)
-            Toast.makeText(this, "Debug log saved to Downloads", Toast.LENGTH_SHORT).show()
+            // Save the current CrashLogger buffer to Downloads.
+            CrashLogger.log("MainActivity", "Debug log save requested")
+            Toast.makeText(this, "Capturing log...", Toast.LENGTH_SHORT).show()
+            pendingDebugSave?.let { mainHandler.removeCallbacks(it) }
+            pendingDebugSave = Runnable {
+                CrashLogger.saveDebugLogToDownloads(this)
+                Toast.makeText(this, "Debug log saved to Downloads", Toast.LENGTH_SHORT).show()
+            }.also { mainHandler.postDelayed(it, 2500) }
         }
 
         thermalManager.onStateChanged = { state ->
@@ -568,6 +593,9 @@ class MainActivity : AppCompatActivity() {
 
         previewRenderer = PreviewRenderer(textureView).apply {
             clipAttenFactor = this@MainActivity.clipAttenFactor
+            dpcStrength = this@MainActivity.dpcStrength
+            rawNrStrength = this@MainActivity.rawNrStrength
+            outNrStrength = this@MainActivity.outNrStrength
             onFirstFrameRendered = { Log.d(TAG, "First frame rendered") }
             onFrameRendered = { ms -> thermalManager.onFrameRendered(ms.toFloat()) }
             onDegradedModeChanged = { banner ->
@@ -1313,6 +1341,45 @@ class MainActivity : AppCompatActivity() {
             uploadAgxUniforms()
         }
 
+        s1Slider.setOnSeekBarChangeListener(simpleSeekBar { v ->
+            dpcStrength = v / 100f
+            s1Label.text = "S1 DPC  $v"
+            previewRenderer.dpcStrength = dpcStrength
+            previewResPrefs.edit().putFloat(PREF_S1_DPC, dpcStrength).apply()
+        })
+        setupSliderDoubleClickReset(s1Slider, 0) {
+            dpcStrength = 0f
+            s1Label.text = "S1 DPC  0"
+            previewRenderer.dpcStrength = 0f
+            previewResPrefs.edit().putFloat(PREF_S1_DPC, 0f).apply()
+        }
+
+        s3Slider.setOnSeekBarChangeListener(simpleSeekBar { v ->
+            rawNrStrength = v / 100f
+            s3Label.text = "S3 RAW  $v"
+            previewRenderer.rawNrStrength = rawNrStrength
+            previewResPrefs.edit().putFloat(PREF_S3_RAW, rawNrStrength).apply()
+        })
+        setupSliderDoubleClickReset(s3Slider, 0) {
+            rawNrStrength = 0f
+            s3Label.text = "S3 RAW  0"
+            previewRenderer.rawNrStrength = 0f
+            previewResPrefs.edit().putFloat(PREF_S3_RAW, 0f).apply()
+        }
+
+        s5Slider.setOnSeekBarChangeListener(simpleSeekBar { v ->
+            outNrStrength = v / 100f
+            s5Label.text = "S5 OUT  $v"
+            previewRenderer.outNrStrength = outNrStrength
+            previewResPrefs.edit().putFloat(PREF_S5_OUT, outNrStrength).apply()
+        })
+        setupSliderDoubleClickReset(s5Slider, 0) {
+            outNrStrength = 0f
+            s5Label.text = "S5 OUT  0"
+            previewRenderer.outNrStrength = 0f
+            previewResPrefs.edit().putFloat(PREF_S5_OUT, 0f).apply()
+        }
+
         clipAttenSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             clipAttenFactor = v / 100f
             clipAttenLabel.text = String.format("Neutralize  %.2f", clipAttenFactor)
@@ -1554,6 +1621,13 @@ class MainActivity : AppCompatActivity() {
 
         nrSlider.progress = (agxParams.nrStrength * 100).toInt().coerceIn(0, 100)
         nrLabel.text = String.format("NR Strength  %.1f", agxParams.nrStrength)
+
+        s1Slider.progress = (dpcStrength * 100).toInt().coerceIn(0, 100)
+        s1Label.text = "S1 DPC  ${s1Slider.progress}"
+        s3Slider.progress = (rawNrStrength * 100).toInt().coerceIn(0, 100)
+        s3Label.text = "S3 RAW  ${s3Slider.progress}"
+        s5Slider.progress = (outNrStrength * 100).toInt().coerceIn(0, 100)
+        s5Label.text = "S5 OUT  ${s5Slider.progress}"
 
         clipAttenSlider.progress = (clipAttenFactor * 100).toInt().coerceIn(0, 100)
         clipAttenLabel.text = String.format("Neutralize  %.2f", clipAttenFactor)
@@ -4215,6 +4289,7 @@ override fun onResume() {
     private fun updateAutoExposureReadout(iso: Int, shutterNs: Long) {
         lastAutoIso = iso
         lastAutoShutterNs = shutterNs
+        previewRenderer.isoForDenoise = iso
         if (!isManualMode) {
             isoOverlay.text = "ISO $iso"
             shutterOverlay.text = formatShutterSpeed(shutterNs)
@@ -4227,6 +4302,7 @@ override fun onResume() {
         val expNs = shutterNsFromIndex(shutterRoller.index)
         isoOverlay.text = "ISO $iso"
         shutterOverlay.text = formatShutterSpeed(expNs)
+        previewRenderer.isoForDenoise = iso
         camera2Manager.setManualExposure(iso, expNs)
         positionFocusControls()
     }
@@ -4366,6 +4442,10 @@ override fun onResume() {
         private const val RAW_BUFFER_POOL = 3
         // Leading factor of the demosaic clipping-neutralization exponent.
         private const val PREF_CLIP_ATTEN = "clip_atten_factor"
+        // Multi-stage denoise strengths (Plan v1.2 Phase A), 0..1 each.
+        private const val PREF_S1_DPC = "stage1_dpc_strength"
+        private const val PREF_S3_RAW = "stage3_raw_strength"
+        private const val PREF_S5_OUT = "stage5_out_strength"
         // Lens shading correction strength (0.0..1.0) of the estimated map.
         private const val PREF_LS_STRENGTH = "lens_shading_strength"
         // Lens shading source policy, persisted so the user's explicit choice is

@@ -18,6 +18,7 @@ local.properties
 Thumbs.db
 
 # Project-specific
+keystore.properties
 reference_blender_codes/
 design_spec.txt
 all_changes.txt

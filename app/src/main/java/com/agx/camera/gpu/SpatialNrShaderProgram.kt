@@ -7,17 +7,17 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 /**
- * Placeholder Bayer-domain spatial noise reduction (GLES 3.0).
+ * Legacy Bayer-domain spatial noise reduction (GLES 3.0), used as a fallback
+ * when the DPC + green-guided-filter chain is unavailable.
  *
  * Per output texel, computes a Gaussian-weighted average of same-CFA-phase
- * neighbors in a 5×5 lattice window (±4 sensor pixels, 25 samples per phase),
+ * neighbors in a 5x5 lattice window (+-4 sensor pixels, 25 samples per phase),
  * then blends toward the raw center sample by the strength slider (0 = exactly
- * raw, 1 = full average).  Each output texel carries all four mosaic phases
- * (R, G1, G2, B) for the demosaic pass — critical for avoiding magenta casts
+ * raw, 1 = full average). Each output texel carries all four mosaic phases
+ * (R, G1, G2, B) for the demosaic pass -- critical for avoiding magenta casts
  * and mosaic artefacts.
  *
- * This is a simple placeholder — a proper spatial NR should be substituted
- * later.  Single RGBA32F output, O(output pixels), no history, no MRT.
+ * Single RGBA32F output, O(output pixels), no history, no MRT.
  */
 class SpatialNrShaderProgram {
 
