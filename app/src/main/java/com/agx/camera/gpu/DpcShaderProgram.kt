@@ -20,9 +20,10 @@ import java.nio.FloatBuffer
  *  Pass 2 (CORRECT) : flagged texels replaced by feature-direction estimate I_D
  *                     (smooth direction pair), M3=M1 re-check, fallback to
  *                     non-directional I_ND (hot: 2nd largest / cold: 2nd smallest).
- *  Pass 3 (COUPLET) : second couplet-reinforcement pass — only texels whose 8
- *                     neighbour cells contain a flagged pixel re-run correction,
- *                     with flagged neighbours excluded from the candidate set.
+ *  Pass 3 (COUPLET) : second couplet-reinforcement pass — texels whose OWN
+ *                     cell or any 8-neighbour cell contains a flagged pixel
+ *                     re-run correction, with flagged neighbours excluded from
+ *                     the candidate set.  Truly clean texels pass through.
  *
  * σ̂ for the absolute threshold comes from the Stage 0 ISO-calibrated model
  * (uniforms u_iso_model_a/b), NOT the Stage 2 patch estimate (plan R2).
@@ -349,6 +350,13 @@ void main() {
     // Pass C (correct) / Pass 3 (couplet reinforce)
     vec4 result = vec4(0.0);
     bool couplet = (u_pass == 3);
+    // Own-cell flag: the current texel's OWN 2x2 cell (this texel is the owner
+    // of cellOrigin(), so its own entry in the flag map is what flagged it).
+    // flagAt() via cellTexelFor() is NOT the ownership map under the preview
+    // Y-flip, so own detection must read this texel's own flag entry instead.
+    ivec2 ft = ivec2(gl_FragCoord.xy);
+    vec4 ownFlags = texelFetch(u_flagTex, ft, 0);
+    bool anySelfFlagged = any(greaterThan(abs(ownFlags), vec4(0.05)));
     bool anyNeighbourFlagged = false;
     if (couplet) {
         for (int p = 0; p < 4 && !anyNeighbourFlagged; p++) {
@@ -388,10 +396,11 @@ void main() {
 
         float outv = max(I, 0.0);
         bool needPassThrough = !(u_dpc_enabled > 0.5) ||
-            (couplet && !anyNeighbourFlagged);
+            (couplet && !anySelfFlagged && !anyNeighbourFlagged);
 
         if (needPassThrough) {
-            // raw pass-through (also the couplet no-op path)
+            // raw pass-through (also the couplet no-op path: texels with no
+            // self flag and no flagged neighbour are already clean)
         } else {
             float devC = I - Iavg;
             bool hot = devC > 0.0 && codeCheck(devC, cc, p);
@@ -480,11 +489,15 @@ void main() {
             }
         }
 
-        // strength blend (0 at bypass → raw)
-        if (p == 0) result.r = mix(max(I, 0.0), outv, u_corr_strength);
-        else if (p == 1) result.g = mix(max(I, 0.0), outv, u_corr_strength);
-        else if (p == 2) result.b = mix(max(I, 0.0), outv, u_corr_strength);
-        else result.a = mix(max(I, 0.0), outv, u_corr_strength);
+        // strength blend (0 at bypass → raw).  Once a texel is flagged it is
+        // applied (near-)fully, exactly like the S3_PACK/inline soak-through:
+        // the DPC/gain sliders gate detection, not the blend, so a corrected
+        // defect can't re-leak a partial spike.
+        float effStrength = max(u_corr_strength, 0.98);
+        if (p == 0) result.r = mix(max(I, 0.0), outv, effStrength);
+        else if (p == 1) result.g = mix(max(I, 0.0), outv, effStrength);
+        else if (p == 2) result.b = mix(max(I, 0.0), outv, effStrength);
+        else result.a = mix(max(I, 0.0), outv, effStrength);
     }
     outColor = result;
 }

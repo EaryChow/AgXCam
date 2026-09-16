@@ -254,8 +254,15 @@ object SyntheticBayerTest {
         val py = abs(scy % 2)
         val r = FloatArray(4)
 
+        var anySelfFlagged = false
         var anyNeighbourFlagged = false
         if (couplet) {
+            // Own 2x2 cell flags = the owner texel's own flag entry (flagAt()
+            // via cellTexelFor() is NOT the ownership map under the preview
+            // Y-flip, so own detection reads this texel's flags directly).
+            val own = flagCell(sensor, texelX, texelY, viewW, viewH,
+                m1, m2, theta, isoA, isoB, true)
+            for (v in own) if (abs(v) > 0.05f) anySelfFlagged = true
             outer@ for (p in 0 until 4) {
                 val ccx = scx + (px xor (p and 1))
                 val ccy = scy + (py xor (p shr 1))
@@ -286,7 +293,7 @@ object SyntheticBayerTest {
             }
 
             var outv = maxOf(i, 0f)
-            val needPassThrough = !enabled || (couplet && !anyNeighbourFlagged)
+            val needPassThrough = !enabled || (couplet && !anySelfFlagged && !anyNeighbourFlagged)
             if (!needPassThrough) {
                 val devC = i - iavg
                 val hot = devC > 0f && codeCheck(sensor, ccx, ccy, p, viewW, viewH, devC, m2, m1, theta, isoA, isoB)
@@ -328,7 +335,8 @@ object SyntheticBayerTest {
                     }
                 }
             }
-            r[p] = maxOf(i, 0f) + (outv - maxOf(i, 0f)) * strength
+            val effStrength = maxOf(strength, 0.98f)
+            r[p] = maxOf(i, 0f) + (outv - maxOf(i, 0f)) * effStrength
         }
         return r
     }

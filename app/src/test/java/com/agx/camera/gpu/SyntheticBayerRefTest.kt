@@ -97,9 +97,12 @@ class SyntheticBayerRefTest {
         // Couplet semantics (DpcShaderProgram pass 3 mirrors, incl. the no-op path):
         //  - pass-CORRECT (couplet=false) pulls an isolated defect toward its
         //    neighbouring same-phase cells;
-        //  - the final pass-COUPLET that feeds the sparse grid / DIFF harness
-        //    deliberately PASSES THROUGH texels whose 8-neighbourhood has no
-        //    flagged cell — so isolated defects keep their raw value (raw grid).
+        //  - the final pass-COUPLET that feeds the sparse grid re-runs
+        //    correction for texels whose OWN cell or 8-neighbourhood contains a
+        //    flagged cell (flagged neighbours excluded from the candidates), so
+        //    an isolated defect must come out corrected — NOT raw.  Only truly
+        //    clean texels pass through.  (This used to leak single flagged
+        //    cells raw; the pass-through was tightened to fix that.)
         class Spec(val sx: Int, val sy: Int, val phase: Int, val hot: Boolean)
         val expected = listOf(
             Spec(60, 60, 0, true),
@@ -116,16 +119,17 @@ class SyntheticBayerRefTest {
             val coupletGrid = correctedCell(sensor, tx, ty, viewW, viewH,
                 params.m1, params.m2, params.theta, params.isoA, params.isoB,
                 params.corrStrength, enabled = true, couplet = true)
-            assertEquals("couplet pass must keep isolated defect raw at (${d.sx},${d.sy})",
-                raw[d.phase], coupletGrid[d.phase], 0.0f)
+            assertTrue("couplet must correct isolated defect at (${d.sx},${d.sy}): " +
+                "grid ${coupletGrid[d.phase]} not pulled from raw ${raw[d.phase]}",
+                abs(coupletGrid[d.phase] - pulled[d.phase]) <= 1f)
             if (d.hot) {
-                assertTrue("hot (${d.sx},${d.sy}) not pulled below raw: ${pulled[d.phase]} >= ${raw[d.phase]}",
-                    pulled[d.phase] < raw[d.phase] - 50f)
-                assertTrue("hot (${d.sx},${d.sy}) lost its flat base: ${pulled[d.phase]}",
-                    pulled[d.phase] >= 60f)
+                assertTrue("hot (${d.sx},${d.sy}) not pulled below raw: ${coupletGrid[d.phase]} >= ${raw[d.phase]}",
+                    coupletGrid[d.phase] < raw[d.phase] - 50f)
+                assertTrue("hot (${d.sx},${d.sy}) lost its flat base: ${coupletGrid[d.phase]}",
+                    coupletGrid[d.phase] >= 60f)
             } else {
-                assertTrue("cold (${d.sx},${d.sy}) not pulled above raw: ${pulled[d.phase]} <= ${raw[d.phase]}",
-                    pulled[d.phase] > raw[d.phase] + 50f)
+                assertTrue("cold (${d.sx},${d.sy}) not pulled above raw: ${coupletGrid[d.phase]} <= ${raw[d.phase]}",
+                    coupletGrid[d.phase] > raw[d.phase] + 50f)
             }
         }
     }
