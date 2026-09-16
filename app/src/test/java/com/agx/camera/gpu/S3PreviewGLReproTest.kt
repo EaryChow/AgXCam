@@ -180,7 +180,7 @@ class S3PreviewGLReproTest {
     // walk probed across k=1.5..8) AND at-or-below the zero-slider baseline.
     // box3 is strictly dominated (4x4+4-tap is cheaper and smoother than
     // 3x3+12-tap), so the mapping emits only 4 (weak/mid s3, 4-tap ring) and
-    // 2 (strong s3 >= 0.6, full 12-tap ring).  The pack regime (k<=2) uses its
+    // 2 (strong s3 >= 0.7, full 12-tap ring).  The pack regime (k<=2) uses its
     // own shader, boxAA=4 throughout.  Keep in sync with the host.
     private fun previewBoxAA(v: View, s1: Float, s3: Float): Int {
         if (v.k <= 2f) return 4
