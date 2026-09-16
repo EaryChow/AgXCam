@@ -921,12 +921,13 @@ float sampleSameColorNR(ivec2 coord) {
                      (2.0 + 2.0 * u_dp_strength) * sigma);
 
     float corrStrength = max(u_dp_strength, 0.85 * u_raw_nr_strength);
+    float applyStrength = max(corrStrength, 0.98);
     float center = c;
     if (corrStrength > 0.0) {
         bool hot = (c > mx) && (c - iavg) > band;
         bool cold = (c < mn) && (iavg - c) > band;
         if (hot || cold) {
-            center = mix(c, iavg, corrStrength);
+            center = mix(c, iavg, applyStrength);
         }
     }
 
@@ -1230,12 +1231,13 @@ float sampleSameColorNR(ivec2 coord) {
                      (2.0 + 2.0 * u_dp_strength) * sigma);
 
     float corrStrength = max(u_dp_strength, 0.85 * u_raw_nr_strength);
+    float applyStrength = max(corrStrength, 0.98);
     float center = c;
     if (corrStrength > 0.0) {
         bool hot = (c > mx) && (c - iavg) > band;
         bool cold = (c < mn) && (iavg - c) > band;
         if (hot || cold) {
-            center = mix(c, iavg, corrStrength);
+            center = mix(c, iavg, applyStrength);
         }
     }
 
@@ -1289,7 +1291,7 @@ vec4 boxedBlend(vec4 b) {
         if (corr > 0.0) {
             bool hot = (c > omxx[p]) && (c - iavg) > band;
             bool cold = (c < omn[p]) && (iavg - c) > band;
-            if (hot || cold) center = c + (iavg - c) * corr;
+            if (hot || cold) center = c + (iavg - c) * max(corr, 0.98);
         }
         float outN = (b[p] < clipLo) ? center + (iavg - center) * (0.98 * u_raw_nr_strength) : center;
         o[p] = outN / u_pack_wb_gains[p];
@@ -1361,14 +1363,51 @@ void main() {
             pN[phase]++;
         }
     }
+    // A small footprint whose every present phase box-mean sits at clip is an
+    // all-hot cluster (or a sub-quad highlight): the mn==mx degenerate makes
+    // boxedBlend a no-op, so DPC each phase cell individually through the
+    // anchored per-phase filter (same as the 1-cell path) instead — removes
+    // the cluster exactly as the inline path would.
+    float clipLo = max(u_white_level - u_black_level, 1.0);
+    bool allClip = true;
+    for (int p = 0; p < 4; p++) {
+        if (pN[p] > 0 && (pSum[p] / float(pN[p])) < clipLo) { allClip = false; break; }
+    }
+    if (nCells <= 4 && allClip) {
+        ivec2 sc = clamp(b0, ivec2(0), ivec2(u_sensorSize) - ivec2(1));
+        int parityX = abs(sc.x % 2);
+        int parityY = abs(sc.y % 2);
+        vec4 result = vec4(0.0);
+        for (int p = 0; p < 4; p++) {
+            int phaseX = p & 1;
+            int phaseY = p >> 1;
+            ivec2 cc = sc + ivec2(parityX ^ phaseX, parityY ^ phaseY);
+            cc = clamp(cc, ivec2(0), ivec2(u_sensorSize) - ivec2(1));
+            result[p] = sampleSameColorNR(cc);
+        }
+        outDenoised = result;
+        return;
+    }
     // A phase with no cells in an odd-shaped footprint borrows the mean of the
-    // phases that ARE present, so every channel stays populated.
+    // phases that ARE present, so every channel stays populated.  A phase whose
+    // box-mean sits at clip is a single hot cell (or a small-site highlight):
+    // pulling it 0.98x toward a poisoned fillback still leaves a visible speck,
+    // so clip-level phase means are excluded from the fillback.
     float tot = 0.0;
     int tn = 0;
     for (int p = 0; p < 4; p++) {
-        if (pN[p] > 0) { tot += pSum[p] / float(pN[p]); tn++; }
+        if (pN[p] > 0) {
+            float pm = pSum[p] / float(pN[p]);
+            if (pm < clipLo) { tot += pm; tn++; }
+        }
     }
-    if (tn == 0) { tot = 0.0; tn = 1; }
+    if (tn == 0) {
+        // Every present phase is at clip (genuine highlight): fall back to the
+        // plain mean so the fillback stays populated.
+        tot = 0.0; tn = 0;
+        for (int p = 0; p < 4; p++) if (pN[p] > 0) { tot += pSum[p] / float(pN[p]); tn++; }
+        if (tn == 0) { tot = 0.0; tn = 1; }
+    }
     float fbk = tot / float(tn);
     for (int p = 0; p < 4; p++) {
         if (pN[p] == 0) { pN[p] = 1; pSum[p] = fbk; }

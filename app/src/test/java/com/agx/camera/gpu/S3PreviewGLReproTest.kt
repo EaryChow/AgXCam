@@ -99,7 +99,7 @@ class S3PreviewGLReproTest {
         if (max(s1, 0.85f * s3) > 0f) {
             val hot = (c > mx) && (c - iavg) > band
             val cold = (c < mn) && (iavg - c) > band
-            if (hot || cold) center = c + (iavg - c) * max(s1, 0.85f * s3)
+            if (hot || cold) center = c + (iavg - c) * max(max(s1, 0.85f * s3), 0.98f)
         }
         return if (c < CLIP_SCALAR) center + (iavg - center) * (0.98f * s3) else center
     }
@@ -255,10 +255,45 @@ class S3PreviewGLReproTest {
                     pN[p]++
                 }
             }
+            // A small footprint whose every present phase box-mean sits at clip
+            // is an all-hot cluster (or a sub-quad highlight): the mn==mx
+            // degenerate makes boxedBlend a no-op, so DPC each phase cell
+            // individually through the anchored per-phase filter (same as the
+            // 1-cell path) instead — removes the cluster exactly as the inline
+            // path would (mirrors the shader).
+            var allClip = true
+            for (p in 0..3) if (pN[p] > 0 && pSum[p] / pN[p] < CLIP_SCALAR) allClip = false
+            if (nCells <= 4 && allClip) {
+                val px = abs(b0x % 2)
+                val py = abs(b0y % 2)
+                for (p in 0..3) {
+                    val phaseX = p and 1
+                    val phaseY = p shr 1
+                    out[base + p] = sameColorNR(
+                        scene,
+                        (b0x + (px xor phaseX)).coerceIn(0, SW - 1),
+                        (b0y + (py xor phaseY)).coerceIn(0, SH - 1),
+                        s1, s3
+                    )
+                }
+                continue
+            }
             var tot = 0f
             var tn = 0
-            for (p in 0..3) if (pN[p] > 0) { tot += pSum[p] / pN[p]; tn++ }
-            if (tn == 0) { tot = 0f; tn = 1 }
+            for (p in 0..3) if (pN[p] > 0) {
+                val pm = pSum[p] / pN[p]
+                // A phase whose box-mean sits at clip is a single hot cell (or a
+                // small-site highlight): pulling it down 0.98x toward a poisoned
+                // fillback would still leave a visible speck, so exclude it from
+                // the fillback used for the absent phases (mirrors the shader).
+                if (pm < CLIP_SCALAR) { tot += pm; tn++ }
+            }
+            if (tn == 0) {
+                // Every present phase is at clip (genuine highlight): fall back
+                // to the plain mean so the fillback stays populated.
+                for (p in 0..3) if (pN[p] > 0) { tot += pSum[p] / pN[p]; tn++ }
+                if (tn == 0) { tot = 0f; tn = 1 }
+            }
             val fbk = tot / tn
             for (p in 0..3) if (pN[p] == 0) { pN[p] = 1; pSum[p] = fbk }
 
@@ -304,7 +339,7 @@ class S3PreviewGLReproTest {
             if (corr > 0f) {
                 val hot = (c > omxx(p)) && (c - iavg) > band
                 val cold = (c < omn(p)) && (iavg - c) > band
-                if (hot || cold) center = c + (iavg - c) * corr
+                if (hot || cold) center = c + (iavg - c) * max(corr, 0.98f)
             }
             val outN = if (b[p] < CLIP_SCALAR) center + (iavg - center) * (0.98f * s3) else center
             o[p] = outN / gs[p]
@@ -858,6 +893,118 @@ class S3PreviewGLReproTest {
         val s3s = listOf(0f, 0.1f, 0.15f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f)
         runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("shipped"), mirror = false, gateTol = 0.0004f)
         runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("shipped"), mirror = true, gateTol = 0.0004f)
+    }
+
+    /**
+     * Repro: "S1 + zoom-in leaks clipped hot pixels".  One clipped single-cell
+     * spike per CFA phase sits in an otherwise flat noisy field; the camera
+     * zooms in continuously (k: wide -> 1:1) with S1 on and S3 off, and we
+     * measure how much of the spike survives at its demosaic-box output
+     * window.  A corrected spike leaves the output identical to the control;
+     * a leak pushes the black-dot/magenta speck well above it.  Print-only
+     * until reproduced.
+     */
+    @Test
+    fun probeHotPixelLeakDuringZoomIn() {
+        val base = buildFlatNoise(2025, 460f, 28f)
+        // One clipped hot pixel per CFA phase, spread so edge clamp never
+        // corrupts the trim ring.
+        val hot = listOf(
+            24 to 24, 25 to 24, 24 to 25, 25 to 25,   // phases 0,1,2,3 (2x2 block)
+            72 to 24, 72 to 48, 48 to 72, 24 to 72    // more, both parities
+        )
+        val leaky = base.copyOf()
+        for ((hx, hy) in hot) leaky[hy * SW + hx] = SENSOR_CLIP.toShort()
+
+        val grids = listOf(96, 90, 84, 78, 72, 66, 60, 54, 50, 48, 46, 44, 40, 38, 36, 34, 32, 30, 28, 24, 20, 16, 12)
+        val visible = 0.05f   // output is 0..1; a surviving spike in the leaking
+                              // channel reads ~1.0, dilution < 0.05 is suppressed
+        var anyVisible = false
+        for (grid in grids) {
+            val v = View(grid, grid, false, true, floatArrayOf(0f, 0f, 96f, 96f))
+            for (s1 in listOf(0.3f, 0.6f)) {
+                val p = buildPackGL(leaky, v, s1, 0f)
+                val imgH = renderPreview(leaky, p, v, s1, 0f)
+                val imgC = renderPreview(base, buildPackGL(base, v, s1, 0f), v, s1, 0f)
+                val bx = previewBoxAA(v, s1, 0f)
+                val nr = previewNrRadius(bx)
+                val mode = if (packActive(v)) "pack" else "inline"
+                var leaks = 0
+                var maxBump = 0f
+                for ((hx, hy) in hot) {
+                    val gx0 = max(((hx + 0.5f) / 96f * grid).toInt() - 2, 0)
+                    val gy0 = max(((hy + 0.5f) / 96f * grid).toInt() - 2, 0)
+                    val gx1 = min(gx0 + 4, grid - 1)
+                    val gy1 = min(gy0 + 4, grid - 1)
+                    var bump = 0f
+                    for (gy in gy0..gy1) for (gx in gx0..gx1)
+                        for (c in 0..2) bump = max(bump, imgH[gy][gx * 3 + c] - imgC[gy][gx * 3 + c])
+                    maxBump = max(maxBump, bump)
+                    if (bump > visible) leaks++
+                }
+                val flag = if (leaks > 0) "  <-- HOT PIXELS LEAK" else ""
+                if (leaks > 0) anyVisible = true
+                println("zoom-in k=%.2f (grid=%d) s1=%.1f %s box=%d nr=%d  leaks=%d/%d maxBump=%.4f%s".format(
+                    v.k, grid, s1, mode, bx, nr, leaks, hot.size, maxBump, flag))
+                if ((grid == 96 || grid == 48) && s1 == 0.3f) {
+                    // Reverse-map hot@(72,48) to its pack texel; dump the p0 across the
+                    // 3x3 texel neighbourhood so both k=1 (leak-free) and k=2 (leaking)
+                    // show where the residual sits.
+                    val rr = ((24f / 96f) * grid).toInt().coerceIn(2, grid - 3)
+                    val cc = ((72f / 96f) * grid).toInt().coerceIn(2, grid - 3)
+                    println("  pack grid=%d texel centre (%d,%d), 3x3 x 4ch:".format(grid, cc, rr))
+                    for (gy in cc - 1..cc + 1) {
+                        for (gx in rr - 1..rr + 1) {
+                            val i = (gy * grid + gx) * 4
+                            println("    (%d,%d): p0=%.1f p1=%.1f p2=%.1f p3=%.1f".format(
+                                gx, gy, p[i + 0], p[i + 1], p[i + 2], p[i + 3]))
+                        }
+                    }
+                    println("  sameColorNR(24,72)=%.1f sameColorNR(24,74)=%.1f sameColorNR(26,72)=%.1f".format(
+                        sameColorNR(leaky, 24, 72, 0.3f, 0f), sameColorNR(leaky, 24, 74, 0.3f, 0f), sameColorNR(leaky, 26, 72, 0.3f, 0f)))
+                    for ((hx, hy) in hot) {
+                        val gx0 = max(((hx + 0.5f) / 96f * grid).toInt() - 2, 0)
+                        val gy0 = max(((hy + 0.5f) / 96f * grid).toInt() - 2, 0)
+                        val gx1 = min(gx0 + 4, grid - 1)
+                        val gy1 = min(gy0 + 4, grid - 1)
+                        var bgx = gx0; var bgy = gy0; var bc = 0; var bump = -1f; var hotVal = 0f; var ctl = 0f
+                        for (gy in gy0..gy1) for (gx in gx0..gx1)
+                            for (c in 0..2) {
+                                val d = imgH[gy][gx * 3 + c] - imgC[gy][gx * 3 + c]
+                                if (d > bump) { bump = d; bgx = gx; bgy = gy; bc = c; hotVal = imgH[gy][gx * 3 + c]; ctl = imgC[gy][gx * 3 + c] }
+                            }
+                        println("  hot@(%d,%d) phase=%d -> maxBump texel(%d,%d) ch%d leaky=%.4f ctl=%.4f bump=%.4f".format(
+                            hx, hy, phase(hx, hy), bgx, bgy, bc, hotVal, ctl, bump))
+                        if (bump > visible) {
+                            // Replicate renderPreview's own box-AA loop for the maxBump
+                            // texel and compare raw channel averages with the rendered.
+                            val gx = bgx; val gy = bgy
+                            val svX = v.crop[0] + v.T((gx + 0.5f) / v.gridW, 0) * v.crop[2]
+                            val svY = v.crop[1] + v.T((gy + 0.5f) / v.gridH, 1) * v.crop[3]
+                            val bx0 = boxBase(svX, 4)
+                            val by0 = boxBase(svY, 4)
+                            val ssum = FloatArray(3)
+                            val sb = StringBuilder()
+                            for (dy in 0..3) for (dx in 0..3) {
+                                val cx = (bx0 + dx).coerceIn(0, SW - 1)
+                                val cy = (by0 + dy).coerceIn(0, SH - 1)
+                                val s = demosaicAtRGB(leaky, p, v, 0.3f, 0f, cx, cy, nrRadius = 2)
+                                for (c in 0..2) ssum[c] += s[c]
+                                sb.append("(%d,%d)p%d=%s ".format(cx, cy, phase(cx, cy),
+                                    s.joinToString("/") { "%.0f".format(it) }))
+                            }
+                            for (c in 0..2) ssum[c] /= 16f
+                            val pre = composeMain(ssum)
+                            println("  repl k=%.2f texel(%d,%d) raw=(%.1f,%.1f,%.1f) pre=(%.3f,%.3f,%.3f) imgH=(%.3f,%.3f,%.3f) imgC=(%.3f,%.3f,%.3f)".format(
+                                v.k, gx, gy, ssum[0], ssum[1], ssum[2], pre[0], pre[1], pre[2],
+                                imgH[gy][gx * 3], imgH[gy][gx * 3 + 1], imgH[gy][gx * 3 + 2],
+                                imgC[gy][gx * 3], imgC[gy][gx * 3 + 1], imgC[gy][gx * 3 + 2]))
+                        }
+                    }
+                }
+            }
+        }
+        println("visible hot-pixel leak during zoom-in: " + anyVisible)
     }
 
     // ------------------------------------------------------------------
