@@ -715,16 +715,37 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // demosaic target FBO + viewport so drawDemosaic renders correctly.
         bindTarget(demosaicFboId, demosaicFboWidth, demosaicFboHeight)
 
-        // The S3 slider must never REDUCE the demosaic's effective averaging at
-        // partial strength, so boxAA only steps down once S3 is genuinely strong
-        // (>0.5) -- and even then only 4 -> 3, keeping the anti-aliasing.  Baseline
-        // (s3=0) stays at 4, unchanged.
-        val previewBoxAA = if (s3 >= 0.5f) 3 else 4
+        // The S1/S3 inline filter must never make the output noisier: two
+        // rules bind the demosaic configuration, probed across k=1.5..8 (the
+        // S3PreviewGLReproTest monotonicity walk).
+        //   (a) baseline bound: the effective averaging must never drop below
+        //       the zero-slider 4x4 — any step-down needs the blend to already
+        //       be strong enough to keep every band's sigma AT OR BELOW the
+        //       previous (weaker) slider value (per-band sigma gate).
+        //   (b) with that bound, box3 is strictly dominated: 4x4 + the 4-tap
+        //       ring is cheaper AND smoother than 3x3 + the 12-tap ring, so
+        //       there is no monotone reason to ever emit box3.  The strong-s3
+        //       zone (>= 0.7) drops to 2x2 + the full 12-tap ring, whose
+        //       wider trim is what actually pulls sigma down hard up there —
+        //       the transition sits late enough that every band (incl. the
+        //       G floor, which 2x2 raises) lands below the 4x4 band's level.
+        // Baseline (s3=0, or sliders off) stays at 4, unchanged; the pack
+        // regime (k<=2) uses its own shader, boxAA=4 throughout.
+        val previewBoxAA = when {
+            previewZoomK <= 2.0f -> 4
+            s3 >= 0.7f -> 2
+            else -> 4
+        }
+        // In the box-AA=4 band the demosaic box supplies the steady averaging, so
+        // the α-trim ring only needs the 4 step-2 axis neighbours
+        // (u_nr_radius=2).  The strong-s3 2x2 box needs the full 12-tap ring
+        // to actually drag sigma down.  Capture never runs this path.
+        val previewNrRadius = if (previewBoxAA == 4) 2 else 4
 
-        val sliderSig = "%.4f:%.4f:%d".format(s1, s3, previewBoxAA)
+        val sliderSig = "%.4f:%.4f:%d:%d".format(s1, s3, previewBoxAA, previewNrRadius)
         if ((!synthetic && bayerRenderCount <= 3) || (sliderSig != lastDenoiseSliderSig)) {
             lastDenoiseSliderSig = sliderSig
-            android.util.Log.i(TAG, "preview sliders: s1=$s1 s3=$s3 boxAA=$previewBoxAA")
+            android.util.Log.i(TAG, "preview sliders: s1=$s1 s3=$s3 boxAA=$previewBoxAA nrRadius=$previewNrRadius")
         }
 
         bayerShader.drawDemosaic(
@@ -735,6 +756,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             effBitDepth,
             effWhite, effBlackLevel,
             boxAA = previewBoxAA,
+            nrRadius = previewNrRadius,
             wbGains = floatArrayOf(wbGainR, wbGainG, wbGainB),
             colorMat = ccMatrix,
             denoisedTextureId = demosaicDenoisedId,

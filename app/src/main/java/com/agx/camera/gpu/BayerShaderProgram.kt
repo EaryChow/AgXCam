@@ -62,6 +62,7 @@ class BayerShaderProgram {
     private var dUBayerColorMapLoc = 0
     private var dUBitDepthLoc = 0
     private var dUBoxAaLoc = 0
+    private var dUNrRadiusLoc = 0
     private var dUWbGainsLoc = 0
     private var dUColorMatLoc = 0
     private var dUWhiteLevelLoc = 0
@@ -171,6 +172,7 @@ class BayerShaderProgram {
         dUBayerColorMapLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_bayer_color_map")
         dUBitDepthLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_bit_depth")
         dUBoxAaLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_box_aa")
+        dUNrRadiusLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_nr_radius")
         dUWbGainsLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_wb_gains")
         dUColorMatLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_color_mat")
         dUWhiteLevelLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_white_level")
@@ -383,6 +385,7 @@ class BayerShaderProgram {
         bitDepth: Int,
         whiteLevel: Float, blackLevel: Float,
         boxAA: Int = 4,
+        nrRadius: Int = 4,
         wbGains: FloatArray = floatArrayOf(1f, 1f, 1f),
         colorMat: FloatArray? = null,
         denoisedTextureId: Int = 0,
@@ -435,6 +438,7 @@ class BayerShaderProgram {
             bayerColorMap[2], bayerColorMap[3])
         GLES20.glUniform1i(dUBitDepthLoc, bitDepth)
         GLES20.glUniform1i(dUBoxAaLoc, boxAA)
+        GLES20.glUniform1i(dUNrRadiusLoc, nrRadius)
         GLES20.glUniform3f(dUWbGainsLoc, wbGains[0], wbGains[1], wbGains[2])
         GLES20.glUniformMatrix3fv(dUColorMatLoc, 1, true, colorMat ?: COLOR_IDENTITY_9, 0)
         GLES20.glUniform1f(dUWhiteLevelLoc, whiteLevel)
@@ -788,6 +792,7 @@ uniform ivec4 u_black_level_pattern;
 uniform ivec4 u_bayer_color_map;
 uniform int u_bit_depth;
 uniform int u_box_aa;
+uniform int u_nr_radius;
 uniform float u_white_level;
 uniform float u_black_level;
 uniform vec3 u_wb_gains;
@@ -852,7 +857,12 @@ ivec2 mappedOutCoord(ivec2 clampedCoord) {
 // own coordinate (no fixed grid, no grid->sensor collapse).  Ring 1 is the
 // 8 step-2 neighbours (radius 2); ring 2 adds the 4 axis-neighbours at step 4
 // so the S3 mean spans roughly 9x9 sensor pixels -- wider than the box-AA
-// average, which is what keeps S3 visually effective on top of it.
+// average, which is what keeps S3 visually effective on top of it.  At the
+// preview strengths where the demosaic box stays 4x4 (S1-only / weak S3)
+// u_nr_radius drops to 2, using only the 4 step-2 axis neighbours -- the box
+// supplies the averaging there, so the coarser trim keeps the preview
+// responsive without raising sigma; capture and all box<4 draws keep the full
+// 12-tap form, bit-identical to the shipped filter.
 //   S1 = defect correction: centre outside the neighbour range AND beyond
 //        band -> replaced by the α-trimmed neighbour mean.
 //   S3 = blend toward that same trimmed mean.  The trim (drop 1 max & 1 min)
@@ -863,18 +873,36 @@ float sampleSameColorNR(ivec2 coord) {
     float c = sampleBayerRaw(coord);
     if (u_dp_strength <= 0.0 && u_raw_nr_strength <= 0.0) return c;
 
-    float nE  = sampleBayerRaw(coord + ivec2( 2, 0));
-    float nW  = sampleBayerRaw(coord + ivec2(-2, 0));
-    float nN  = sampleBayerRaw(coord + ivec2( 0,-2));
-    float nS  = sampleBayerRaw(coord + ivec2( 0, 2));
-    float nNE = sampleBayerRaw(coord + ivec2( 2,-2));
-    float nNW = sampleBayerRaw(coord + ivec2(-2,-2));
-    float nSE = sampleBayerRaw(coord + ivec2( 2, 2));
-    float nSW = sampleBayerRaw(coord + ivec2(-2, 2));
-    float nEE = sampleBayerRaw(coord + ivec2( 4, 0));
-    float nWW = sampleBayerRaw(coord + ivec2(-4, 0));
-    float nNN = sampleBayerRaw(coord + ivec2( 0,-4));
-    float nSS = sampleBayerRaw(coord + ivec2( 0, 4));
+    float sumN, mn, mx, iavg;
+    if (u_nr_radius >= 4) {
+        float nE  = sampleBayerRaw(coord + ivec2( 2, 0));
+        float nW  = sampleBayerRaw(coord + ivec2(-2, 0));
+        float nN  = sampleBayerRaw(coord + ivec2( 0,-2));
+        float nS  = sampleBayerRaw(coord + ivec2( 0, 2));
+        float nNE = sampleBayerRaw(coord + ivec2( 2,-2));
+        float nNW = sampleBayerRaw(coord + ivec2(-2,-2));
+        float nSE = sampleBayerRaw(coord + ivec2( 2, 2));
+        float nSW = sampleBayerRaw(coord + ivec2(-2, 2));
+        float nEE = sampleBayerRaw(coord + ivec2( 4, 0));
+        float nWW = sampleBayerRaw(coord + ivec2(-4, 0));
+        float nNN = sampleBayerRaw(coord + ivec2( 0,-4));
+        float nSS = sampleBayerRaw(coord + ivec2( 0, 4));
+        sumN = nE + nW + nN + nS + nNE + nNW + nSE + nSW + nEE + nWW + nNN + nSS;
+        mn = min(min(min(min(min(nE, nW), min(nN, nS)), min(nNE, nNW)), min(nSE, nSW)),
+                 min(min(nEE, nWW), min(nNN, nSS)));
+        mx = max(max(max(max(max(nE, nW), max(nN, nS)), max(nNE, nNW)), max(nSE, nSW)),
+                 max(max(nEE, nWW), max(nNN, nSS)));
+        iavg = (sumN - mn - mx) * (1.0 / 10.0);
+    } else {
+        float nE  = sampleBayerRaw(coord + ivec2( 2, 0));
+        float nW  = sampleBayerRaw(coord + ivec2(-2, 0));
+        float nN  = sampleBayerRaw(coord + ivec2( 0,-2));
+        float nS  = sampleBayerRaw(coord + ivec2( 0, 2));
+        sumN = nE + nW + nN + nS;
+        mn = min(min(nE, nW), min(nN, nS));
+        mx = max(max(nE, nW), max(nN, nS));
+        iavg = (sumN - mn - mx) * (1.0 / 2.0);
+    }
 
     // Bright-pixel guard (clip-safe but mean-stable): the sensor clips in the
     // Bayer domain, so a genuinely chromatic centre must NOT be dragged down
@@ -887,13 +915,6 @@ float sampleSameColorNR(ivec2 coord) {
     // S1 (DPC) is unchanged and never skipped.  Non-clip pixels are
     // bit-identical to the baseline filter.
     float clipLo = max(u_white_level - u_black_level, 1.0);
-
-    float sumN = nE + nW + nN + nS + nNE + nNW + nSE + nSW + nEE + nWW + nNN + nSS;
-    float mn = min(min(min(min(min(nE, nW), min(nN, nS)), min(nNE, nNW)), min(nSE, nSW)),
-                  min(min(nEE, nWW), min(nNN, nSS)));
-    float mx = max(max(max(max(max(nE, nW), max(nN, nS)), max(nNE, nNW)), max(nSE, nSW)),
-                  max(max(nEE, nWW), max(nNN, nSS)));
-    float iavg = (sumN - mn - mx) * (1.0 / 10.0);
 
     float sigma = sqrt(max(u_iso_model_a * max(iavg, 0.0) + u_iso_model_b, 1.0));
     float band = max((0.1 + 0.3 * u_dp_strength) * max(iavg, 0.0),
@@ -1038,16 +1059,23 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
     if (u_box_aa <= 1) {
         return demosaicAt(ivec2(clampSensor(sensorUV)), lsSensorUV);
     }
-    vec2 base = floor(sensorUV) - vec2(1.0);
+    // Honor the real box size: the inline S1/S3 filter carries the averaging
+    // when the sliders are up, so the box can step down to 2x2/3x3 and keep
+    // identical output at box==4 (classic 4x4 window, bit-for-bit).  Smaller
+    // boxes centre the same window on the pixel (even boxes start at the
+    // pixel, odd boxes at the left/top neighbour).
+    int bx = clamp(u_box_aa, 2, 4);
+    float baseOff = (bx >= 3) ? -1.0 : 0.0;
+    vec2 base = floor(sensorUV) + vec2(baseOff);
     vec3 sum = vec3(0.0);
-    for (int dy = 0; dy < 4; dy++) {
-        for (int dx = 0; dx < 4; dx++) {
+    for (int dy = 0; dy < bx; dy++) {
+        for (int dx = 0; dx < bx; dx++) {
             ivec2 c = clamp(ivec2(base) + ivec2(dx, dy), ivec2(0), ivec2(u_sensorSize) - ivec2(1));
-            vec2 lsC = lsSensorUV + vec2(float(dx) - 1.0, float(dy) - 1.0);
+            vec2 lsC = lsSensorUV + vec2(float(dx) + baseOff, float(dy) + baseOff);
             sum += demosaicAt(c, lsC);
         }
     }
-    return sum * (1.0 / 16.0);
+    return sum * (1.0 / float(bx * bx));
 }
 
 // Simplified low-side (negative) compensation: lift the

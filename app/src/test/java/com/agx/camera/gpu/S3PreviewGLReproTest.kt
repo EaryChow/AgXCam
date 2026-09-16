@@ -59,27 +59,40 @@ class S3PreviewGLReproTest {
         return max((raw - SENSOR_BLACK).toFloat(), 0f)
     }
 
-    /** Literal GL sampleSameColorNR (12-tap a-trim + DPC guard + S3 clip blend). */
-    private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float): Float {
+    /** Literal GL sampleSameColorNR (12-tap a-trim + DPC guard + S3 clip blend).
+     *  At nrRadius<4 mirrors the preview-only 4-tap (step-2 axis neighbours)
+     *  used when the demosaic box stays 4x4; capture/box<4 keep the 12-tap. */
+    private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float, nrRadius: Int = 4): Float {
         val c = sensorVal(v, sx, sy)
         if (s1 <= 0f && s3 <= 0f) return c
-        val nE = sensorVal(v, sx + 2, sy)
-        val nW = sensorVal(v, sx - 2, sy)
-        val nN = sensorVal(v, sx, sy - 2)
-        val nS = sensorVal(v, sx, sy + 2)
-        val nNE = sensorVal(v, sx + 2, sy - 2)
-        val nNW = sensorVal(v, sx - 2, sy - 2)
-        val nSE = sensorVal(v, sx + 2, sy + 2)
-        val nSW = sensorVal(v, sx - 2, sy + 2)
-        val nEE = sensorVal(v, sx + 4, sy)
-        val nWW = sensorVal(v, sx - 4, sy)
-        val nNN = sensorVal(v, sx, sy - 4)
-        val nSS = sensorVal(v, sx, sy + 4)
-        val mn = min(min(min(min(min(nE, nW), min(nN, nS)), min(nNE, nNW)), min(nSE, nSW)),
-            min(min(nEE, nWW), min(nNN, nSS)))
-        val mx = max(max(max(max(max(nE, nW), max(nN, nS)), max(nNE, nNW)), max(nSE, nSW)),
-            max(max(nEE, nWW), max(nNN, nSS)))
-        val iavg = (nE + nW + nN + nS + nNE + nNW + nSE + nSW + nEE + nWW + nNN + nSS - mn - mx) / 10f
+        val (mn, mx, iavg) = if (nrRadius >= 4) {
+            val nE = sensorVal(v, sx + 2, sy)
+            val nW = sensorVal(v, sx - 2, sy)
+            val nN = sensorVal(v, sx, sy - 2)
+            val nS = sensorVal(v, sx, sy + 2)
+            val nNE = sensorVal(v, sx + 2, sy - 2)
+            val nNW = sensorVal(v, sx - 2, sy - 2)
+            val nSE = sensorVal(v, sx + 2, sy + 2)
+            val nSW = sensorVal(v, sx - 2, sy + 2)
+            val nEE = sensorVal(v, sx + 4, sy)
+            val nWW = sensorVal(v, sx - 4, sy)
+            val nNN = sensorVal(v, sx, sy - 4)
+            val nSS = sensorVal(v, sx, sy + 4)
+            val smn = min(min(min(min(min(nE, nW), min(nN, nS)), min(nNE, nNW)), min(nSE, nSW)),
+                min(min(nEE, nWW), min(nNN, nSS)))
+            val smx = max(max(max(max(max(nE, nW), max(nN, nS)), max(nNE, nNW)), max(nSE, nSW)),
+                max(max(nEE, nWW), max(nNN, nSS)))
+            Triple(smn, smx,
+                (nE + nW + nN + nS + nNE + nNW + nSE + nSW + nEE + nWW + nNN + nSS - smn - smx) / 10f)
+        } else {
+            val nE = sensorVal(v, sx + 2, sy)
+            val nW = sensorVal(v, sx - 2, sy)
+            val nN = sensorVal(v, sx, sy - 2)
+            val nS = sensorVal(v, sx, sy + 2)
+            val smn = min(min(nE, nW), min(nN, nS))
+            val smx = max(max(nE, nW), max(nN, nS))
+            Triple(smn, smx, (nE + nW + nN + nS - smn - smx) / 2f)
+        }
         val sigma = sqrt(max(isoA * max(iavg, 0f) + isoB, 1f))
         val band = max((0.1f + 0.3f * s1) * max(iavg, 0f), (2f + 2f * s1) * sigma)
         var center = c
@@ -161,6 +174,25 @@ class S3PreviewGLReproTest {
     // device never uses the mosaic — the demosaic's inline per-sample
     // sampleSameColorNR carries S1/S3 instead.
     private fun packActive(v: View): Boolean = v.k <= 2f
+
+    // Host-side boxAA gate (live PreviewRenderer::renderBayerFrame): every
+    // slider increase must keep every band's sigma non-increasing (monotone
+    // walk probed across k=1.5..8) AND at-or-below the zero-slider baseline.
+    // box3 is strictly dominated (4x4+4-tap is cheaper and smoother than
+    // 3x3+12-tap), so the mapping emits only 4 (weak/mid s3, 4-tap ring) and
+    // 2 (strong s3 >= 0.6, full 12-tap ring).  The pack regime (k<=2) uses its
+    // own shader, boxAA=4 throughout.  Keep in sync with the host.
+    private fun previewBoxAA(v: View, s1: Float, s3: Float): Int {
+        if (v.k <= 2f) return 4
+        return if (s3 >= 0.7f) 2 else 4
+    }
+
+    /** Box-AA base offset: even boxes (2) start at the pixel, odd/large (3,4)
+     *  start at the left/top neighbour — mirrors demosaicBilinear. */
+    private fun boxBase(sv: Float, box: Int): Int {
+        val baseOff = if (box >= 3) -1 else 0
+        return kotlin.math.floor(sv).toInt() + baseOff
+    }
 
     /** Centered crop sub-window (zoom-in): cropW/H sensor cells on a fixed grid. */
     private fun zoomInCrop(cropW: Int, cropH: Int): FloatArray {
@@ -318,35 +350,43 @@ class S3PreviewGLReproTest {
         return acc
     }
 
+    /** Host-side σ-gate mirror of previewNrRadius: the inline neighbourhood
+     *  filter drops to the 4-tap ring only where the demosaic box stays 4x4
+     *  (the box supplies the steady averaging there); the 2x2 box keeps the
+     *  full 12-tap.  Keep in sync with the host. */
+    private fun previewNrRadius(boxAA: Int): Int = if (boxAA == 4) 2 else 4
+
     /** One denoisedSampleRaw tap: mosaic (pack active, k<16) or inline (stale pack). */
     private fun demosaicSample(
         scene: ShortArray, pack: FloatArray, v: View,
         s1: Float, s3: Float, cx0: Int, cy0: Int,
-        shiftX: Int = 0, shiftY: Int = 0
+        shiftX: Int = 0, shiftY: Int = 0,
+        nrRadius: Int = 4
     ): Float {
         val cx = cx0.coerceIn(0, SW - 1)
         val cy = cy0.coerceIn(0, SH - 1)
         if (packActive(v)) {
             return mosaicRead(pack, v, cx, cy, shiftX, shiftY)
         }
-        return sameColorNR(scene, cx, cy, s1, s3)
+        return sameColorNR(scene, cx, cy, s1, s3, nrRadius)
     }
 
     /** demosaicAt: the standard 9-tap reconstruction (box-AA 4x4 host path). */
     private fun demosaicAtRGB(
         scene: ShortArray, pack: FloatArray, v: View,
         s1: Float, s3: Float, cellX: Int, cellY: Int,
-        shiftX: Int = 0, shiftY: Int = 0
+        shiftX: Int = 0, shiftY: Int = 0,
+        nrRadius: Int = 4
     ): FloatArray {
-        val center = demosaicSample(scene, pack, v, s1, s3, cellX, cellY, shiftX, shiftY)
-        val nN = demosaicSample(scene, pack, v, s1, s3, cellX, cellY - 1, shiftX, shiftY)
-        val nS = demosaicSample(scene, pack, v, s1, s3, cellX, cellY + 1, shiftX, shiftY)
-        val nW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY, shiftX, shiftY)
-        val nE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY, shiftX, shiftY)
-        val nNW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY - 1, shiftX, shiftY)
-        val nNE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY - 1, shiftX, shiftY)
-        val nSW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY + 1, shiftX, shiftY)
-        val nSE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY + 1, shiftX, shiftY)
+        val center = demosaicSample(scene, pack, v, s1, s3, cellX, cellY, shiftX, shiftY, nrRadius)
+        val nN = demosaicSample(scene, pack, v, s1, s3, cellX, cellY - 1, shiftX, shiftY, nrRadius)
+        val nS = demosaicSample(scene, pack, v, s1, s3, cellX, cellY + 1, shiftX, shiftY, nrRadius)
+        val nW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY, shiftX, shiftY, nrRadius)
+        val nE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY, shiftX, shiftY, nrRadius)
+        val nNW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY - 1, shiftX, shiftY, nrRadius)
+        val nNE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY - 1, shiftX, shiftY, nrRadius)
+        val nSW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY + 1, shiftX, shiftY, nrRadius)
+        val nSE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY + 1, shiftX, shiftY, nrRadius)
         val color = BA_COLOR_MAP[phase(cellX, cellY)]
         return if (color == 0) {
             floatArrayOf(center, (nW + nE + nN + nS) * 0.25f, (nNW + nNE + nSW + nSE) * 0.25f)
@@ -365,7 +405,9 @@ class S3PreviewGLReproTest {
     /** demosaicBilinear + main(): render the full output image (all paths). */
     private fun renderPreview(
         scene: ShortArray, pack: FloatArray, v: View, s1: Float, s3: Float,
-        shiftX: Int = 0, shiftY: Int = 0
+        shiftX: Int = 0, shiftY: Int = 0,
+        boxAA: Int = previewBoxAA(v, s1, s3),
+        nrRadius: Int = previewNrRadius(boxAA)
     ): Array<FloatArray> {
         val GX = v.gridW
         val GY = v.gridH
@@ -375,19 +417,21 @@ class S3PreviewGLReproTest {
             val aY = (gy + 0.5f) / GY
             val svX = v.crop[0] + v.T(aX, 0) * v.crop[2]
             val svY = v.crop[1] + v.T(aY, 1) * v.crop[3]
-            val baseX = kotlin.math.floor(svX).toInt() - 1
-            val baseY = kotlin.math.floor(svY).toInt() - 1
+            val baseX = boxBase(svX, boxAA)
+            val baseY = boxBase(svY, boxAA)
             var sum = floatArrayOf(0f, 0f, 0f)
-            for (dy in 0 until 4) for (dx in 0 until 4) {
+            for (dy in 0 until boxAA) for (dx in 0 until boxAA) {
                 val c = demosaicAtRGB(
                     scene, pack, v, s1, s3,
                     (baseX + dx).coerceIn(0, SW - 1),
                     (baseY + dy).coerceIn(0, SH - 1),
-                    shiftX, shiftY
+                    shiftX, shiftY,
+                    nrRadius = nrRadius
                 )
                 sum[0] += c[0]; sum[1] += c[1]; sum[2] += c[2]
             }
-            sum[0] *= 1f / 16f; sum[1] *= 1f / 16f; sum[2] *= 1f / 16f
+            val div = 1f / (boxAA * boxAA)
+            sum[0] *= div; sum[1] *= div; sum[2] *= div
             val fin = composeMain(sum)
             out[gy][gx * 3] = fin[0]; out[gy][gx * 3 + 1] = fin[1]; out[gy][gx * 3 + 2] = fin[2]
         }
@@ -421,7 +465,9 @@ class S3PreviewGLReproTest {
         scene: ShortArray, pack: FloatArray, v: View, s1: Float, s3: Float,
         wbR: Float, wbB: Float,
         colorMat: FloatArray? = null,
-        shiftX: Int = 0, shiftY: Int = 0
+        shiftX: Int = 0, shiftY: Int = 0,
+        boxAA: Int = previewBoxAA(v, s1, s3),
+        nrRadius: Int = previewNrRadius(boxAA)
     ): Array<FloatArray> {
         val GX = v.gridW
         val GY = v.gridH
@@ -431,19 +477,21 @@ class S3PreviewGLReproTest {
             val aY = (gy + 0.5f) / GY
             val svX = v.crop[0] + v.T(aX, 0) * v.crop[2]
             val svY = v.crop[1] + v.T(aY, 1) * v.crop[3]
-            val baseX = kotlin.math.floor(svX).toInt() - 1
-            val baseY = kotlin.math.floor(svY).toInt() - 1
+            val baseX = boxBase(svX, boxAA)
+            val baseY = boxBase(svY, boxAA)
             var sum = floatArrayOf(0f, 0f, 0f)
-            for (dy in 0 until 4) for (dx in 0 until 4) {
+            for (dy in 0 until boxAA) for (dx in 0 until boxAA) {
                 val c = demosaicAtRGB(
                     scene, pack, v, s1, s3,
                     (baseX + dx).coerceIn(0, SW - 1),
                     (baseY + dy).coerceIn(0, SH - 1),
-                    shiftX, shiftY
+                    shiftX, shiftY,
+                    nrRadius = nrRadius
                 )
                 sum[0] += c[0]; sum[1] += c[1]; sum[2] += c[2]
             }
-            sum[0] *= 1f / 16f; sum[1] *= 1f / 16f; sum[2] *= 1f / 16f
+            val div = 1f / (boxAA * boxAA)
+            sum[0] *= div; sum[1] *= div; sum[2] *= div
             // linearRGB *= u_wb_gains
             var r = sum[0] * wbR
             var g = sum[1]
@@ -518,6 +566,20 @@ class S3PreviewGLReproTest {
         return floatArrayOf(mr / mrCnt, sd)
     }
 
+    /** Standard deviation of one output band (R=0, G=1, B=2) over the interior. */
+    private fun bandSD(img: Array<FloatArray>, v: View, channel: Int): Float {
+        val interior = interiorMask(v)
+        var s = 0f
+        var s2 = 0f
+        var n = 0
+        for ((gx, gy) in interior) {
+            val x = img[gy][gx * 3 + channel]
+            s += x; s2 += x * x; n++
+        }
+        val mean = s / n
+        return sqrt(max(s2 / n - mean * mean, 0f))
+    }
+
     // ------------------------------------------------------------------
     // Tests
     // ------------------------------------------------------------------
@@ -588,6 +650,215 @@ class S3PreviewGLReproTest {
     }
 
     private class Config(val grid: Int, val cropW: Int, val cropH: Int, val mirror: Boolean)
+
+    /**
+     * Box-AA reduction acceptance gate (the host's inline S1/S3 cost fix):
+     * with the reduced boxAA active (the k>2 inline regime, box 2x2 while
+     * the sliders are up), each output band's sigma must stay AT OR BELOW the
+     * zero-slider baseline (boxAA=4).  Any single band above baseline rejects
+     * the boxAA step-down — the demosaic's effective averaging must never get
+     * weaker than baseline at any slider strength.
+     */
+    @Test
+    fun inlineReducedBoxKeepsBandsBounded() {
+        val scene = buildFlatNoise(11, 460f, 28f)
+        // k>2 regimes where the inline path is live and the box reduction acts.
+        val configs = listOf(
+            Config(24, 96, 96, false),    // k=4  back
+            Config(24, 96, 96, true),     // k=4  front
+            Config(12, 96, 96, false),    // k=8  back
+            Config(12, 96, 96, true)      // k=8  front
+        )
+        // Slider grid covering every boxAA branch and the s3=0.7 edge (the only
+        // remaining threshold), plus the S1-only s3=0 branch, crossed with S1.
+        val s3s = listOf(0f, 0.1f, 0.15f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f)
+        val s1s = listOf(0.0f, 0.3f, 0.6f)
+        val strengths = mutableListOf<FloatArray>()
+        for (s3 in s3s) for (s1 in s1s) strengths.add(floatArrayOf(s1, s3))
+        val failures = StringBuilder()
+        println("== inline reduced-box per-band sigma vs zero-slider baseline ==")
+        for (cfg in configs) {
+            val v = View(cfg.grid, cfg.grid, cfg.mirror, true, floatArrayOf(0f, 0f, 96f, 96f))
+            val back = if (cfg.mirror) "mirrorX" else "back  "
+            val pack0 = buildPackGL(scene, v, 0f, 0f)
+            val img0 = renderPreview(scene, pack0, v, 0f, 0f)   // baseline: box 4
+            val sd0 = FloatArray(3) { bandSD(img0, v, it) }
+            println("k=%.2f %s  baseline sigma R=%.3f G=%.3f B=%.3f".format(v.k, back, sd0[0], sd0[1], sd0[2]))
+            for (s in strengths) {
+                val pack = buildPackGL(scene, v, s[0], s[1])
+                val img = renderPreview(scene, pack, v, s[0], s[1])
+                val box = previewBoxAA(v, s[0], s[1])
+                val sd = FloatArray(3) { bandSD(img, v, it) }
+                println(
+                    "  s1=%.1f s3=%.1f box=%d  R=%.3f G=%.3f B=%.3f".format(
+                        s[0], s[1], box, sd[0], sd[1], sd[2]
+                    )
+                )
+                val name = charArrayOf('R', 'G', 'B')
+                for (ch in 0..2) {
+                    if (sd[ch] > sd0[ch] + 0.001f) {
+                        val msg = "band %s sigma %.3f > baseline %.3f at grid=%d mirror=%s s1=%.1f s3=%.1f box=%d\n"
+                            .format(name[ch], sd[ch], sd0[ch], cfg.grid, cfg.mirror, s[0], s[1], box)
+                        failures.append(msg)
+                        println("  !! " + msg.trim())
+                    }
+                }
+            }
+        }
+        assertTrue(
+            "boxAA step-down broke the per-band sigma gate:\n" + failures,
+            failures.isEmpty()
+        )
+    }
+
+    /**
+     * Diagnostic: which box size is safely reachable at every (s1, s3)?
+     * Prints, for each combo, the smallest box whose per-band sigma stays at
+     * or below the zero-slider baseline (the strict gate).  This is the table
+     * that the host previewBoxAA mapping must be derived from — print-only,
+     * no assertion.
+     */
+    @Test
+    fun probeBoxAAWindow() {
+        val scene = buildFlatNoise(17, 460f, 28f)
+        for (grid in listOf(24, 12)) {   // k=4 and k=8
+            val v = View(grid, grid, false, true, floatArrayOf(0f, 0f, 96f, 96f))
+            val pack0 = buildPackGL(scene, v, 0f, 0f)
+            val img0 = renderPreview(scene, pack0, v, 0f, 0f)
+            val sd0 = FloatArray(3) { bandSD(img0, v, it) }
+            val tol = 0.001f
+            println("== probe k=%.1f: smallest box keeping every band sigma <= baseline (+%s) ==".format(v.k, tol))
+            println("s1   s3   box4pass box3pass box2pass box1pass  -> minBox (maxRatio over boxes)")
+            for (i1 in 0..10) for (i3 in 0..10) {
+                val s1 = i1 / 10f
+                val s3 = i3 / 10f
+                if (s1 <= 0f && s3 <= 0f) continue
+                val pack = buildPackGL(scene, v, s1, s3)
+                val pass = BooleanArray(4)
+                var maxRatio = 0f
+                for (bi in 1..4) {   // box = bi
+                    // box4 pairs with the 4-tap ring exactly as shipped; boxes
+                    // 1-3 keep the full 12-tap ring.
+                    val img = renderPreview(scene, pack, v, s1, s3, boxAA = bi, nrRadius = if (bi == 4) 2 else 4)
+                    var ok = true
+                    for (ch in 0..2) {
+                        val sd = bandSD(img, v, ch)
+                        maxRatio = max(maxRatio, sd / sd0[ch])
+                        if (sd > sd0[ch] + tol) ok = false
+                    }
+                    pass[bi - 1] = ok
+                }
+                val minBox = if (pass[0]) 1 else if (pass[1]) 2 else if (pass[2]) 3 else 4
+                println("%.1f %.1f   %s   %s   %s   %s   -> %d  (maxRatio=%.2f)".format(
+                    s1, s3, pass[3], pass[2], pass[1], pass[0], minBox, maxRatio
+                ))
+            }
+        }
+    }
+
+    /**
+     * Diagnostic: monotonicity of per-band sigma as each slider rises, at
+     * every zoom level (pack regime k<=2 AND inline regime k>2).  Walks s3 at
+     * fixed s1 and flags any band that pops above the previous (weaker)
+     * slider value.  Silently also home the first step (s3 from baseline, so
+     * the origin bound is covered too).  `variant`: "shipped" uses the host
+     * mapping; "box4" forces boxAA=4 + 4-tap ring at every strength (the box
+     * keeps carrying the averaging, so sigma should move strictly down).
+     * Print-only.
+     */
+    @Test
+    fun probeSliderMonotonicity() {
+        val scene = buildFlatNoise(29, 460f, 28f)
+        val tol = 0.001f
+        val s1s = listOf(0f, 0.3f, 0.6f)
+        val s3s = listOf(0f, 0.1f, 0.15f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f)
+        runMonotoneWalk(scene, tol, s1s, s3s, listOf("shipped", "box4"), mirror = false, gateTol = null)
+    }
+
+    private fun runMonotoneWalk(
+        scene: ShortArray, tol: Float, s1s: List<Float>, s3s: List<Float>,
+        variants: List<String>,
+        mirror: Boolean,
+        gateTol: Float?
+    ) {
+        val failures = StringBuilder()
+        for (grid in listOf(64, 48, 32, 24, 12)) {   // k=1.5, 2, 3, 4, 8
+            val v = View(grid, grid, mirror, true, floatArrayOf(0f, 0f, 96f, 96f))
+            val pack0 = buildPackGL(scene, v, 0f, 0f)
+            val sd0 = FloatArray(3) { bandSD(renderPreview(scene, pack0, v, 0f, 0f), v, it) }
+            println("== probe monotonicity k=%.2f (grid=%d) %s baseline R=%.4f G=%.4f B=%.4f ==".format(
+                v.k, grid, if (mirror) "mirror" else "back", sd0[0], sd0[1], sd0[2]))
+            for (variant in variants) {
+                val pops = StringBuilder()
+                println("-- variant=$variant")
+                for (s1 in s1s) {
+                    var prev = sd0.copyOf()
+                    for (s3 in s3s) {
+                        if (s1 <= 0f && s3 <= 0f) continue
+                        val pack = buildPackGL(scene, v, s1, s3)
+                        val box = when (variant) {
+                            "box4" -> 4
+                            else -> previewBoxAA(v, s1, s3)
+                        }
+                        val nrR = when (variant) {
+                            "box4" -> 2
+                            else -> previewNrRadius(box)
+                        }
+                        val img = renderPreview(scene, pack, v, s1, s3, boxAA = box, nrRadius = nrR)
+                        val sd = FloatArray(3) { bandSD(img, v, it) }
+                        var up = ""
+                        var anyUp = false
+                        for (ch in 0..2) {
+                            if (sd[ch] > prev[ch] + tol) {
+                                up += " %c:%.4f>%.4f".format(charArrayOf('R', 'G', 'B')[ch], sd[ch], prev[ch])
+                                anyUp = true
+                            }
+                        }
+                        if (gateTol != null) {
+                            val gUp = (0..2).any { sd[it] > prev[it] + gateTol }
+                            if (gUp) {
+                                failures.append(
+                                    "k=%.2f %s s1=%.1f s3=%.1f box=%d nr=%d  R=%.4f(G:%.4f) G=%.4f(G:%.4f) B=%.4f(G:%.4f)\n".format(
+                                        v.k, if (mirror) "mirror" else "back", s1, s3, box, nrR,
+                                        sd[0], prev[0], sd[1], prev[1], sd[2], prev[2]
+                                    )
+                                )
+                            }
+                        }
+                        if (anyUp) pops.append("k=%.2f s1=%.1f s3=%.1f box=%d nr=%d%s\n".format(v.k, s1, s3, box, nrR, up))
+                        println("  s1=%.2f s3=%.2f box=%d nr=%d  R=%.4f G=%.4f B=%.4f%s".format(
+                            s1, s3, box, nrR, sd[0], sd[1], sd[2], if (anyUp) "  <-- POP" else ""))
+                        prev = sd
+                    }
+                }
+                println("variant=$variant pops: " + (if (pops.isEmpty()) "none" else pops.toString().trim()))
+            }
+        }
+        if (gateTol != null) {
+            assertTrue(
+                "slider increase popped a band's sigma above the previous value (violates monotone denoising):\n" + failures,
+                failures.isEmpty()
+            )
+        }
+    }
+
+    /**
+     * Acceptance gate for "increasing S1/S3 must always reduce noise, at every
+     * zoom level": walk each slider upward along the shipped mapping and
+     * require every band's sigma to never rise above the previous (weaker)
+     * slider value.  Runs both back/mirror configs across k=1.5..8 (pack and
+     * inline regimes).  tol is set just above the >0.0005 pops the old box3
+     * step-down produced, so those fail while sub-0.0003 rounding (see the
+     * k=2 G band) passes.
+     */
+    @Test
+    fun slidersNeverRaiseSigmaAtAnyZoom() {
+        val scene = buildFlatNoise(29, 460f, 28f)
+        val s1s = listOf(0f, 0.3f, 0.6f)
+        val s3s = listOf(0f, 0.1f, 0.15f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f)
+        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("shipped"), mirror = false, gateTol = 0.0004f)
+        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("shipped"), mirror = true, gateTol = 0.0004f)
+    }
 
     // ------------------------------------------------------------------
     // Device-failure-mode probe: which single deltas actually produce a
