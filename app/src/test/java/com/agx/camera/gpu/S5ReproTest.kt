@@ -453,7 +453,7 @@ class S5ReproTest {
     private val isoB = (0.33f * iso / 100f) * (0.33f * iso / 100f)
     private val bayerDiag = StringBuilder()
 
-    /** Mirror of GLSL sampleSameColorNR (S1 DPC + S3 α-trim blend). */
+    /** Mirror of GLSL sampleSameColorNR (S1 DPC + S3 α-trim blend + directional I_D). */
     private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float): Float {
         if (s1 <= 0f && s3 <= 0f) return sensorVal(v, sx, sy)
         val c = sensorVal(v, sx, sy)
@@ -477,12 +477,45 @@ class S5ReproTest {
         val iavg = (sumN - mn - mx) / 10f
         val sigma = kotlin.math.sqrt(max(isoA * max(iavg, 0f) + isoB, 1f))
         val band = max((0.1f + 0.3f * s1) * max(iavg, 0f), (2f + 2f * s1) * sigma)
+
+        // Directional I_D: smoothest direction pair from the same-color lattice
+        val aH = (nE + nW) * 0.5f
+        val aV = (nN + nS) * 0.5f
+        val a45 = (nNE + nSW) * 0.5f
+        val a135 = (nSE + nNW) * 0.5f
+        val dH = abs(nE - nW)
+        val dV = abs(nN - nS)
+        val d45 = abs(nNE - nSW)
+        val d135 = abs(nSE - nNW)
+        var iDir = aH
+        if (dV < dH && dV <= d45 && dV <= d135) iDir = aV
+        else if (d45 < dH && d45 <= dV && d45 <= d135) iDir = a45
+        else if (d135 < dH && d135 <= dV && d135 <= d45) iDir = a135
+
         val corrStrength = max(s1, 0.85f * s3)
         var center = c
         if (corrStrength > 0f) {
             val hot = (c > mx) && (c - iavg) > band
             val cold = (c < mn) && (iavg - c) > band
-            if (hot || cold) center = c + (iavg - c) * corrStrength
+            if (hot || cold) {
+                // M2-style isolation gate (mirror of the GLSL): each axis
+                // neighbour deviation vs alpha-trim4 of its 3 adjacent taps +
+                // centre.  A genuine single-pixel defect is trimmed out of the
+                // neighbour windows → maxNb ~ noise → still corrected; a thin
+                // line/feature shows up as a large maxNb → correction blocked.
+                val tN = nNN + nNE + nNW + c - minOf(minOf(nNN, nNE), minOf(nNW, c)) - maxOf(maxOf(nNN, nNE), maxOf(nNW, c))
+                val devN = abs(nN - tN * 0.5f)
+                val tS = nSS + nSE + nSW + c - minOf(minOf(nSS, nSE), minOf(nSW, c)) - maxOf(maxOf(nSS, nSE), maxOf(nSW, c))
+                val devS = abs(nS - tS * 0.5f)
+                val tE = nEE + nNE + nSE + c - minOf(minOf(nEE, nNE), minOf(nSE, c)) - maxOf(maxOf(nEE, nNE), maxOf(nSE, c))
+                val devE = abs(nE - tE * 0.5f)
+                val tW = nWW + nNW + nSW + c - minOf(minOf(nWW, nNW), minOf(nSW, c)) - maxOf(maxOf(nWW, nNW), maxOf(nSW, c))
+                val devW = abs(nW - tW * 0.5f)
+                val maxNb = maxOf(maxOf(devN, devS), maxOf(devE, devW))
+                if (abs(c - iavg) > 6.0f * maxNb) {
+                    center = c + (iDir - c) * max(corrStrength, 0.98f)
+                }
+            }
         }
         val clipLo = (SENSOR_CLIP - SENSOR_BLACK).toFloat()
         return if (c < clipLo) center + (iavg - center) * (0.98f * s3) else center
@@ -1705,5 +1738,147 @@ class S5ReproTest {
                 ratio <= 1.05f
             )
         }
+    }
+
+    /**
+     * Reproduce the capture-path chromatic thin-line bug:
+     * Under per-channel lens dispersion (CA), a thin dark ink line on bright
+     * paper appears at different x-positions per CFA phase.  For phases where
+     * the line pixel is isolated (all 12 same-color 2px-lattice neighbours on
+     * bright paper), the inline sampleSameColorNR's cold correction fires and
+     * pulls the dark pixel toward the bright iavg — erasing the line in that
+     * channel.  Other phases see aligned dark neighbours along the line and
+     * are preserved → chromatic artefact.
+     *
+     * The directional I_D fix corrects toward the smoothest direction's
+     * average.  For phases where the line aligns with a lattice direction,
+     * I_D lands on the line (dark) → inside [mn, mx] → correction blocked.
+     * For all-bright phases, I_D is also bright (same as baseline) → line
+     * partially preserved via reduced correction target.
+     */
+    @Test
+    fun chromaticThinLineCaptureDirFix() {
+        val base = 800f
+        val ink = 30f
+        val sigma = 5f
+        val rnd = Random(42)
+        val sensor = ShortArray(SENSOR_W * SENSOR_H)
+
+        // Thin diagonal line: slope ~5 (steep enough that 2px lattice misses it)
+        fun lineX(y: Int, caShift: Int): Float {
+            val t = (y - 60) / 40f
+            return (88 + t * 8 + caShift).toFloat()
+        }
+
+        for (y in 0 until SENSOR_H) {
+            for (x in 0 until SENSOR_W) {
+                val phase = sensorPhase(x, y)
+                val caShift = when (phase) {
+                    0 -> 1   // R: shifted right by 1 px (CA)
+                    3 -> -1  // B: shifted left by 1 px
+                    else -> 0 // G: centered
+                }
+                val lx = lineX(y, caShift)
+                val onLine = abs(x - lx) < 1.5f && y in 60..100
+                val noise = (rnd.nextFloat() - 0.5f) * 2f * sigma
+                val raw = (if (onLine) ink else base) + noise
+                sensor[y * SENSOR_W + x] = (raw + SENSOR_BLACK).roundToInt()
+                    .coerceIn(0, SENSOR_CLIP).toShort()
+            }
+        }
+        // Two isolated S13-style single-pixel defects away from the line must
+        // STILL be repaired by s1 under the M2 isolation gate (the gate must
+        // only block corrections where the neighbours themselves deviate).
+        val hotP = intArrayOf(30, 132); val coldP = intArrayOf(150, 132)
+        sensor[hotP[1] * SENSOR_W + hotP[0]] = (SENSOR_BLACK + base + 400f).roundToInt().coerceIn(0, SENSOR_CLIP).toShort()
+        sensor[coldP[1] * SENSOR_W + coldP[0]] = (SENSOR_BLACK + base - 400f).roundToInt().coerceIn(0, SENSOR_CLIP).toShort()
+
+        // Demosaic at 1:1 (boxAA=0): each output = 1 sensor pixel
+        val img0 = demosaicImage(sensor, SENSOR_W, SENSOR_H, 0, 0f, 0f)
+        val img1 = demosaicImage(sensor, SENSOR_W, SENSOR_H, 0, 0.3f, 0f)
+
+        // Sample a 20-pixel segment of the line at y=80 (mid-line)
+        // and measure per-channel luma dip + chroma
+        val segY = 80
+        val lx0 = lineX(segY, 0).roundToInt()
+        var minR0 = 1e9f; var minR1 = 1e9f
+        var minG0 = 1e9f; var minG1 = 1e9f
+        var minB0 = 1e9f; var minB1 = 1e9f
+        val sb = StringBuilder()
+        sb.append("y=$segY x=${lx0 - 10}..${lx0 + 10}:\n")
+        for (dx in -10..10) {
+            val x = lx0 + dx
+            val r0 = img0.at(x, segY, 0); val g0 = img0.at(x, segY, 1); val b0 = img0.at(x, segY, 2)
+            val r1 = img1.at(x, segY, 0); val g1 = img1.at(x, segY, 1); val b1 = img1.at(x, segY, 2)
+            if (r0 < minR0) minR0 = r0; if (r1 < minR1) minR1 = r1
+            if (g0 < minG0) minG0 = g0; if (g1 < minG1) minG1 = g1
+            if (b0 < minB0) minB0 = b0; if (b1 < minB1) minB1 = b1
+            if (dx in -5..5) {
+                sb.append("  x=%+3d  R: %.3f->%.3f  G: %.3f->%.3f  B: %.3f->%.3f\n".format(
+                    dx, r0, r1, g0, g1, b0, b1))
+            }
+        }
+
+        // Chroma at the line midpoint (C1 = R-B, C2 = 0.5(R+B)-G)
+        val c1_0 = img0.at(lx0, segY, 0) - img0.at(lx0, segY, 2)
+        val c2_0 = 0.5f * (img0.at(lx0, segY, 0) + img0.at(lx0, segY, 2)) - img0.at(lx0, segY, 1)
+        val c1_1 = img1.at(lx0, segY, 0) - img1.at(lx0, segY, 2)
+        val c2_1 = 0.5f * (img1.at(lx0, segY, 0) + img1.at(lx0, segY, 2)) - img1.at(lx0, segY, 1)
+
+        // Measure how much each channel was "lifted" (line erased) by s1
+        val rLift = (minR1 - minR0) / max(minR0, 1e-6f)
+        val gLift = (minG1 - minG0) / max(minG0, 1e-6f)
+        val bLift = (minB1 - minB0) / max(minB0, 1e-6f)
+        val maxLift = maxOf(rLift, gLift, bLift)
+        val minLift = minOf(rLift, gLift, bLift)
+        val chromaSpread = maxLift - minLift
+
+        sb.append("\nChannel lift: R=%.1f%% G=%.1f%% B=%.1f%%\n".format(
+            rLift * 100, gLift * 100, bLift * 100))
+        sb.append("Chroma spread (max-min lift): %.1f%%\n".format(chromaSpread * 100))
+        sb.append("Chroma at line: C1: %.4f->%.4f  C2: %.4f->%.4f\n".format(c1_0, c1_1, c2_0, c2_1))
+
+        println("=== chromatic thin-line capture test ===")
+        println("R lift: ${"%.1f".format(rLift * 100)}%  G lift: ${"%.1f".format(gLift * 100)}%  B lift: ${"%.1f".format(bLift * 100)}%")
+        println("Chroma spread: ${"%.1f".format(chromaSpread * 100)}%")
+
+        // The directional fix must reduce chromatic spread vs omni-iavg baseline.
+        // Pre-fix: R gets erased (shifted line) while G/B partially preserved →
+        // chroma spread ~20-50%.  Post-fix: all channels similarly preserved →
+        // spread should be <10%.
+        assertTrue(
+            "s1 must not create excessive chromatic artefact on thin line " +
+                "(chromaSpread=${"%.1f".format(chromaSpread * 100)}% > 15%)",
+            chromaSpread <= 0.15f
+        )
+
+        // The line must remain visible after s1 (at least one channel still
+        // shows a dip).  Average the per-channel min dips.
+        val avgDip0 = (minR0 + minG0 + minB0) / 3f
+        val avgDip1 = (minR1 + minG1 + minB1) / 3f
+        val avgLift = (avgDip1 - avgDip0) / max(avgDip0, 1e-6f)
+        assertTrue(
+            "s1 must not fully erase the line (avgLift=${"%.1f".format(avgLift * 100)}% > 60%)",
+            avgLift <= 0.60f
+        )
+
+        // Isolated defects must still be repaired by s1 under the M2 gate:
+        // the center-channel value at a defect must move back toward the
+        // clean base (repaired), NOT stay at the defect value.
+        val baseNorm = base / (SENSOR_CLIP - SENSOR_BLACK)
+        for ((px, py, isHot) in listOf(Triple(hotP[0], hotP[1], true), Triple(coldP[0], coldP[1], false))) {
+            val ch = BA_COLOR_MAP[sensorPhase(px, py)]
+            val v0 = img0.at(px, py, ch)
+            val v1 = img1.at(px, py, ch)
+            val rawDev = if (isHot) max(v0 - baseNorm, 0f) else max(baseNorm - v0, 0f)
+            val afterDev = if (isHot) max(v1 - baseNorm, 0f) else max(baseNorm - v1, 0f)
+            sb.append("defect@($px,$py) ${if (isHot) "hot" else "cold"} ch$ch: %.3f->%.3f (dev %.3f->%.3f)\n".format(v0, v1, rawDev, afterDev))
+            assertTrue(
+                "s1 must still repair isolated ${if (isHot) "hot" else "cold"} defect at ($px,$py) " +
+                    "(dev ${"%.3f".format(rawDev)} -> ${"%.3f".format(afterDev)}, not reduced to 25%)",
+                afterDev <= rawDev * 0.25f + 0.02f
+            )
+        }
+        java.io.File("build/s1_chromatic_line.txt").writeText(sb.toString())
     }
 }

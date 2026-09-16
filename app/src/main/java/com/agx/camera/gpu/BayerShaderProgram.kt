@@ -873,20 +873,21 @@ float sampleSameColorNR(ivec2 coord) {
     float c = sampleBayerRaw(coord);
     if (u_dp_strength <= 0.0 && u_raw_nr_strength <= 0.0) return c;
 
+    float nE, nW, nN, nS, nNE, nNW, nSE, nSW, nEE, nWW, nNN, nSS;
     float sumN, mn, mx, iavg;
     if (u_nr_radius >= 4) {
-        float nE  = sampleBayerRaw(coord + ivec2( 2, 0));
-        float nW  = sampleBayerRaw(coord + ivec2(-2, 0));
-        float nN  = sampleBayerRaw(coord + ivec2( 0,-2));
-        float nS  = sampleBayerRaw(coord + ivec2( 0, 2));
-        float nNE = sampleBayerRaw(coord + ivec2( 2,-2));
-        float nNW = sampleBayerRaw(coord + ivec2(-2,-2));
-        float nSE = sampleBayerRaw(coord + ivec2( 2, 2));
-        float nSW = sampleBayerRaw(coord + ivec2(-2, 2));
-        float nEE = sampleBayerRaw(coord + ivec2( 4, 0));
-        float nWW = sampleBayerRaw(coord + ivec2(-4, 0));
-        float nNN = sampleBayerRaw(coord + ivec2( 0,-4));
-        float nSS = sampleBayerRaw(coord + ivec2( 0, 4));
+        nE  = sampleBayerRaw(coord + ivec2( 2, 0));
+        nW  = sampleBayerRaw(coord + ivec2(-2, 0));
+        nN  = sampleBayerRaw(coord + ivec2( 0,-2));
+        nS  = sampleBayerRaw(coord + ivec2( 0, 2));
+        nNE = sampleBayerRaw(coord + ivec2( 2,-2));
+        nNW = sampleBayerRaw(coord + ivec2(-2,-2));
+        nSE = sampleBayerRaw(coord + ivec2( 2, 2));
+        nSW = sampleBayerRaw(coord + ivec2(-2, 2));
+        nEE = sampleBayerRaw(coord + ivec2( 4, 0));
+        nWW = sampleBayerRaw(coord + ivec2(-4, 0));
+        nNN = sampleBayerRaw(coord + ivec2( 0,-4));
+        nSS = sampleBayerRaw(coord + ivec2( 0, 4));
         sumN = nE + nW + nN + nS + nNE + nNW + nSE + nSW + nEE + nWW + nNN + nSS;
         mn = min(min(min(min(min(nE, nW), min(nN, nS)), min(nNE, nNW)), min(nSE, nSW)),
                  min(min(nEE, nWW), min(nNN, nSS)));
@@ -894,10 +895,10 @@ float sampleSameColorNR(ivec2 coord) {
                  max(max(nEE, nWW), max(nNN, nSS)));
         iavg = (sumN - mn - mx) * (1.0 / 10.0);
     } else {
-        float nE  = sampleBayerRaw(coord + ivec2( 2, 0));
-        float nW  = sampleBayerRaw(coord + ivec2(-2, 0));
-        float nN  = sampleBayerRaw(coord + ivec2( 0,-2));
-        float nS  = sampleBayerRaw(coord + ivec2( 0, 2));
+        nE  = sampleBayerRaw(coord + ivec2( 2, 0));
+        nW  = sampleBayerRaw(coord + ivec2(-2, 0));
+        nN  = sampleBayerRaw(coord + ivec2( 0,-2));
+        nS  = sampleBayerRaw(coord + ivec2( 0, 2));
         sumN = nE + nW + nN + nS;
         mn = min(min(nE, nW), min(nN, nS));
         mx = max(max(nE, nW), max(nN, nS));
@@ -920,6 +921,28 @@ float sampleSameColorNR(ivec2 coord) {
     float band = max((0.1 + 0.3 * u_dp_strength) * max(iavg, 0.0),
                      (2.0 + 2.0 * u_dp_strength) * sigma);
 
+    // Directional I_D (feature-preserving correction target): 4 direction pairs
+    // from the same-color 2px-lattice.  The smoothest direction (min |e-w|)
+    // follows features, so a dark pixel on a thin line is corrected toward the
+    // along-line value instead of the omni-bright iavg, preserving the line
+    // while still correcting genuine single-pixel defects (all directions
+    // bright -> I_D ≈ iavg -> no change vs baseline).
+    float iDir = iavg;
+    if (u_nr_radius >= 4) {
+        float aH   = (nE + nW) * 0.5;
+        float aV   = (nN + nS) * 0.5;
+        float a45  = (nNE + nSW) * 0.5;
+        float a135 = (nSE + nNW) * 0.5;
+        float dH   = abs(nE - nW);
+        float dV   = abs(nN - nS);
+        float d45  = abs(nNE - nSW);
+        float d135 = abs(nSE - nNW);
+        iDir = aH;
+        if (dV < dH && dV <= d45 && dV <= d135) iDir = aV;
+        else if (d45 < dH && d45 <= dV && d45 <= d135) iDir = a45;
+        else if (d135 < dH && d135 <= dV && d135 <= d45) iDir = a135;
+    }
+
     float corrStrength = max(u_dp_strength, 0.85 * u_raw_nr_strength);
     float applyStrength = max(corrStrength, 0.98);
     float center = c;
@@ -927,7 +950,35 @@ float sampleSameColorNR(ivec2 coord) {
         bool hot = (c > mx) && (c - iavg) > band;
         bool cold = (c < mn) && (iavg - c) > band;
         if (hot || cold) {
-            center = mix(c, iavg, applyStrength);
+            if (u_nr_radius >= 4) {
+                // M2-style isolation gate (the DPC grid chain's "centre deviation
+                // must dominate every neighbour deviation", approximated with the
+                // already-sampled 12-tap window): each axis neighbour's own
+                // deviation is |neighbour - alpha-trim4(its 3 adjacent taps +
+                // centre)|.  The trim drops the centre when it is the local
+                // min/max, so a genuine single-pixel defect never inflates
+                // maxNb (stays at the noise level) and is still corrected;
+                // a thin line/feature shows up as a large maxNb and blocks the
+                // correction, preserving the feature.
+                float tN = nNN + nNE + nNW + c - min(min(nNN, nNE), min(nNW, c))
+                    - max(max(nNN, nNE), max(nNW, c));
+                float devN = abs(nN - tN * 0.5);
+                float tS = nSS + nSE + nSW + c - min(min(nSS, nSE), min(nSW, c))
+                    - max(max(nSS, nSE), max(nSW, c));
+                float devS = abs(nS - tS * 0.5);
+                float tE = nEE + nNE + nSE + c - min(min(nEE, nNE), min(nSE, c))
+                    - max(max(nEE, nNE), max(nSE, c));
+                float devE = abs(nE - tE * 0.5);
+                float tW = nWW + nNW + nSW + c - min(min(nWW, nNW), min(nSW, c))
+                    - max(max(nWW, nNW), max(nSW, c));
+                float devW = abs(nW - tW * 0.5);
+                float maxNb = max(max(devN, devS), max(devE, devW));
+                if (abs(c - iavg) > 6.0 * maxNb) {
+                    center = mix(c, iDir, applyStrength);
+                }
+            } else {
+                center = mix(c, iavg, applyStrength);
+            }
         }
     }
 
@@ -1230,6 +1281,26 @@ float sampleSameColorNR(ivec2 coord) {
     float band = max((0.1 + 0.3 * u_dp_strength) * max(iavg, 0.0),
                      (2.0 + 2.0 * u_dp_strength) * sigma);
 
+    // Directional I_D (feature-preserving correction target): 4 direction pairs
+    // from the same-color 2px-lattice.  The smoothest direction (min |e-w|)
+    // follows features, so a dark pixel on a thin line is corrected toward the
+    // along-line value instead of the omni-bright iavg, preserving the line
+    // while still correcting genuine single-pixel defects (all directions
+    // bright -> I_D ≈ iavg -> no change vs baseline).
+    float iDir = iavg;
+    float aH   = (nE + nW) * 0.5;
+    float aV   = (nN + nS) * 0.5;
+    float a45  = (nNE + nSW) * 0.5;
+    float a135 = (nSE + nNW) * 0.5;
+    float dH   = abs(nE - nW);
+    float dV   = abs(nN - nS);
+    float d45  = abs(nNE - nSW);
+    float d135 = abs(nSE - nNW);
+    iDir = aH;
+    if (dV < dH && dV <= d45 && dV <= d135) iDir = aV;
+    else if (d45 < dH && d45 <= dV && d45 <= d135) iDir = a45;
+    else if (d135 < dH && d135 <= dV && d135 <= d45) iDir = a135;
+
     float corrStrength = max(u_dp_strength, 0.85 * u_raw_nr_strength);
     float applyStrength = max(corrStrength, 0.98);
     float center = c;
@@ -1237,7 +1308,31 @@ float sampleSameColorNR(ivec2 coord) {
         bool hot = (c > mx) && (c - iavg) > band;
         bool cold = (c < mn) && (iavg - c) > band;
         if (hot || cold) {
-            center = mix(c, iavg, applyStrength);
+            // M2-style isolation gate (the DPC grid chain's "centre deviation
+            // must dominate every neighbour deviation", approximated with the
+            // already-sampled 12-tap window): each axis neighbour's own
+            // deviation is |neighbour - alpha-trim4(its 3 adjacent taps +
+            // centre)|.  The trim drops the centre when it is the local
+            // min/max, so a genuine single-pixel defect never inflates
+            // maxNb (stays at the noise level) and is still corrected;
+            // a thin line/feature shows up as a large maxNb and blocks the
+            // correction, preserving the feature.
+            float tN = nNN + nNE + nNW + c - min(min(nNN, nNE), min(nNW, c))
+                - max(max(nNN, nNE), max(nNW, c));
+            float devN = abs(nN - tN * 0.5);
+            float tS = nSS + nSE + nSW + c - min(min(nSS, nSE), min(nSW, c))
+                - max(max(nSS, nSE), max(nSW, c));
+            float devS = abs(nS - tS * 0.5);
+            float tE = nEE + nNE + nSE + c - min(min(nEE, nNE), min(nSE, c))
+                - max(max(nEE, nNE), max(nSE, c));
+            float devE = abs(nE - tE * 0.5);
+            float tW = nWW + nNW + nSW + c - min(min(nWW, nNW), min(nSW, c))
+                - max(max(nWW, nNW), max(nSW, c));
+            float devW = abs(nW - tW * 0.5);
+            float maxNb = max(max(devN, devS), max(devE, devW));
+            if (abs(c - iavg) > 6.0 * maxNb) {
+                center = mix(c, iDir, applyStrength);
+            }
         }
     }
 

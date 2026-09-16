@@ -59,7 +59,7 @@ class S3PreviewGLReproTest {
         return max((raw - SENSOR_BLACK).toFloat(), 0f)
     }
 
-    /** Literal GL sampleSameColorNR (12-tap a-trim + DPC guard + S3 clip blend).
+    /** Literal GL sampleSameColorNR (12-tap a-trim + DPC guard + S3 clip blend + directional I_D).
      *  At nrRadius<4 mirrors the preview-only 4-tap (step-2 axis neighbours)
      *  used when the demosaic box stays 4x4; capture/box<4 keep the 12-tap. */
     private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float, nrRadius: Int = 4): Float {
@@ -95,11 +95,71 @@ class S3PreviewGLReproTest {
         }
         val sigma = sqrt(max(isoA * max(iavg, 0f) + isoB, 1f))
         val band = max((0.1f + 0.3f * s1) * max(iavg, 0f), (2f + 2f * s1) * sigma)
+
+        // Directional I_D: smoothest direction pair (12-tap path only)
+        var iDir = iavg
+        if (nrRadius >= 4) {
+            val nE = sensorVal(v, sx + 2, sy)
+            val nW = sensorVal(v, sx - 2, sy)
+            val nN = sensorVal(v, sx, sy - 2)
+            val nS = sensorVal(v, sx, sy + 2)
+            val nNE = sensorVal(v, sx + 2, sy - 2)
+            val nNW = sensorVal(v, sx - 2, sy - 2)
+            val nSE = sensorVal(v, sx + 2, sy + 2)
+            val nSW = sensorVal(v, sx - 2, sy + 2)
+            val aH = (nE + nW) * 0.5f
+            val aV = (nN + nS) * 0.5f
+            val a45 = (nNE + nSW) * 0.5f
+            val a135 = (nSE + nNW) * 0.5f
+            val dH = abs(nE - nW)
+            val dV = abs(nN - nS)
+            val d45 = abs(nNE - nSW)
+            val d135 = abs(nSE - nNW)
+            iDir = aH
+            if (dV < dH && dV <= d45 && dV <= d135) iDir = aV
+            else if (d45 < dH && d45 <= dV && d45 <= d135) iDir = a45
+            else if (d135 < dH && d135 <= dV && d135 <= d45) iDir = a135
+        }
+
         var center = c
         if (max(s1, 0.85f * s3) > 0f) {
             val hot = (c > mx) && (c - iavg) > band
             val cold = (c < mn) && (iavg - c) > band
-            if (hot || cold) center = c + (iavg - c) * max(max(s1, 0.85f * s3), 0.98f)
+            if (hot || cold) {
+                if (nrRadius >= 4) {
+                    // M2-style isolation gate (mirror of the GLSL): each axis
+                    // neighbour deviation vs alpha-trim4 of its 3 adjacent taps +
+                    // centre.  A genuine single-pixel defect is trimmed out of the
+                    // neighbour windows → maxNb ~ noise → still corrected; a thin
+                    // line/feature shows up as a large maxNb → correction blocked.
+                    val nE = sensorVal(v, sx + 2, sy)
+                    val nW = sensorVal(v, sx - 2, sy)
+                    val nN = sensorVal(v, sx, sy - 2)
+                    val nS = sensorVal(v, sx, sy + 2)
+                    val nNE = sensorVal(v, sx + 2, sy - 2)
+                    val nNW = sensorVal(v, sx - 2, sy - 2)
+                    val nSE = sensorVal(v, sx + 2, sy + 2)
+                    val nSW = sensorVal(v, sx - 2, sy + 2)
+                    val nEE = sensorVal(v, sx + 4, sy)
+                    val nWW = sensorVal(v, sx - 4, sy)
+                    val nNN = sensorVal(v, sx, sy - 4)
+                    val nSS = sensorVal(v, sx, sy + 4)
+                    val tN = nNN + nNE + nNW + c - minOf(minOf(nNN, nNE), minOf(nNW, c)) - maxOf(maxOf(nNN, nNE), maxOf(nNW, c))
+                    val devN = abs(nN - tN * 0.5f)
+                    val tS = nSS + nSE + nSW + c - minOf(minOf(nSS, nSE), minOf(nSW, c)) - maxOf(maxOf(nSS, nSE), maxOf(nSW, c))
+                    val devS = abs(nS - tS * 0.5f)
+                    val tE = nEE + nNE + nSE + c - minOf(minOf(nEE, nNE), minOf(nSE, c)) - maxOf(maxOf(nEE, nNE), maxOf(nSE, c))
+                    val devE = abs(nE - tE * 0.5f)
+                    val tW = nWW + nNW + nSW + c - minOf(minOf(nWW, nNW), minOf(nSW, c)) - maxOf(maxOf(nWW, nNW), maxOf(nSW, c))
+                    val devW = abs(nW - tW * 0.5f)
+                    val maxNb = maxOf(maxOf(devN, devS), maxOf(devE, devW))
+                    if (abs(c - iavg) > 6.0f * maxNb) {
+                        center = c + (iDir - c) * max(max(s1, 0.85f * s3), 0.98f)
+                    }
+                } else {
+                    center = c + (iavg - c) * max(max(s1, 0.85f * s3), 0.98f)
+                }
+            }
         }
         return if (c < CLIP_SCALAR) center + (iavg - center) * (0.98f * s3) else center
     }
