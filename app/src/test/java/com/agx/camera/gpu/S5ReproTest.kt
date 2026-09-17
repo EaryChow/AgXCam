@@ -453,6 +453,34 @@ class S5ReproTest {
     private val isoB = (0.33f * iso / 100f) * (0.33f * iso / 100f)
     private val bayerDiag = StringBuilder()
 
+    /** 2px same-color-lattice cell mean (mirror of GLSL coarseCellMeanAt). */
+    private fun coarseCellMean(v: ShortArray, cellX: Int, cellY: Int): Float {
+        val nCellsX = SENSOR_W / 2
+        val nCellsY = SENSOR_H / 2
+        val ccx = cellX.coerceIn(0, nCellsX - 1)
+        val ccy = cellY.coerceIn(0, nCellsY - 1)
+        val s0 = 2 * ccx
+        val s1 = 2 * ccy
+        return (sensorVal(v, s0, s1) + sensorVal(v, s0 + 1, s1) +
+            sensorVal(v, s0, s1 + 1) + sensorVal(v, s0 + 1, s1 + 1)) * 0.25f
+    }
+
+    /** Max |neighbour cell mean - centre cell mean| over the 3x3 cell ring
+     *  (mirror of GLSL coarseDevAt). */
+    private fun coarseDev(v: ShortArray, sx: Int, sy: Int): Float {
+        val nCellsX = SENSOR_W / 2
+        val nCellsY = SENSOR_H / 2
+        val cx = (sx / 2).coerceIn(0, nCellsX - 1)
+        val cy = (sy / 2).coerceIn(0, nCellsY - 1)
+        val center = coarseCellMean(v, cx, cy)
+        var m = 0f
+        for (dy in -1..1) for (dx in -1..1) {
+            if (dx == 0 && dy == 0) continue
+            m = max(m, abs(coarseCellMean(v, cx + dx, cy + dy) - center))
+        }
+        return m
+    }
+
     /** Mirror of GLSL sampleSameColorNR (S1 DPC + S3 α-trim blend + directional I_D). */
     private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float): Float {
         if (s1 <= 0f && s3 <= 0f) return sensorVal(v, sx, sy)
@@ -492,33 +520,62 @@ class S5ReproTest {
         else if (d45 < dH && d45 <= dV && d45 <= d135) iDir = a45
         else if (d135 < dH && d135 <= dV && d135 <= d45) iDir = a135
 
+        // M2-style structure measure (mirror of the GLSL), hoisted so the S3
+        // blend can share it with the S1 defect gate.
+        val tN = nNN + nNE + nNW + c - minOf(minOf(nNN, nNE), minOf(nNW, c)) - maxOf(maxOf(nNN, nNE), maxOf(nNW, c))
+        val devN = abs(nN - tN * 0.5f)
+        val tS = nSS + nSE + nSW + c - minOf(minOf(nSS, nSE), minOf(nSW, c)) - maxOf(maxOf(nSS, nSE), maxOf(nSW, c))
+        val devS = abs(nS - tS * 0.5f)
+        val tE = nEE + nNE + nSE + c - minOf(minOf(nEE, nNE), minOf(nSE, c)) - maxOf(maxOf(nEE, nNE), maxOf(nSE, c))
+        val devE = abs(nE - tE * 0.5f)
+        val tW = nWW + nNW + nSW + c - minOf(minOf(nWW, nNW), minOf(nSW, c)) - maxOf(maxOf(nWW, nNW), maxOf(nSW, c))
+        val devW = abs(nW - tW * 0.5f)
+        val maxNb = maxOf(maxOf(devN, devS), maxOf(devE, devW))
+        val minDev = minOf(devN, devS, devE, devW)
+
         val corrStrength = max(s1, 0.85f * s3)
         var center = c
         if (corrStrength > 0f) {
             val hot = (c > mx) && (c - iavg) > band
             val cold = (c < mn) && (iavg - c) > band
             if (hot || cold) {
-                // M2-style isolation gate (mirror of the GLSL): each axis
-                // neighbour deviation vs alpha-trim4 of its 3 adjacent taps +
-                // centre.  A genuine single-pixel defect is trimmed out of the
-                // neighbour windows → maxNb ~ noise → still corrected; a thin
-                // line/feature shows up as a large maxNb → correction blocked.
-                val tN = nNN + nNE + nNW + c - minOf(minOf(nNN, nNE), minOf(nNW, c)) - maxOf(maxOf(nNN, nNE), maxOf(nNW, c))
-                val devN = abs(nN - tN * 0.5f)
-                val tS = nSS + nSE + nSW + c - minOf(minOf(nSS, nSE), minOf(nSW, c)) - maxOf(maxOf(nSS, nSE), maxOf(nSW, c))
-                val devS = abs(nS - tS * 0.5f)
-                val tE = nEE + nNE + nSE + c - minOf(minOf(nEE, nNE), minOf(nSE, c)) - maxOf(maxOf(nEE, nNE), maxOf(nSE, c))
-                val devE = abs(nE - tE * 0.5f)
-                val tW = nWW + nNW + nSW + c - minOf(minOf(nWW, nNW), minOf(nSW, c)) - maxOf(maxOf(nWW, nNW), maxOf(nSW, c))
-                val devW = abs(nW - tW * 0.5f)
-                val maxNb = maxOf(maxOf(devN, devS), maxOf(devE, devW))
                 if (abs(c - iavg) > 6.0f * maxNb) {
                     center = c + (iDir - c) * max(corrStrength, 0.98f)
                 }
             }
         }
         val clipLo = (SENSOR_CLIP - SENSOR_BLACK).toFloat()
-        return if (c < clipLo) center + (iavg - center) * (0.98f * s3) else center
+        // Similarity-weighted (bilateral) S3 blend — mirror of the GLSL.
+        // maxNb gates the window (flat <= 6*iso-model sigma keeps the robust
+        // α-trim pull, bit-identical to the baseline S3, so the noisy scene
+        // cannot pop the monotonicity gate); a structure > 6*sigma uses the
+        // minDev-keyed window that protects lines.  See the GLSL for the
+        // full rationale.
+        var bavg = iavg
+        val sg = max(sigma, 6.0f * minDev)
+        if (maxNb <= 6.0f * sigma) {
+            // Regional directional flat pull (shipped, synced with the demosaic
+            // and pack GLSL copies): omega = clamp(coarseDev/maxNb - 1.5, 0, 1)
+            // blends toward the along-feature iDir.  Noise keeps omega=0
+            // (bit-identical to the baseline S3); wide-area texture preserves.
+            val ratio = if (maxNb > 1e-6f) coarseDev(v, sx, sy) / maxNb else 2f
+            val omega = ((ratio - 1.5f) / 1.0f).coerceIn(0f, 1f)
+            bavg = iavg + (iDir - iavg) * omega
+        } else {
+            val tau = 2.5f * sg
+            val invTau = 1f / tau
+            var wsum = 0f
+            bavg = 0f
+            fun tapW(t: Float) {
+                val w = (1f - max(abs(t - center) - tau, 0f) * invTau).coerceIn(0f, 1f)
+                bavg += w * t
+                wsum += w
+            }
+            tapW(nE); tapW(nW); tapW(nN); tapW(nS); tapW(nNE); tapW(nNW)
+            tapW(nSE); tapW(nSW); tapW(nEE); tapW(nWW); tapW(nNN); tapW(nSS)
+            if (wsum > 0f) bavg /= wsum else bavg = center
+        }
+        return if (c < clipLo) center + (bavg - center) * (0.98f * s3) else center
     }
 
     /** CPU mirror of the preview demosaic (GLSB demosaicBilinear + main()). */
@@ -1796,6 +1853,7 @@ class S5ReproTest {
         // Demosaic at 1:1 (boxAA=0): each output = 1 sensor pixel
         val img0 = demosaicImage(sensor, SENSOR_W, SENSOR_H, 0, 0f, 0f)
         val img1 = demosaicImage(sensor, SENSOR_W, SENSOR_H, 0, 0.3f, 0f)
+        val img3 = demosaicImage(sensor, SENSOR_W, SENSOR_H, 0, 0.3f, 0.3f)
 
         // Sample a 20-pixel segment of the line at y=80 (mid-line)
         // and measure per-channel luma dip + chroma
@@ -1804,18 +1862,21 @@ class S5ReproTest {
         var minR0 = 1e9f; var minR1 = 1e9f
         var minG0 = 1e9f; var minG1 = 1e9f
         var minB0 = 1e9f; var minB1 = 1e9f
+        var minR3 = 1e9f; var minG3 = 1e9f; var minB3 = 1e9f
         val sb = StringBuilder()
         sb.append("y=$segY x=${lx0 - 10}..${lx0 + 10}:\n")
         for (dx in -10..10) {
             val x = lx0 + dx
             val r0 = img0.at(x, segY, 0); val g0 = img0.at(x, segY, 1); val b0 = img0.at(x, segY, 2)
             val r1 = img1.at(x, segY, 0); val g1 = img1.at(x, segY, 1); val b1 = img1.at(x, segY, 2)
+            val r3 = img3.at(x, segY, 0); val g3 = img3.at(x, segY, 1); val b3 = img3.at(x, segY, 2)
             if (r0 < minR0) minR0 = r0; if (r1 < minR1) minR1 = r1
             if (g0 < minG0) minG0 = g0; if (g1 < minG1) minG1 = g1
             if (b0 < minB0) minB0 = b0; if (b1 < minB1) minB1 = b1
+            if (r3 < minR3) minR3 = r3; if (g3 < minG3) minG3 = g3; if (b3 < minB3) minB3 = b3
             if (dx in -5..5) {
-                sb.append("  x=%+3d  R: %.3f->%.3f  G: %.3f->%.3f  B: %.3f->%.3f\n".format(
-                    dx, r0, r1, g0, g1, b0, b1))
+                sb.append("  x=%+3d  R: %.3f->%.3f->%.3f  G: %.3f->%.3f->%.3f  B: %.3f->%.3f->%.3f\n".format(
+                    dx, r0, r1, r3, g0, g1, g3, b0, b1, b3))
             }
         }
 
@@ -1860,6 +1921,18 @@ class S5ReproTest {
         assertTrue(
             "s1 must not fully erase the line (avgLift=${"%.1f".format(avgLift * 100)}% > 60%)",
             avgLift <= 0.60f
+        )
+
+        // S3 (structure-adaptive) must NOT erase the thin line: the wide 12-tap
+        // pull is scaled down where maxNb >> sigma (the line), so turning S3 on
+        // alongside S1 must keep the line dip nearly as deep as S1 alone.
+        val avgDip3 = (minR3 + minG3 + minB3) / 3f
+        val s3Lift = (avgDip3 - avgDip1) / max(avgDip1, 1e-6f)
+        sb.append("\nS3(0.3) lift vs S1-only: %.1f%% (avgDip1=%.3f avgDip3=%.3f)\n".format(
+            s3Lift * 100, avgDip1, avgDip3))
+        assertTrue(
+            "S3 must not smear the thin line beyond S1's lift (s3Lift=${"%.1f".format(s3Lift * 100)}% > 35%)",
+            s3Lift <= 0.35f
         )
 
         // Isolated defects must still be repaired by s1 under the M2 gate:

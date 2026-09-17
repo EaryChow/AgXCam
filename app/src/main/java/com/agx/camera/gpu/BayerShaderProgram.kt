@@ -63,6 +63,7 @@ class BayerShaderProgram {
     private var dUBitDepthLoc = 0
     private var dUBoxAaLoc = 0
     private var dUNrRadiusLoc = 0
+    private var dUBoxBlendLoc = 0
     private var dUWbGainsLoc = 0
     private var dUColorMatLoc = 0
     private var dUWhiteLevelLoc = 0
@@ -173,6 +174,7 @@ class BayerShaderProgram {
         dUBitDepthLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_bit_depth")
         dUBoxAaLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_box_aa")
         dUNrRadiusLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_nr_radius")
+        dUBoxBlendLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_box_blend")
         dUWbGainsLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_wb_gains")
         dUColorMatLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_color_mat")
         dUWhiteLevelLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_white_level")
@@ -386,6 +388,7 @@ class BayerShaderProgram {
         whiteLevel: Float, blackLevel: Float,
         boxAA: Int = 4,
         nrRadius: Int = 4,
+        boxBlend: Float = 0f,
         wbGains: FloatArray = floatArrayOf(1f, 1f, 1f),
         colorMat: FloatArray? = null,
         denoisedTextureId: Int = 0,
@@ -439,6 +442,7 @@ class BayerShaderProgram {
         GLES20.glUniform1i(dUBitDepthLoc, bitDepth)
         GLES20.glUniform1i(dUBoxAaLoc, boxAA)
         GLES20.glUniform1i(dUNrRadiusLoc, nrRadius)
+        GLES20.glUniform1f(dUBoxBlendLoc, boxBlend)
         GLES20.glUniform3f(dUWbGainsLoc, wbGains[0], wbGains[1], wbGains[2])
         GLES20.glUniformMatrix3fv(dUColorMatLoc, 1, true, colorMat ?: COLOR_IDENTITY_9, 0)
         GLES20.glUniform1f(dUWhiteLevelLoc, whiteLevel)
@@ -793,6 +797,7 @@ uniform ivec4 u_bayer_color_map;
 uniform int u_bit_depth;
 uniform int u_box_aa;
 uniform int u_nr_radius;
+uniform float u_box_blend;
 uniform float u_white_level;
 uniform float u_black_level;
 uniform vec3 u_wb_gains;
@@ -869,13 +874,47 @@ ivec2 mappedOutCoord(ivec2 clampedCoord) {
 //        is what keeps defective neighbour values from inflating the smoothing
 //        average, and the outlier guard below also engages at high S3 so a hot
 //        centre can't be re-injected by the blending.
-float sampleSameColorNR(ivec2 coord) {
+// Coarse 2px-cell mean/dev helpers backing the regional directional flat pull in
+// sampleSameColorNRRing: the same-color lattice is divided into 2px cells and
+// coarseDevAt measures how much the surrounding 3x3 cell ring deviates from the
+// centre cell.  Pure noise's cell means track each other (coarse/fine ratio
+// p95=1.48 on the monotonicity gate scene), while real texture's cells differ
+// strongly (foliage p50=1.9..3.1).  omega = clamp((coarseDev/maxNb - 1.5), 0, 1)
+// there re-targets the flat-branch pull at the along-feature pair mean iDir; on
+// pure noise omega=0 keeps the α-trim pull bit-identical to the baseline S3
+// (validated by the smooth box walks: mode-3 maxDelta vs shipped == mode-0's,
+// <= 0.00027).
+float coarseCellMeanAt(ivec2 cell) {
+    ivec2 nCells = ivec2(u_sensorSize) / 2;
+    ivec2 cc = clamp(cell, ivec2(0), nCells - ivec2(1));
+    ivec2 s = cc * 2;
+    return (sampleBayerRaw(s) + sampleBayerRaw(s + ivec2(1, 0)) +
+            sampleBayerRaw(s + ivec2(0, 1)) + sampleBayerRaw(s + ivec2(1, 1))) * 0.25;
+}
+
+// Mirror of the probe's coarseDevAt: max absolute difference between the centre
+// 2px cell mean and each of its 8 same-color-lattice neighbour cell means.
+float coarseDevAt(ivec2 coord) {
+    ivec2 nCells = ivec2(u_sensorSize) / 2;
+    ivec2 cell = clamp(coord / 2, ivec2(0), nCells - ivec2(1));
+    float center = coarseCellMeanAt(cell);
+    float m = 0.0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            m = max(m, abs(coarseCellMeanAt(cell + ivec2(dx, dy)) - center));
+        }
+    }
+    return m;
+}
+
+float sampleSameColorNRRing(ivec2 coord, int ring) {
     float c = sampleBayerRaw(coord);
     if (u_dp_strength <= 0.0 && u_raw_nr_strength <= 0.0) return c;
 
     float nE, nW, nN, nS, nNE, nNW, nSE, nSW, nEE, nWW, nNN, nSS;
     float sumN, mn, mx, iavg;
-    if (u_nr_radius >= 4) {
+    if (ring >= 4) {
         nE  = sampleBayerRaw(coord + ivec2( 2, 0));
         nW  = sampleBayerRaw(coord + ivec2(-2, 0));
         nN  = sampleBayerRaw(coord + ivec2( 0,-2));
@@ -928,7 +967,15 @@ float sampleSameColorNR(ivec2 coord) {
     // while still correcting genuine single-pixel defects (all directions
     // bright -> I_D ≈ iavg -> no change vs baseline).
     float iDir = iavg;
-    if (u_nr_radius >= 4) {
+    // M2-style structure measure (S1 defect gate AND the S3 bilateral window).
+    // Each axis neighbour's deviation is
+    // |neighbour - alpha-trim4(its 3 adjacent taps + centre)|.  The trim drops
+    // the centre when it is the local min/max, so a genuine single-pixel
+    // defect never inflates maxNb (stays at the noise level) while a thin
+    // line/edge shows up as a large maxNb.
+    float maxNb = 0.0;
+    float minDev = 0.0;
+    if (ring >= 4) {
         float aH   = (nE + nW) * 0.5;
         float aV   = (nN + nS) * 0.5;
         float a45  = (nNE + nSW) * 0.5;
@@ -941,6 +988,21 @@ float sampleSameColorNR(ivec2 coord) {
         if (dV < dH && dV <= d45 && dV <= d135) iDir = aV;
         else if (d45 < dH && d45 <= dV && d45 <= d135) iDir = a45;
         else if (d135 < dH && d135 <= dV && d135 <= d45) iDir = a135;
+
+        float tN = nNN + nNE + nNW + c - min(min(nNN, nNE), min(nNW, c))
+            - max(max(nNN, nNE), max(nNW, c));
+        float devN = abs(nN - tN * 0.5);
+        float tS = nSS + nSE + nSW + c - min(min(nSS, nSE), min(nSW, c))
+            - max(max(nSS, nSE), max(nSW, c));
+        float devS = abs(nS - tS * 0.5);
+        float tE = nEE + nNE + nSE + c - min(min(nEE, nNE), min(nSE, c))
+            - max(max(nEE, nNE), max(nSE, c));
+        float devE = abs(nE - tE * 0.5);
+        float tW = nWW + nNW + nSW + c - min(min(nWW, nNW), min(nSW, c))
+            - max(max(nWW, nNW), max(nSW, c));
+        float devW = abs(nW - tW * 0.5);
+        maxNb = max(max(devN, devS), max(devE, devW));
+        minDev = min(min(devN, devS), min(devE, devW));
     }
 
     float corrStrength = max(u_dp_strength, 0.85 * u_raw_nr_strength);
@@ -950,29 +1012,7 @@ float sampleSameColorNR(ivec2 coord) {
         bool hot = (c > mx) && (c - iavg) > band;
         bool cold = (c < mn) && (iavg - c) > band;
         if (hot || cold) {
-            if (u_nr_radius >= 4) {
-                // M2-style isolation gate (the DPC grid chain's "centre deviation
-                // must dominate every neighbour deviation", approximated with the
-                // already-sampled 12-tap window): each axis neighbour's own
-                // deviation is |neighbour - alpha-trim4(its 3 adjacent taps +
-                // centre)|.  The trim drops the centre when it is the local
-                // min/max, so a genuine single-pixel defect never inflates
-                // maxNb (stays at the noise level) and is still corrected;
-                // a thin line/feature shows up as a large maxNb and blocks the
-                // correction, preserving the feature.
-                float tN = nNN + nNE + nNW + c - min(min(nNN, nNE), min(nNW, c))
-                    - max(max(nNN, nNE), max(nNW, c));
-                float devN = abs(nN - tN * 0.5);
-                float tS = nSS + nSE + nSW + c - min(min(nSS, nSE), min(nSW, c))
-                    - max(max(nSS, nSE), max(nSW, c));
-                float devS = abs(nS - tS * 0.5);
-                float tE = nEE + nNE + nSE + c - min(min(nEE, nNE), min(nSE, c))
-                    - max(max(nEE, nNE), max(nSE, c));
-                float devE = abs(nE - tE * 0.5);
-                float tW = nWW + nNW + nSW + c - min(min(nWW, nNW), min(nSW, c))
-                    - max(max(nWW, nNW), max(nSW, c));
-                float devW = abs(nW - tW * 0.5);
-                float maxNb = max(max(devN, devS), max(devE, devW));
+            if (ring >= 4) {
                 if (abs(c - iavg) > 6.0 * maxNb) {
                     center = mix(c, iDir, applyStrength);
                 }
@@ -982,8 +1022,61 @@ float sampleSameColorNR(ivec2 coord) {
         }
     }
 
+    // Similarity-weighted (bilateral) S3 blend.  The fixed 0.98*s3 pull toward
+    // the a-trim iavg was the reviewer regression: across a real edge the wide
+    // +-4px taps straddle the feature, so pulling the centre toward their mean
+    // smears the texture into the "out of focus" look, while flat noise only
+    // gets ~1/10 variance.  maxNb is the structure detector: a flat patch
+    // (maxNb <= 6*iso-model sigma) keeps the robust α-trim pull bit-identical
+    // to the baseline S3 — a noisy flat scene (or low-contrast texture) is
+    // denoised exactly as before, so the monotonicity gate cannot pop, which a
+    // minDev-keyed window would (minDev collapses to ~0 in its low tail,
+    // starving the window).  A real edge/line (maxNb > 6*sigma) switches to a
+    // similarity weight
+    //   w = clamp(1 - max(|tap - centre| - 2.5*sg, 0) * invTau, 0, 1)
+    // (full weight within 2.5*sg of the S1-corrected centre, tapering to zero
+    // by 5*sg), sg = max(iso-model sigma, 6*minDev).  minDev is the SMALLEST of
+    // the four axis deviations; on a feature at least one axis runs ALONG it and
+    // stays at the noise level, so sg stays small and the cross-line taps
+    // (full-contrast away) land outside the window — the line survives the S3
+    // pull.  bavg is the centre-exclusive weighted mean (the centre is blended
+    // back in only by the final mix) and the pull stays at 0.98*s3 — the
+    // weights alone carry the edge protection.  The 4-tap path keeps the
+    // original blend.
+    float bavg = iavg;
+    if (ring >= 4) {
+        float sg = max(sigma, 6.0 * minDev);
+        if (maxNb <= 6.0 * sigma) {
+            // Regional directional flat pull (shipped).  omega=0 (noise) keeps
+            // bavg=iavg, bit-identical to the baseline S3; omega>0 (texture)
+            // pulls toward the along-feature iDir instead of the omni-mean.
+            float coarseRatio = (maxNb > 1e-6) ? coarseDevAt(coord) / maxNb : 2.0;
+            float omega = clamp((coarseRatio - 1.5) * 1.0, 0.0, 1.0);
+            bavg = iavg + (iDir - iavg) * omega;
+        } else {
+            float tau = 2.5 * sg;
+            float invTau = 1.0 / tau;
+            float wsum = 0.0;
+            bavg = 0.0;
+            float w;
+            w = clamp(1.0 - max(abs(nE - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nE; wsum += w;
+            w = clamp(1.0 - max(abs(nW - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nW; wsum += w;
+            w = clamp(1.0 - max(abs(nN - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nN; wsum += w;
+            w = clamp(1.0 - max(abs(nS - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nS; wsum += w;
+            w = clamp(1.0 - max(abs(nNE - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nNE; wsum += w;
+            w = clamp(1.0 - max(abs(nNW - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nNW; wsum += w;
+            w = clamp(1.0 - max(abs(nSE - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nSE; wsum += w;
+            w = clamp(1.0 - max(abs(nSW - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nSW; wsum += w;
+            w = clamp(1.0 - max(abs(nEE - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nEE; wsum += w;
+            w = clamp(1.0 - max(abs(nWW - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nWW; wsum += w;
+            w = clamp(1.0 - max(abs(nNN - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nNN; wsum += w;
+            w = clamp(1.0 - max(abs(nSS - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nSS; wsum += w;
+            if (wsum > 0.0) bavg /= wsum; else bavg = center;
+        }
+    }
+    float s3w = 0.98 * u_raw_nr_strength;
     if (c < clipLo) {
-        return mix(center, iavg, 0.98 * u_raw_nr_strength);
+        return mix(center, bavg, s3w);
     }
     return center;
 }
@@ -994,7 +1087,9 @@ float sampleSameColorNR(ivec2 coord) {
 // one spatial estimate per phase into r/g/b/a of every output texel (which is
 // the whole 4-phase mosaic cell), so the colour plane is selected by channel
 // index — correct at every zoom AND in 1:1 stills, with no guard arithmetic.
-float denoisedSampleRaw(ivec2 sensorCoord) {
+// GLSL requires the ring variant be declared before use, so the wrapper is
+// omitted (dead) and callers invoke the ring form directly.
+float denoisedSampleRawRing(ivec2 sensorCoord, int ring) {
     ivec2 clampedCoord = clamp(sensorCoord, ivec2(0), ivec2(u_sensorSize) - ivec2(1));
     if (u_denoise_active > 0.5) {
         // Extreme resize capture (a whole filter footprint << one output texel,
@@ -1042,10 +1137,10 @@ float denoisedSampleRaw(ivec2 sensorCoord) {
         return den.a;
         }
     }
-    return sampleSameColorNR(clampedCoord);
+    return sampleSameColorNRRing(clampedCoord, ring);
 }
 
-vec3 demosaicAt(ivec2 sensorCoord, vec2 lsSensorUV) {
+vec3 demosaicAt(ivec2 sensorCoord, vec2 lsSensorUV, int ring) {
     int phase = safePhase(sensorCoord.x, sensorCoord.y);
     int color = u_bayer_color_map[phase];
 
@@ -1069,17 +1164,17 @@ vec3 demosaicAt(ivec2 sensorCoord, vec2 lsSensorUV) {
     vec2 lsSW = lsSensorUV + vec2(-1.0,  1.0);
     vec2 lsSE = lsSensorUV + vec2( 1.0,  1.0);
 
-    float nN  = denoisedSampleRaw(nN_coord)  * lsGain(lsN);
-    float nS  = denoisedSampleRaw(nS_coord)  * lsGain(lsS);
-    float nW  = denoisedSampleRaw(nW_coord)  * lsGain(lsW);
-    float nE  = denoisedSampleRaw(nE_coord)  * lsGain(lsE);
+    float nN  = denoisedSampleRawRing(nN_coord, ring)  * lsGain(lsN);
+    float nS  = denoisedSampleRawRing(nS_coord, ring)  * lsGain(lsS);
+    float nW  = denoisedSampleRawRing(nW_coord, ring)  * lsGain(lsW);
+    float nE  = denoisedSampleRawRing(nE_coord, ring)  * lsGain(lsE);
 
-    float nNW = denoisedSampleRaw(nNW_coord) * lsGain(lsNW);
-    float nNE = denoisedSampleRaw(nNE_coord) * lsGain(lsNE);
-    float nSW = denoisedSampleRaw(nSW_coord) * lsGain(lsSW);
-    float nSE = denoisedSampleRaw(nSE_coord) * lsGain(lsSE);
+    float nNW = denoisedSampleRawRing(nNW_coord, ring) * lsGain(lsNW);
+    float nNE = denoisedSampleRawRing(nNE_coord, ring) * lsGain(lsNE);
+    float nSW = denoisedSampleRawRing(nSW_coord, ring) * lsGain(lsSW);
+    float nSE = denoisedSampleRawRing(nSE_coord, ring) * lsGain(lsSE);
 
-    float center = denoisedSampleRaw(sensorCoord) * gain;
+    float center = denoisedSampleRawRing(sensorCoord, ring) * gain;
     float r = 0.0, g = 0.0, b = 0.0;
 
     if (color == 0) {
@@ -1109,7 +1204,7 @@ vec3 demosaicAt(ivec2 sensorCoord, vec2 lsSensorUV) {
 
 vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
     if (u_box_aa <= 1) {
-        return demosaicAt(ivec2(clampSensor(sensorUV)), lsSensorUV);
+        return demosaicAt(ivec2(clampSensor(sensorUV)), lsSensorUV, u_nr_radius);
     }
     // Honor the real box size: the inline S1/S3 filter carries the averaging
     // when the sliders are up, so the box can step down to 2x2/3x3 and keep
@@ -1119,12 +1214,38 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
     int bx = clamp(u_box_aa, 2, 4);
     float baseOff = (bx >= 3) ? -1.0 : 0.0;
     vec2 base = floor(sensorUV) + vec2(baseOff);
+    // Smooth box-AA step (preview k>2): instead of stepping 4x4+nr2 -> 2x2+nr4
+    // at s3>=0.7, blend the two box means by u_box_blend (host =
+    // smoothstep(s3, 0.65, 0.75)).  A continuous box removes the sigma step
+    // that a directional flat pull pops, and at the endpoints the blend is
+    // bit-identical to the plain box (mirror-validated: maxDelta <= 0.00027).
+    float blendW = u_box_blend;
+    if (blendW > 0.0) {
+        vec3 sum4 = vec3(0.0);
+        for (int dy = 0; dy < bx; dy++) {
+            for (int dx = 0; dx < bx; dx++) {
+                ivec2 c = clamp(ivec2(base) + ivec2(dx, dy), ivec2(0), ivec2(u_sensorSize) - ivec2(1));
+                vec2 lsC = lsSensorUV + vec2(float(dx) + baseOff, float(dy) + baseOff);
+                sum4 += demosaicAt(c, lsC, 2);
+            }
+        }
+        vec2 base2 = floor(sensorUV);
+        vec3 sum2 = vec3(0.0);
+        for (int dy = 0; dy < 2; dy++) {
+            for (int dx = 0; dx < 2; dx++) {
+                ivec2 c = clamp(ivec2(base2) + ivec2(dx, dy), ivec2(0), ivec2(u_sensorSize) - ivec2(1));
+                vec2 lsC = lsSensorUV + vec2(float(dx), float(dy));
+                sum2 += demosaicAt(c, lsC, 4);
+            }
+        }
+        return sum4 * ((1.0 - blendW) / float(bx * bx)) + sum2 * (blendW * 0.25);
+    }
     vec3 sum = vec3(0.0);
     for (int dy = 0; dy < bx; dy++) {
         for (int dx = 0; dx < bx; dx++) {
             ivec2 c = clamp(ivec2(base) + ivec2(dx, dy), ivec2(0), ivec2(u_sensorSize) - ivec2(1));
             vec2 lsC = lsSensorUV + vec2(float(dx) + baseOff, float(dy) + baseOff);
-            sum += demosaicAt(c, lsC);
+            sum += demosaicAt(c, lsC, u_nr_radius);
         }
     }
     return sum * (1.0 / float(bx * bx));
@@ -1241,6 +1362,33 @@ float sampleBayerRaw(ivec2 coord) {
     return max(val, 0.0);
 }
 
+// Regional directional flat pull — identical arithmetic to the demosaic copy
+// (u_box_blend aside): omega = clamp(coarseDev/maxNb - 1.5, 0, 1) blends the
+// flat-branch α-trim target toward the along-feature iDir.  Pure noise keeps
+// omega=0 (bit-identical to the baseline S3 pull), foliage texture (coarse/
+// fine ratio p50 = 1.9..3.1) keeps omega>0 and is preserved.
+float coarseCellMeanAt(ivec2 cell) {
+    ivec2 nCells = ivec2(u_sensorSize) / 2;
+    ivec2 cc = clamp(cell, ivec2(0), nCells - ivec2(1));
+    ivec2 s = cc * 2;
+    return (sampleBayerRaw(s) + sampleBayerRaw(s + ivec2(1, 0)) +
+            sampleBayerRaw(s + ivec2(0, 1)) + sampleBayerRaw(s + ivec2(1, 1))) * 0.25;
+}
+
+float coarseDevAt(ivec2 coord) {
+    ivec2 nCells = ivec2(u_sensorSize) / 2;
+    ivec2 cell = clamp(coord / 2, ivec2(0), nCells - ivec2(1));
+    float center = coarseCellMeanAt(cell);
+    float m = 0.0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            m = max(m, abs(coarseCellMeanAt(cell + ivec2(dx, dy)) - center));
+        }
+    }
+    return m;
+}
+
 float sampleSameColorNR(ivec2 coord) {
     float c = sampleBayerRaw(coord);
     if (u_dp_strength <= 0.0 && u_raw_nr_strength <= 0.0) return c;
@@ -1288,18 +1436,43 @@ float sampleSameColorNR(ivec2 coord) {
     // while still correcting genuine single-pixel defects (all directions
     // bright -> I_D ≈ iavg -> no change vs baseline).
     float iDir = iavg;
-    float aH   = (nE + nW) * 0.5;
-    float aV   = (nN + nS) * 0.5;
-    float a45  = (nNE + nSW) * 0.5;
-    float a135 = (nSE + nNW) * 0.5;
-    float dH   = abs(nE - nW);
-    float dV   = abs(nN - nS);
-    float d45  = abs(nNE - nSW);
-    float d135 = abs(nSE - nNW);
-    iDir = aH;
-    if (dV < dH && dV <= d45 && dV <= d135) iDir = aV;
-    else if (d45 < dH && d45 <= dV && d45 <= d135) iDir = a45;
-    else if (d135 < dH && d135 <= dV && d135 <= d45) iDir = a135;
+    // M2-style structure measure (S1 defect gate only; the S3 blend uses its
+    // own bilateral weight below).  Each axis neighbour's deviation is
+    // |neighbour - alpha-trim4(its 3 adjacent taps + centre)|.  The trim drops
+    // the centre when it is the local min/max, so a genuine single-pixel
+    // defect never inflates maxNb (stays at the noise level) while a thin
+    // line/edge shows up as a large maxNb.
+    float maxNb = 0.0;
+    float minDev = 0.0;
+    {
+        float aH   = (nE + nW) * 0.5;
+        float aV   = (nN + nS) * 0.5;
+        float a45  = (nNE + nSW) * 0.5;
+        float a135 = (nSE + nNW) * 0.5;
+        float dH   = abs(nE - nW);
+        float dV   = abs(nN - nS);
+        float d45  = abs(nNE - nSW);
+        float d135 = abs(nSE - nNW);
+        iDir = aH;
+        if (dV < dH && dV <= d45 && dV <= d135) iDir = aV;
+        else if (d45 < dH && d45 <= dV && d45 <= d135) iDir = a45;
+        else if (d135 < dH && d135 <= dV && d135 <= d45) iDir = a135;
+
+        float tN = nNN + nNE + nNW + c - min(min(nNN, nNE), min(nNW, c))
+            - max(max(nNN, nNE), max(nNW, c));
+        float devN = abs(nN - tN * 0.5);
+        float tS = nSS + nSE + nSW + c - min(min(nSS, nSE), min(nSW, c))
+            - max(max(nSS, nSE), max(nSW, c));
+        float devS = abs(nS - tS * 0.5);
+        float tE = nEE + nNE + nSE + c - min(min(nEE, nNE), min(nSE, c))
+            - max(max(nEE, nNE), max(nSE, c));
+        float devE = abs(nE - tE * 0.5);
+        float tW = nWW + nNW + nSW + c - min(min(nWW, nNW), min(nSW, c))
+            - max(max(nWW, nNW), max(nSW, c));
+        float devW = abs(nW - tW * 0.5);
+        maxNb = max(max(devN, devS), max(devE, devW));
+        minDev = min(min(devN, devS), min(devE, devW));
+    }
 
     float corrStrength = max(u_dp_strength, 0.85 * u_raw_nr_strength);
     float applyStrength = max(corrStrength, 0.98);
@@ -1308,36 +1481,53 @@ float sampleSameColorNR(ivec2 coord) {
         bool hot = (c > mx) && (c - iavg) > band;
         bool cold = (c < mn) && (iavg - c) > band;
         if (hot || cold) {
-            // M2-style isolation gate (the DPC grid chain's "centre deviation
-            // must dominate every neighbour deviation", approximated with the
-            // already-sampled 12-tap window): each axis neighbour's own
-            // deviation is |neighbour - alpha-trim4(its 3 adjacent taps +
-            // centre)|.  The trim drops the centre when it is the local
-            // min/max, so a genuine single-pixel defect never inflates
-            // maxNb (stays at the noise level) and is still corrected;
-            // a thin line/feature shows up as a large maxNb and blocks the
-            // correction, preserving the feature.
-            float tN = nNN + nNE + nNW + c - min(min(nNN, nNE), min(nNW, c))
-                - max(max(nNN, nNE), max(nNW, c));
-            float devN = abs(nN - tN * 0.5);
-            float tS = nSS + nSE + nSW + c - min(min(nSS, nSE), min(nSW, c))
-                - max(max(nSS, nSE), max(nSW, c));
-            float devS = abs(nS - tS * 0.5);
-            float tE = nEE + nNE + nSE + c - min(min(nEE, nNE), min(nSE, c))
-                - max(max(nEE, nNE), max(nSE, c));
-            float devE = abs(nE - tE * 0.5);
-            float tW = nWW + nNW + nSW + c - min(min(nWW, nNW), min(nSW, c))
-                - max(max(nWW, nNW), max(nSW, c));
-            float devW = abs(nW - tW * 0.5);
-            float maxNb = max(max(devN, devS), max(devE, devW));
             if (abs(c - iavg) > 6.0 * maxNb) {
                 center = mix(c, iDir, applyStrength);
             }
         }
     }
 
+    // Similarity-weighted (bilateral) S3 blend — same 12-tap structure as the
+    // demosaic copy, unconditional here (S3_PACK never runs the 4-tap path).
+    // See the demosaic copy for the full design rationale: maxNb gates the
+    // window (flat <= 6*iso-model sigma keeps the robust α-trim pull, exactly
+    // like the baseline — so the noisier-than-model monotonicity scene cannot
+    // pop the gate), while a structure > 6*sigma uses the minDev-keyed window
+    // that protects lines.
+    float bavg = iavg;
+    {
+        float sg = max(sigma, 6.0 * minDev);
+        if (maxNb <= 6.0 * sigma) {
+            // Regional directional flat pull (shipped, same as the demosaic
+            // copy): omega=0 on noise keeps bavg=iavg bit-identical to the
+            // baseline S3; omega>0 on wide-area texture keeps the texture.
+            float coarseRatio = (maxNb > 1e-6) ? coarseDevAt(coord) / maxNb : 2.0;
+            float omega = clamp((coarseRatio - 1.5) * 1.0, 0.0, 1.0);
+            bavg = iavg + (iDir - iavg) * omega;
+        } else {
+            float tau = 2.5 * sg;
+            float invTau = 1.0 / tau;
+            float wsum = 0.0;
+            bavg = 0.0;
+            float w;
+            w = clamp(1.0 - max(abs(nE - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nE; wsum += w;
+            w = clamp(1.0 - max(abs(nW - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nW; wsum += w;
+            w = clamp(1.0 - max(abs(nN - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nN; wsum += w;
+            w = clamp(1.0 - max(abs(nS - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nS; wsum += w;
+            w = clamp(1.0 - max(abs(nNE - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nNE; wsum += w;
+            w = clamp(1.0 - max(abs(nNW - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nNW; wsum += w;
+            w = clamp(1.0 - max(abs(nSE - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nSE; wsum += w;
+            w = clamp(1.0 - max(abs(nSW - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nSW; wsum += w;
+            w = clamp(1.0 - max(abs(nEE - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nEE; wsum += w;
+            w = clamp(1.0 - max(abs(nWW - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nWW; wsum += w;
+            w = clamp(1.0 - max(abs(nNN - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nNN; wsum += w;
+            w = clamp(1.0 - max(abs(nSS - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nSS; wsum += w;
+            if (wsum > 0.0) bavg /= wsum; else bavg = center;
+        }
+    }
+    float s3w = 0.98 * u_raw_nr_strength;
     if (c < clipLo) {
-        return mix(center, iavg, 0.98 * u_raw_nr_strength);
+        return mix(center, bavg, s3w);
     }
     return center;
 }

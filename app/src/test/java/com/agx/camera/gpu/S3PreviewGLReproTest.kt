@@ -1,9 +1,11 @@
 package com.agx.camera.gpu
 
 import kotlin.math.abs
+import kotlin.math.PI
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
 import org.junit.Assert.assertTrue
@@ -50,6 +52,16 @@ class S3PreviewGLReproTest {
     private val BA_COLOR_MAP = intArrayOf(0, 1, 1, 2)
     private val CLIP_SCALAR = (SENSOR_CLIP - SENSOR_BLACK).toFloat()
 
+    /** Mask knee: flat-branch "structure vs measured σ̂" threshold multiple (probe-only). */
+    private var maskK = 3.0f
+
+    /** Mode-3 regional flat-pull ω band: ω = clamp((ratio-lo)/(hi-lo),0,1).
+     *  lo=1.5 sits at the pure-noise p95 (1.48) so noise keeps ω≈0 (bit-identical
+     *  iavg pull); hi=2.5 is past the bulk of both foliage and line ratios.
+     *  See the module comment. */
+    private var omegaLo = 1.5f
+    private var omegaHi = 2.5f
+
     private fun phase(x: Int, y: Int): Int = abs(x % 2) + abs(y % 2) * 2
 
     private fun sensorVal(v: ShortArray, x: Int, y: Int): Float {
@@ -59,10 +71,74 @@ class S3PreviewGLReproTest {
         return max((raw - SENSOR_BLACK).toFloat(), 0f)
     }
 
+    /** Mirror of the Stage-2 σ̂ pass (SigmaHatShaderProgram FRAGMENT_SHADER),
+     *  evaluated from the RAW sensor values: per-CFA-phase MAD over the 8
+     *  same-phase neighbouring cells (grid offsets ±1, clamped), mean over
+     *  phases, floored at the ISO-model signal curve.  A masked S3 experiment
+     *  re-keys the flat/structure decision on this measured noise instead of
+     *  the under-reporting model σ. */
+    private fun sigmaHatAt(v: ShortArray, sx: Int, sy: Int): Float {
+        val cellsW = SW / 2
+        val cellsH = SH / 2
+        val cx = (sx / 2).coerceIn(0, cellsW - 1)
+        val cy = (sy / 2).coerceIn(0, cellsH - 1)
+        val nox = intArrayOf(1, -1, 0, 0, 1, -1, 1, -1)
+        val noy = intArrayOf(0, 0, 1, -1, 1, 1, -1, -1)
+        var sig2Total = 0f
+        for (p in 0..3) {
+            val px = p and 1
+            val py = p shr 1
+            val vals = FloatArray(8)
+            for (k in 0..7) {
+                val nx = (cx + nox[k]).coerceIn(0, cellsW - 1)
+                val ny = (cy + noy[k]).coerceIn(0, cellsH - 1)
+                vals[k] = sensorVal(v, 2 * nx + px, 2 * ny + py)
+            }
+            java.util.Arrays.sort(vals)
+            val med = (vals[3] + vals[4]) * 0.5f
+            val devs = FloatArray(8) { k -> abs(vals[k] - med) }
+            java.util.Arrays.sort(devs)
+            val mad = (devs[3] + devs[4]) * 0.5f
+            sig2Total += 2.1981f * mad * mad
+        }
+        val sig2Mean = sig2Total * 0.25f
+        val meanSignal = (sensorVal(v, 2 * cx, 2 * cy) + sensorVal(v, 2 * cx + 1, 2 * cy) +
+            sensorVal(v, 2 * cx, 2 * cy + 1) + sensorVal(v, 2 * cx + 1, 2 * cy + 1)) * 0.25f
+        val floor2 = max(isoA * max(meanSignal, 0f) + isoB, 1.0e-6f)
+        val out2 = max(sig2Mean, floor2)
+        return sqrt(max(out2, 1.0e-6f))
+    }
+
+    /** max |mean(nb cell) − mean(center cell)| over the 8 surrounding cells —
+     *  a coarse (region-level) structure measure: on pure noise it collapses as
+     *  σ/√N and its max-over-8 tail is bounded, on texture it tracks the
+     *  structure that spans blocks. */
+    private fun coarseDevAt(v: ShortArray, sx: Int, sy: Int): Float {
+        val cellsW = SW / 2
+        val cellsH = SH / 2
+        val cx = (sx / 2).coerceIn(0, cellsW - 1)
+        val cy = (sy / 2).coerceIn(0, cellsH - 1)
+        fun cellMean(c: Int, r: Int): Float {
+            val cc = c.coerceIn(0, cellsW - 1)
+            val rr = r.coerceIn(0, cellsH - 1)
+            return (sensorVal(v, 2 * cc, 2 * rr) + sensorVal(v, 2 * cc + 1, 2 * rr) +
+                sensorVal(v, 2 * cc, 2 * rr + 1) + sensorVal(v, 2 * cc + 1, 2 * rr + 1)) * 0.25f
+        }
+        val center = cellMean(cx, cy)
+        var m = 0f
+        for (dy in -1..1) for (dx in -1..1) {
+            if (dx == 0 && dy == 0) continue
+            m = max(m, abs(cellMean(cx + dx, cy + dy) - center))
+        }
+        return m
+    }
+
     /** Literal GL sampleSameColorNR (12-tap a-trim + DPC guard + S3 clip blend + directional I_D).
      *  At nrRadius<4 mirrors the preview-only 4-tap (step-2 axis neighbours)
-     *  used when the demosaic box stays 4x4; capture/box<4 keep the 12-tap. */
-    private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float, nrRadius: Int = 4): Float {
+     *  used when the demosaic box stays 4x4; capture/box<4 keep the 12-tap.
+     *  maskSigma (measurement only, not shipped) re-keys the flat/structure
+     *  threshold on the measured σ̂ so the "noisy region" mask can be probed. */
+    private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float, nrRadius: Int = 4, mode: Int = 0): Float {
         val c = sensorVal(v, sx, sy)
         if (s1 <= 0f && s3 <= 0f) return c
         val (mn, mx, iavg) = if (nrRadius >= 4) {
@@ -98,6 +174,10 @@ class S3PreviewGLReproTest {
 
         // Directional I_D: smoothest direction pair (12-tap path only)
         var iDir = iavg
+        // M2-style structure measure (mirror of the GLSL), hoisted so the S3
+        // blend can share it with the S1 defect gate.
+        var maxNb = 0f
+        var minDev = 0f
         if (nrRadius >= 4) {
             val nE = sensorVal(v, sx + 2, sy)
             val nW = sensorVal(v, sx - 2, sy)
@@ -119,6 +199,21 @@ class S3PreviewGLReproTest {
             if (dV < dH && dV <= d45 && dV <= d135) iDir = aV
             else if (d45 < dH && d45 <= dV && d45 <= d135) iDir = a45
             else if (d135 < dH && d135 <= dV && d135 <= d45) iDir = a135
+
+            val nEE = sensorVal(v, sx + 4, sy)
+            val nWW = sensorVal(v, sx - 4, sy)
+            val nNN = sensorVal(v, sx, sy - 4)
+            val nSS = sensorVal(v, sx, sy + 4)
+            val tN = nNN + nNE + nNW + c - minOf(minOf(nNN, nNE), minOf(nNW, c)) - maxOf(maxOf(nNN, nNE), maxOf(nNW, c))
+            val devN = abs(nN - tN * 0.5f)
+            val tS = nSS + nSE + nSW + c - minOf(minOf(nSS, nSE), minOf(nSW, c)) - maxOf(maxOf(nSS, nSE), maxOf(nSW, c))
+            val devS = abs(nS - tS * 0.5f)
+            val tE = nEE + nNE + nSE + c - minOf(minOf(nEE, nNE), minOf(nSE, c)) - maxOf(maxOf(nEE, nNE), maxOf(nSE, c))
+            val devE = abs(nE - tE * 0.5f)
+            val tW = nWW + nNW + nSW + c - minOf(minOf(nWW, nNW), minOf(nSW, c)) - maxOf(maxOf(nWW, nNW), maxOf(nSW, c))
+            val devW = abs(nW - tW * 0.5f)
+            maxNb = maxOf(maxOf(devN, devS), maxOf(devE, devW))
+            minDev = minOf(devN, devS, devE, devW)
         }
 
         var center = c
@@ -127,32 +222,6 @@ class S3PreviewGLReproTest {
             val cold = (c < mn) && (iavg - c) > band
             if (hot || cold) {
                 if (nrRadius >= 4) {
-                    // M2-style isolation gate (mirror of the GLSL): each axis
-                    // neighbour deviation vs alpha-trim4 of its 3 adjacent taps +
-                    // centre.  A genuine single-pixel defect is trimmed out of the
-                    // neighbour windows → maxNb ~ noise → still corrected; a thin
-                    // line/feature shows up as a large maxNb → correction blocked.
-                    val nE = sensorVal(v, sx + 2, sy)
-                    val nW = sensorVal(v, sx - 2, sy)
-                    val nN = sensorVal(v, sx, sy - 2)
-                    val nS = sensorVal(v, sx, sy + 2)
-                    val nNE = sensorVal(v, sx + 2, sy - 2)
-                    val nNW = sensorVal(v, sx - 2, sy - 2)
-                    val nSE = sensorVal(v, sx + 2, sy + 2)
-                    val nSW = sensorVal(v, sx - 2, sy + 2)
-                    val nEE = sensorVal(v, sx + 4, sy)
-                    val nWW = sensorVal(v, sx - 4, sy)
-                    val nNN = sensorVal(v, sx, sy - 4)
-                    val nSS = sensorVal(v, sx, sy + 4)
-                    val tN = nNN + nNE + nNW + c - minOf(minOf(nNN, nNE), minOf(nNW, c)) - maxOf(maxOf(nNN, nNE), maxOf(nNW, c))
-                    val devN = abs(nN - tN * 0.5f)
-                    val tS = nSS + nSE + nSW + c - minOf(minOf(nSS, nSE), minOf(nSW, c)) - maxOf(maxOf(nSS, nSE), maxOf(nSW, c))
-                    val devS = abs(nS - tS * 0.5f)
-                    val tE = nEE + nNE + nSE + c - minOf(minOf(nEE, nNE), minOf(nSE, c)) - maxOf(maxOf(nEE, nNE), maxOf(nSE, c))
-                    val devE = abs(nE - tE * 0.5f)
-                    val tW = nWW + nNW + nSW + c - minOf(minOf(nWW, nNW), minOf(nSW, c)) - maxOf(maxOf(nWW, nNW), maxOf(nSW, c))
-                    val devW = abs(nW - tW * 0.5f)
-                    val maxNb = maxOf(maxOf(devN, devS), maxOf(devE, devW))
                     if (abs(c - iavg) > 6.0f * maxNb) {
                         center = c + (iDir - c) * max(max(s1, 0.85f * s3), 0.98f)
                     }
@@ -161,7 +230,70 @@ class S3PreviewGLReproTest {
                 }
             }
         }
-        return if (c < CLIP_SCALAR) center + (iavg - center) * (0.98f * s3) else center
+        // Similarity-weighted (bilateral) S3 blend — mirror of the GLSL.
+        // Full weight within 2.5*sigma of the corrected centre, taper to zero
+        // by 5*sigma; the pull stays at 0.98*s3 (weights carry the edge protection).
+        // See the GLSL for rationale.
+        // maxNb is the structure detector: flat noise (maxNb <= 6*sigma_model)
+        // keeps the robust α-trim pull (bit-identical to the baseline S3, so
+        // the monotonicity gate can't pop on the noisy flat scene, where the
+        // minDev window would collapse to ~0 in its low tail and starve the
+        // denoising); a real edge/line (maxNb > 6*sigma_model) switches to the
+        // weight window keyed on sg = max(sigma, 6*minDev), the smallest axis
+        // deviation, which stays at the noise floor along a feature — the
+        // cross-line taps land outside the window and the line is protected.
+        var bavg = iavg
+        if (nrRadius >= 4) {
+            val sg = max(sigma, 6.0f * minDev)
+            val flatLimit = if (mode == 1) maskK * sigmaHatAt(v, sx, sy) else 6.0f * sigma
+            if (maxNb <= flatLimit) {
+                if (mode == 2) {
+                    // Directional flat target (probe): see the module comment —
+                    // dead end: the noise minDev/maxNb tail overlaps a line's
+                    // band, so any ω>0 bleeds onto noise and pops the boxAA step.
+                    val r = if (maxNb > 1e-6f) minDev / maxNb else 1f
+                    val omega = ((0.95f - r) / (0.95f - 0.75f)).coerceIn(0f, 1f)
+                    bavg = iavg + (iDir - iavg) * omega
+                } else if (mode == 3) {
+                    // Regional (coarse/fine) flat target: the ω band slides with
+                    // omegaLo/omegaHi so the pure-noise tail (gate p95=1.48) can
+                    // be excluded (ω=0 -> bit-identical iavg pull) while foliage
+                    // texture (80% >= 1.5) keeps ω=1.  See the module comment.
+                    val ratio = if (maxNb > 1e-6f) coarseDevAt(v, sx, sy) / maxNb else 2f
+                    val omega = ((ratio - omegaLo) / (omegaHi - omegaLo)).coerceIn(0f, 1f)
+                    bavg = iavg + (iDir - iavg) * omega
+                } else if (mode == 4) {
+                    // Constant directional flat pull (probe): no discriminator at
+                    // all — the flat branch blends the α-trim target toward the
+                    // along-feature pair mean iDir by a fixed 0.5.  On a line
+                    // iDir tracks the feature (pull loses the off-line taps so the
+                    // line is preserved); on isotropic noise iDir ≈ iavg (both are
+                    // trimmed means of the same taps) so the pull is nearly a no-op
+                    // and the gate margin should hold.  If it does, this is the
+                    // shippable answer: no σ̂, no extra pass, no discriminator.
+                    bavg = iavg + (iDir - iavg) * 0.5f
+                } else {
+                    // flat patch: bit-identical to the baseline robust pull
+                    bavg = iavg
+                }
+            } else {
+                val tau = 2.5f * sg
+                val invTau = 1f / tau
+                var wsum = 0f
+                bavg = 0f
+                fun tapW(tx: Int, ty: Int) {
+                    val t = sensorVal(v, sx + tx, sy + ty)
+                    val w = (1f - max(abs(t - center) - tau, 0f) * invTau).coerceIn(0f, 1f)
+                    bavg += w * t
+                    wsum += w
+                }
+                tapW(2, 0); tapW(-2, 0); tapW(0, -2); tapW(0, 2)
+                tapW(2, -2); tapW(-2, -2); tapW(2, 2); tapW(-2, 2)
+                tapW(4, 0); tapW(-4, 0); tapW(0, -4); tapW(0, 4)
+                if (wsum > 0f) bavg /= wsum else bavg = center
+            }
+        }
+        return if (c < CLIP_SCALAR) center + (bavg - center) * (0.98f * s3) else center
     }
 
     // ------------------------------------------------------------------
@@ -263,7 +395,7 @@ class S3PreviewGLReproTest {
 
     // --- S3_PACK pass -------------------------------------------------
 
-    private fun buildPackGL(scene: ShortArray, v: View, s1: Float, s3: Float, gains: FloatArray? = null): FloatArray {
+    private fun buildPackGL(scene: ShortArray, v: View, s1: Float, s3: Float, gains: FloatArray? = null, mode: Int = 0): FloatArray {
         val GX = v.gridW
         val GY = v.gridH
         val out = FloatArray(GX * GY * 4)
@@ -298,7 +430,8 @@ class S3PreviewGLReproTest {
                         scene,
                         (scx + (px xor phaseX)).coerceIn(0, SW - 1),
                         (scy + (py xor phaseY)).coerceIn(0, SH - 1),
-                        s1, s3
+                        s1, s3,
+                        mode = mode
                     )
                 }
                 continue
@@ -333,7 +466,8 @@ class S3PreviewGLReproTest {
                         scene,
                         (b0x + (px xor phaseX)).coerceIn(0, SW - 1),
                         (b0y + (py xor phaseY)).coerceIn(0, SH - 1),
-                        s1, s3
+                        s1, s3,
+                        mode = mode
                     )
                 }
                 continue
@@ -456,14 +590,15 @@ class S3PreviewGLReproTest {
         scene: ShortArray, pack: FloatArray, v: View,
         s1: Float, s3: Float, cx0: Int, cy0: Int,
         shiftX: Int = 0, shiftY: Int = 0,
-        nrRadius: Int = 4
+        nrRadius: Int = 4,
+        mode: Int = 0
     ): Float {
         val cx = cx0.coerceIn(0, SW - 1)
         val cy = cy0.coerceIn(0, SH - 1)
         if (packActive(v)) {
             return mosaicRead(pack, v, cx, cy, shiftX, shiftY)
         }
-        return sameColorNR(scene, cx, cy, s1, s3, nrRadius)
+        return sameColorNR(scene, cx, cy, s1, s3, nrRadius, mode)
     }
 
     /** demosaicAt: the standard 9-tap reconstruction (box-AA 4x4 host path). */
@@ -471,17 +606,18 @@ class S3PreviewGLReproTest {
         scene: ShortArray, pack: FloatArray, v: View,
         s1: Float, s3: Float, cellX: Int, cellY: Int,
         shiftX: Int = 0, shiftY: Int = 0,
-        nrRadius: Int = 4
+        nrRadius: Int = 4,
+        mode: Int = 0
     ): FloatArray {
-        val center = demosaicSample(scene, pack, v, s1, s3, cellX, cellY, shiftX, shiftY, nrRadius)
-        val nN = demosaicSample(scene, pack, v, s1, s3, cellX, cellY - 1, shiftX, shiftY, nrRadius)
-        val nS = demosaicSample(scene, pack, v, s1, s3, cellX, cellY + 1, shiftX, shiftY, nrRadius)
-        val nW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY, shiftX, shiftY, nrRadius)
-        val nE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY, shiftX, shiftY, nrRadius)
-        val nNW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY - 1, shiftX, shiftY, nrRadius)
-        val nNE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY - 1, shiftX, shiftY, nrRadius)
-        val nSW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY + 1, shiftX, shiftY, nrRadius)
-        val nSE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY + 1, shiftX, shiftY, nrRadius)
+        val center = demosaicSample(scene, pack, v, s1, s3, cellX, cellY, shiftX, shiftY, nrRadius, mode)
+        val nN = demosaicSample(scene, pack, v, s1, s3, cellX, cellY - 1, shiftX, shiftY, nrRadius, mode)
+        val nS = demosaicSample(scene, pack, v, s1, s3, cellX, cellY + 1, shiftX, shiftY, nrRadius, mode)
+        val nW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY, shiftX, shiftY, nrRadius, mode)
+        val nE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY, shiftX, shiftY, nrRadius, mode)
+        val nNW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY - 1, shiftX, shiftY, nrRadius, mode)
+        val nNE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY - 1, shiftX, shiftY, nrRadius, mode)
+        val nSW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY + 1, shiftX, shiftY, nrRadius, mode)
+        val nSE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY + 1, shiftX, shiftY, nrRadius, mode)
         val color = BA_COLOR_MAP[phase(cellX, cellY)]
         return if (color == 0) {
             floatArrayOf(center, (nW + nE + nN + nS) * 0.25f, (nNW + nNE + nSW + nSE) * 0.25f)
@@ -502,7 +638,9 @@ class S3PreviewGLReproTest {
         scene: ShortArray, pack: FloatArray, v: View, s1: Float, s3: Float,
         shiftX: Int = 0, shiftY: Int = 0,
         boxAA: Int = previewBoxAA(v, s1, s3),
-        nrRadius: Int = previewNrRadius(boxAA)
+        nrRadius: Int = previewNrRadius(boxAA),
+        mode: Int = 0,
+        boxSmooth: Boolean = false
     ): Array<FloatArray> {
         val GX = v.gridW
         val GY = v.gridH
@@ -512,25 +650,71 @@ class S3PreviewGLReproTest {
             val aY = (gy + 0.5f) / GY
             val svX = v.crop[0] + v.T(aX, 0) * v.crop[2]
             val svY = v.crop[1] + v.T(aY, 1) * v.crop[3]
-            val baseX = boxBase(svX, boxAA)
-            val baseY = boxBase(svY, boxAA)
-            var sum = floatArrayOf(0f, 0f, 0f)
-            for (dy in 0 until boxAA) for (dx in 0 until boxAA) {
-                val c = demosaicAtRGB(
-                    scene, pack, v, s1, s3,
-                    (baseX + dx).coerceIn(0, SW - 1),
-                    (baseY + dy).coerceIn(0, SH - 1),
-                    shiftX, shiftY,
-                    nrRadius = nrRadius
+            var sum: FloatArray
+            if (boxSmooth && v.k > 2f) {
+                // Prototype of a monotone-by-construction box-AA: instead of
+                // stepping 4->2 at s3>=0.7, blend the box-4 mean (16 samples,
+                // 4-tap ring) and the box-2 mean (4 samples, 12-tap ring) by a
+                // smoothstep on s3.  A continuous box removes the step the
+                // directional flat pull pops.
+                val w = boxMixW(s3)
+                val base4 = boxBase(svX, 4)
+                val baseY4 = boxBase(svY, 4)
+                var sum4 = floatArrayOf(0f, 0f, 0f)
+                for (dy in 0 until 4) for (dx in 0 until 4) {
+                    val c = demosaicAtRGB(
+                        scene, pack, v, s1, s3,
+                        (base4 + dx).coerceIn(0, SW - 1), (baseY4 + dy).coerceIn(0, SH - 1),
+                        shiftX, shiftY, nrRadius = 2, mode = mode
+                    )
+                    sum4[0] += c[0]; sum4[1] += c[1]; sum4[2] += c[2]
+                }
+                val base2 = boxBase(svX, 2)
+                val baseY2 = boxBase(svY, 2)
+                var sum2 = floatArrayOf(0f, 0f, 0f)
+                for (dy in 0 until 2) for (dx in 0 until 2) {
+                    val c = demosaicAtRGB(
+                        scene, pack, v, s1, s3,
+                        (base2 + dx).coerceIn(0, SW - 1), (baseY2 + dy).coerceIn(0, SH - 1),
+                        shiftX, shiftY, nrRadius = 4, mode = mode
+                    )
+                    sum2[0] += c[0]; sum2[1] += c[1]; sum2[2] += c[2]
+                }
+                val div4 = 1f / 16f
+                val div2 = 1f / 4f
+                sum = floatArrayOf(
+                    (1f - w) * (sum4[0] * div4) + w * (sum2[0] * div2),
+                    (1f - w) * (sum4[1] * div4) + w * (sum2[1] * div2),
+                    (1f - w) * (sum4[2] * div4) + w * (sum2[2] * div2)
                 )
-                sum[0] += c[0]; sum[1] += c[1]; sum[2] += c[2]
+            } else {
+                val baseX = boxBase(svX, boxAA)
+                val baseY = boxBase(svY, boxAA)
+                sum = floatArrayOf(0f, 0f, 0f)
+                for (dy in 0 until boxAA) for (dx in 0 until boxAA) {
+                    val c = demosaicAtRGB(
+                        scene, pack, v, s1, s3,
+                        (baseX + dx).coerceIn(0, SW - 1),
+                        (baseY + dy).coerceIn(0, SH - 1),
+                        shiftX, shiftY,
+                        nrRadius = nrRadius,
+                        mode = mode
+                    )
+                    sum[0] += c[0]; sum[1] += c[1]; sum[2] += c[2]
+                }
+                val div = 1f / (boxAA * boxAA)
+                sum[0] *= div; sum[1] *= div; sum[2] *= div
             }
-            val div = 1f / (boxAA * boxAA)
-            sum[0] *= div; sum[1] *= div; sum[2] *= div
             val fin = composeMain(sum)
             out[gy][gx * 3] = fin[0]; out[gy][gx * 3 + 1] = fin[1]; out[gy][gx * 3 + 2] = fin[2]
         }
         return out
+    }
+
+    /** Smoothstep 0..1 across s3 in [0.65, 0.75] — the box-2 blend weight. */
+    private fun boxMixW(s3: Float): Float {
+        val t = ((s3 - 0.65f) / 0.10f).coerceIn(0f, 1f)
+        return t * t * (3f - 2f * t)
     }
 
     /** compensateNegatives + luma-attenuation from the shader main(). */
@@ -562,7 +746,8 @@ class S3PreviewGLReproTest {
         colorMat: FloatArray? = null,
         shiftX: Int = 0, shiftY: Int = 0,
         boxAA: Int = previewBoxAA(v, s1, s3),
-        nrRadius: Int = previewNrRadius(boxAA)
+        nrRadius: Int = previewNrRadius(boxAA),
+        mode: Int = 0
     ): Array<FloatArray> {
         val GX = v.gridW
         val GY = v.gridH
@@ -581,7 +766,8 @@ class S3PreviewGLReproTest {
                     (baseX + dx).coerceIn(0, SW - 1),
                     (baseY + dy).coerceIn(0, SH - 1),
                     shiftX, shiftY,
-                    nrRadius = nrRadius
+                    nrRadius = nrRadius,
+                    mode = mode
                 )
                 sum[0] += c[0]; sum[1] += c[1]; sum[2] += c[2]
             }
@@ -748,30 +934,29 @@ class S3PreviewGLReproTest {
 
     /**
      * Box-AA reduction acceptance gate (the host's inline S1/S3 cost fix):
-     * with the reduced boxAA active (the k>2 inline regime, box 2x2 while
-     * the sliders are up), each output band's sigma must stay AT OR BELOW the
-     * zero-slider baseline (boxAA=4).  Any single band above baseline rejects
-     * the boxAA step-down — the demosaic's effective averaging must never get
-     * weaker than baseline at any slider strength.
+     * with the smooth box active (the k>2 inline regime blends the 4x4+nr2
+     * mean toward the 2x2+nr4 mean by smoothstep(s3,0.65,0.75)), each output
+     * band's sigma must stay AT OR BELOW the zero-slider baseline (boxAA=4).
+     * Any single band above baseline rejects the deployed demosaic — the
+     * effective averaging must never get weaker than baseline at any strength.
      */
     @Test
     fun inlineReducedBoxKeepsBandsBounded() {
         val scene = buildFlatNoise(11, 460f, 28f)
-        // k>2 regimes where the inline path is live and the box reduction acts.
+        // k>2 regimes where the inline path is live and the box blend acts.
         val configs = listOf(
             Config(24, 96, 96, false),    // k=4  back
             Config(24, 96, 96, true),     // k=4  front
             Config(12, 96, 96, false),    // k=8  back
             Config(12, 96, 96, true)      // k=8  front
         )
-        // Slider grid covering every boxAA branch and the s3=0.7 edge (the only
-        // remaining threshold), plus the S1-only s3=0 branch, crossed with S1.
-        val s3s = listOf(0f, 0.1f, 0.15f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f)
+        // Slider grid covering the blend zone (s3 0.65..0.75) plus both tails.
+        val s3s = listOf(0f, 0.1f, 0.15f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.65f, 0.7f, 0.75f, 0.8f)
         val s1s = listOf(0.0f, 0.3f, 0.6f)
         val strengths = mutableListOf<FloatArray>()
         for (s3 in s3s) for (s1 in s1s) strengths.add(floatArrayOf(s1, s3))
         val failures = StringBuilder()
-        println("== inline reduced-box per-band sigma vs zero-slider baseline ==")
+        println("== inline smooth-box per-band sigma vs zero-slider baseline ==")
         for (cfg in configs) {
             val v = View(cfg.grid, cfg.grid, cfg.mirror, true, floatArrayOf(0f, 0f, 96f, 96f))
             val back = if (cfg.mirror) "mirrorX" else "back  "
@@ -780,20 +965,19 @@ class S3PreviewGLReproTest {
             val sd0 = FloatArray(3) { bandSD(img0, v, it) }
             println("k=%.2f %s  baseline sigma R=%.3f G=%.3f B=%.3f".format(v.k, back, sd0[0], sd0[1], sd0[2]))
             for (s in strengths) {
-                val pack = buildPackGL(scene, v, s[0], s[1])
-                val img = renderPreview(scene, pack, v, s[0], s[1])
-                val box = previewBoxAA(v, s[0], s[1])
+                val pack = buildPackGL(scene, v, s[0], s[1], mode = 3)
+                val img = renderPreview(scene, pack, v, s[0], s[1], mode = 3, boxSmooth = true)
                 val sd = FloatArray(3) { bandSD(img, v, it) }
                 println(
-                    "  s1=%.1f s3=%.1f box=%d  R=%.3f G=%.3f B=%.3f".format(
-                        s[0], s[1], box, sd[0], sd[1], sd[2]
+                    "  s1=%.1f s3=%.1f blend=%.2f  R=%.3f G=%.3f B=%.3f".format(
+                        s[0], s[1], boxMixW(s[1]), sd[0], sd[1], sd[2]
                     )
                 )
                 val name = charArrayOf('R', 'G', 'B')
                 for (ch in 0..2) {
                     if (sd[ch] > sd0[ch] + 0.001f) {
-                        val msg = "band %s sigma %.3f > baseline %.3f at grid=%d mirror=%s s1=%.1f s3=%.1f box=%d\n"
-                            .format(name[ch], sd[ch], sd0[ch], cfg.grid, cfg.mirror, s[0], s[1], box)
+                        val msg = "band %s sigma %.3f > baseline %.3f at grid=%d mirror=%s s1=%.1f s3=%.1f blend=%.2f\n"
+                            .format(name[ch], sd[ch], sd0[ch], cfg.grid, cfg.mirror, s[0], s[1], boxMixW(s[1]))
                         failures.append(msg)
                         println("  !! " + msg.trim())
                     }
@@ -801,7 +985,7 @@ class S3PreviewGLReproTest {
             }
         }
         assertTrue(
-            "boxAA step-down broke the per-band sigma gate:\n" + failures,
+            "smooth box broke the per-band sigma gate:\n" + failures,
             failures.isEmpty()
         )
     }
@@ -885,12 +1069,21 @@ class S3PreviewGLReproTest {
                 v.k, grid, if (mirror) "mirror" else "back", sd0[0], sd0[1], sd0[2]))
             for (variant in variants) {
                 val pops = StringBuilder()
+                val probeMode = when (variant) {
+                    "mask" -> 1
+                    "dir" -> 2
+                    "region" -> 3
+                    "dirC" -> 4
+                    else -> 0
+                }
+                val smooth = variant == "smooth0" || variant == "smooth3"
+                var maxDelta = 0f   // max |band sigma(mode) − band sigma(shipped)| over the walk
                 println("-- variant=$variant")
                 for (s1 in s1s) {
                     var prev = sd0.copyOf()
                     for (s3 in s3s) {
                         if (s1 <= 0f && s3 <= 0f) continue
-                        val pack = buildPackGL(scene, v, s1, s3)
+                        val pack = buildPackGL(scene, v, s1, s3, mode = probeMode)
                         val box = when (variant) {
                             "box4" -> 4
                             else -> previewBoxAA(v, s1, s3)
@@ -899,8 +1092,18 @@ class S3PreviewGLReproTest {
                             "box4" -> 2
                             else -> previewNrRadius(box)
                         }
-                        val img = renderPreview(scene, pack, v, s1, s3, boxAA = box, nrRadius = nrR)
+                        val img = renderPreview(scene, pack, v, s1, s3, boxAA = box, nrRadius = nrR, mode = probeMode, boxSmooth = smooth)
                         val sd = FloatArray(3) { bandSD(img, v, it) }
+                        val delta = if (smooth) {
+                            // shipped + stepped box as the reference for how far
+                            // the smooth/directional variant moves the noise bands.
+                            val packS = buildPackGL(scene, v, s1, s3)
+                            val imgS = renderPreview(scene, packS, v, s1, s3, boxAA = box, nrRadius = nrR)
+                            FloatArray(3) { abs(sd[it] - bandSD(imgS, v, it)) }
+                        } else {
+                            FloatArray(3) { 0f }
+                        }
+                        for (ch in 0..2) if (delta[ch] > maxDelta) maxDelta = delta[ch]
                         var up = ""
                         var anyUp = false
                         for (ch in 0..2) {
@@ -921,12 +1124,14 @@ class S3PreviewGLReproTest {
                             }
                         }
                         if (anyUp) pops.append("k=%.2f s1=%.1f s3=%.1f box=%d nr=%d%s\n".format(v.k, s1, s3, box, nrR, up))
-                        println("  s1=%.2f s3=%.2f box=%d nr=%d  R=%.4f G=%.4f B=%.4f%s".format(
-                            s1, s3, box, nrR, sd[0], sd[1], sd[2], if (anyUp) "  <-- POP" else ""))
+                        println("  s1=%.2f s3=%.2f box=%d nr=%d  R=%.5f G=%.5f B=%.5f%s".format(
+                            s1, s3, box, nrR, sd[0], sd[1], sd[2],
+                            if (anyUp) "  <-- POP" else if (smooth) "  dR=%.5f dG=%.5f dB=%.5f".format(delta[0], delta[1], delta[2]) else ""))
                         prev = sd
                     }
                 }
                 println("variant=$variant pops: " + (if (pops.isEmpty()) "none" else pops.toString().trim()))
+                if (smooth) println("variant=$variant maxDelta vs shipped: %.5f".format(maxDelta))
             }
         }
         if (gateTol != null) {
@@ -951,19 +1156,344 @@ class S3PreviewGLReproTest {
         val scene = buildFlatNoise(29, 460f, 28f)
         val s1s = listOf(0f, 0.3f, 0.6f)
         val s3s = listOf(0f, 0.1f, 0.15f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f)
-        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("shipped"), mirror = false, gateTol = 0.0004f)
-        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("shipped"), mirror = true, gateTol = 0.0004f)
+        // Deployed filter = smooth box-AA + regional directional flat pull
+        // (mode 3): continuous box across s3, so the walk both gates the
+        // monotonicity AND pins the deployed demosaic's per-band sigma.
+        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("smooth3"), mirror = false, gateTol = 0.0004f)
+        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("smooth3"), mirror = true, gateTol = 0.0004f)
     }
 
     /**
-     * Repro: "S1 + zoom-in leaks clipped hot pixels".  One clipped single-cell
-     * spike per CFA phase sits in an otherwise flat noisy field; the camera
-     * zooms in continuously (k: wide -> 1:1) with S1 on and S3 off, and we
-     * measure how much of the spike survives at its demosaic-box output
-     * window.  A corrected spike leaves the output identical to the control;
-     * a leak pushes the black-dot/magenta speck well above it.  Print-only
-     * until reproduced.
+     * Experiment: re-key the S3 flat/structure threshold on the MEASURED σ̂
+     * (the "only denoise noisy regions" mask) instead of the under-reporting
+     * model σ.  On the gate scene σ̂ measures the real noise (~16), so with
+     * K chosen above the pure-noise maxNb tail the flat branch keeps the full
+     * α-trim pull and the gate must hold identically to "shipped".  Prints σ̂
+     * stats so the tail landing can be checked.
      */
+    @Test
+    fun probeNoiseMaskMonotonicity() {
+        val scene = buildFlatNoise(29, 460f, 28f)
+        val s1s = listOf(0f, 0.3f, 0.6f)
+        val s3s = listOf(0f, 0.1f, 0.15f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f)
+        // σ̂ stats over the gate scene, once, for knee calibration.
+        val shs = FloatArray(2000)
+        var n = 0
+        for (y in 8 until SH - 8) for (x in 8 until SW - 8) { if (n < 2000) shs[n++] = sigmaHatAt(scene, x, y) }
+        java.util.Arrays.sort(shs, 0, n)
+        println("sigmaHat gate scene: p10=%.2f p50=%.2f p90=%.2f p99=%.2f max=%.2f".format(
+            shs[0], shs[n * 5 / 10], shs[n * 9 / 10], shs[n * 99 / 100], shs[n - 1]))
+        // r = minDev/maxNb on the gate scene (calibration for the directional
+        // blend's omega band: it must stay 0 for noise, turn on for lines).
+        val rs = FloatArray(4096)
+        var rn = 0
+        for (y in 8 until SH - 8) for (x in 8 until SW - 8) {
+            val mm = structRatioAt(scene, x, y)
+            if (rn < 4096 && mm > 0f) rs[rn++] = mm
+        }
+        java.util.Arrays.sort(rs, 0, rn)
+        println("minDev/maxNb gate scene: p50=%.3f p90=%.3f p95=%.3f p99=%.3f".format(
+            rs[rn / 2], rs[rn * 9 / 10], rs[rn * 95 / 100], rs[rn * 99 / 100]))
+        // r2 = coarseDev/maxNb (regional coarse/fine ratio, mode=3): on noise the
+        // block-mean spread collapses below the per-pixel max dev (σ/√N), so the
+        // ratio should sit BELOW the 0.6..1.0 ω band leaving the flat pull
+        // bit-identical; texture raised blocks push it over.
+        val r2s = FloatArray(4096)
+        var r2n = 0
+        for (y in 8 until SH - 8) for (x in 8 until SW - 8) {
+            if (r2n < 4096) {
+                val mb = maxNbAt(scene, x, y)
+                if (mb > 1e-6f) r2s[r2n++] = coarseDevAt(scene, x, y) / mb
+            }
+        }
+        java.util.Arrays.sort(r2s, 0, r2n)
+        println("coarseDev/maxNb gate scene: p50=%.3f p90=%.3f p95=%.3f p99=%.3f max=%.3f".format(
+            r2s[r2n / 2], r2s[r2n * 9 / 10], r2s[r2n * 95 / 100], r2s[r2n * 99 / 100], r2s[r2n - 1]))
+        coarseRatioCov(scene, "coarse/fine gate scene (бand coverage)")
+        // mode=1 (σ̂-keyed flat gate) is the recorded negative result: gate-safe
+        // but a no-op on lines (σ̂ MAD self-inflates where the line sits), so it
+        // must KEEP the monotonicity gate.  mode=2 (directional flat target)
+        // preserves lines on paper (46.9%->20% s3Lift) but the noise r tail
+        // overlaps the line's band (p50=0.179), so it pops the boxAA 4->2 step
+        // at s3>=0.7 — printed, not asserted, to record the dead end.  mode=3
+        // (regional coarse/fine blend) is the current candidate, printed first so
+        // the ω band can be calibrated to the measured noise-ratio tail before
+        // asserting the gate.
+        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("mask"), mirror = false, gateTol = 0.0004f)
+        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("mask"), mirror = true, gateTol = 0.0004f)
+        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("dir"), mirror = false, gateTol = null)
+        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("region"), mirror = false, gateTol = null)
+        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("region"), mirror = true, gateTol = null)
+        // mode=4 (constant directional flat pull): recorded negative result.  It
+        // preserves the thin line (46.9% -> 30.4% s3Lift) but FAILS the production
+        // gate at the boxAA 4->2 step (k=3.00 back s1=0.3 s3=0.7 box=2 nr=4:
+        // R 0.0054>0.0052, G 0.0040>0.0036, B 0.0056>0.0052) — the flat-branch
+        // pull target must stay bit-identical iavg for the gate to hold, so any
+        // iDir blend (masked or constant) is excluded.  maxDelta vs shipped on
+        // noise reaches 0.0013-0.0016 at k>=3.  Printed, not asserted.
+        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("dirC"), mirror = false, gateTol = null)
+        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("dirC"), mirror = true, gateTol = null)
+        // Smooth box-AA prototype: with the box shape blended continuously over
+        // s3 there is no 4->2 step for the directional pull to pop.  smooth0 =
+        // shipped pull + smooth box (isolates the box change), smooth3 = regional
+        // directional pull + smooth box (the full candidate).  Both must hold the
+        // 0.0004 gate on both configs, or the smooth-box fix is rejected.
+        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("smooth0"), mirror = false, gateTol = 0.0004f)
+        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("smooth0"), mirror = true, gateTol = 0.0004f)
+        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("smooth3"), mirror = false, gateTol = 0.0004f)
+        runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("smooth3"), mirror = true, gateTol = 0.0004f)
+    }
+
+    /** minDev/maxNb at a sensor pixel (mirror of the sameColorNR devs). */
+    private fun structRatioAt(v: ShortArray, sx: Int, sy: Int): Float {
+        val maxNb = maxNbAt(v, sx, sy)
+        val minDev = minDevAt(v, sx, sy)
+        return if (maxNb > 1e-6f) minDev / maxNb else 1f
+    }
+
+    /** coarseDev/maxNb distribution over a scene, with ω-band coverage so the
+     *  mode-3 threshold can be placed between the noise tail and the texture.
+     *  (0.6, 1.0, 1.5, 2.5, 4) are candidate rLo bands. */
+    private fun coarseRatioCov(scene: ShortArray, label: String) {
+        val rs = FloatArray(16384)
+        var n = 0
+        for (y in 12 until SH - 12) for (x in 12 until SW - 12) {
+            if (n < 16384) {
+                val mb = maxNbAt(scene, x, y)
+                if (mb > 1e-6f) rs[n++] = coarseDevAt(scene, x, y) / mb
+            }
+        }
+        if (n == 0) return
+        java.util.Arrays.sort(rs, 0, n)
+        fun frac(lo: Float, hi: Float): Int {
+            var c = 0
+            for (i in 0 until n) if (rs[i] >= lo && rs[i] < hi) c++
+            return (c * 100f / n).roundToInt()
+        }
+        val p = { i: Int -> if (i < n) rs[i] else rs[n - 1] }
+        println("%s  p50=%.2f p90=%.2f p95=%.2f p99=%.2f | ω>=0.6:0.6-1.0=%d%% 1.0-1.5=%d%% 1.5-2.5=%d%% 2.5-4=%d%% 4+=%d%%".format(
+            label, p(n / 2), p(n * 9 / 10), p(n * 95 / 100), p(n * 99 / 100),
+            frac(0.6f, 1.0f), frac(1.0f, 1.5f), frac(1.5f, 2.5f), frac(2.5f, 4f), frac(4f, 1e9f)))
+    }
+
+    /** max over the four axis-trimmed deviations (the structure detector). */
+    private fun maxNbAt(v: ShortArray, sx: Int, sy: Int): Float {
+        val c = sensorVal(v, sx, sy)
+        val nN = sensorVal(v, sx, sy - 2)
+        val nS = sensorVal(v, sx, sy + 2)
+        val nE = sensorVal(v, sx + 2, sy)
+        val nW = sensorVal(v, sx - 2, sy)
+        val nNE = sensorVal(v, sx + 2, sy - 2)
+        val nNW = sensorVal(v, sx - 2, sy - 2)
+        val nSE = sensorVal(v, sx + 2, sy + 2)
+        val nSW = sensorVal(v, sx - 2, sy + 2)
+        val nNN = sensorVal(v, sx, sy - 4)
+        val nSS = sensorVal(v, sx, sy + 4)
+        val nEE = sensorVal(v, sx + 4, sy)
+        val nWW = sensorVal(v, sx - 4, sy)
+        val tN = nNN + nNE + nNW + c - minOf(minOf(nNN, nNE), minOf(nNW, c)) - maxOf(maxOf(nNN, nNE), maxOf(nNW, c))
+        val devN = abs(nN - tN * 0.5f)
+        val tS = nSS + nSE + nSW + c - minOf(minOf(nSS, nSE), minOf(nSW, c)) - maxOf(maxOf(nSS, nSE), maxOf(nSW, c))
+        val devS = abs(nS - tS * 0.5f)
+        val tE = nEE + nNE + nSE + c - minOf(minOf(nEE, nNE), minOf(nSE, c)) - maxOf(maxOf(nEE, nNE), maxOf(nSE, c))
+        val devE = abs(nE - tE * 0.5f)
+        val tW = nWW + nNW + nSW + c - minOf(minOf(nWW, nNW), minOf(nSW, c)) - maxOf(maxOf(nWW, nNW), maxOf(nSW, c))
+        val devW = abs(nW - tW * 0.5f)
+        return maxOf(maxOf(devN, devS), maxOf(devE, devW))
+    }
+
+    /** min over the four axis-trimmed deviations. */
+    private fun minDevAt(v: ShortArray, sx: Int, sy: Int): Float {
+        val c = sensorVal(v, sx, sy)
+        val nN = sensorVal(v, sx, sy - 2)
+        val nS = sensorVal(v, sx, sy + 2)
+        val nE = sensorVal(v, sx + 2, sy)
+        val nW = sensorVal(v, sx - 2, sy)
+        val nNE = sensorVal(v, sx + 2, sy - 2)
+        val nNW = sensorVal(v, sx - 2, sy - 2)
+        val nSE = sensorVal(v, sx + 2, sy + 2)
+        val nSW = sensorVal(v, sx - 2, sy + 2)
+        val nNN = sensorVal(v, sx, sy - 4)
+        val nSS = sensorVal(v, sx, sy + 4)
+        val nEE = sensorVal(v, sx + 4, sy)
+        val nWW = sensorVal(v, sx - 4, sy)
+        val tN = nNN + nNE + nNW + c - minOf(minOf(nNN, nNE), minOf(nNW, c)) - maxOf(maxOf(nNN, nNE), maxOf(nNW, c))
+        val devN = abs(nN - tN * 0.5f)
+        val tS = nSS + nSE + nSW + c - minOf(minOf(nSS, nSE), minOf(nSW, c)) - maxOf(maxOf(nSS, nSE), maxOf(nSW, c))
+        val devS = abs(nS - tS * 0.5f)
+        val tE = nEE + nNE + nSE + c - minOf(minOf(nEE, nNE), minOf(nSE, c)) - maxOf(maxOf(nEE, nNE), maxOf(nSE, c))
+        val devE = abs(nE - tE * 0.5f)
+        val tW = nWW + nNW + nSW + c - minOf(minOf(nWW, nNW), minOf(nSW, c)) - maxOf(maxOf(nWW, nNW), maxOf(nSW, c))
+        val devW = abs(nW - tW * 0.5f)
+        return minOf(devN, devS, devE, devW)
+    }
+
+    /**
+     * Purpose test for the noise-region mask: a thin bright line on noise must
+     * survive S3 (the flat-branch α-trim pull is what smears it).  Measures
+     * the green dip the line holds with S1-only vs S1+S3, mask off (shipped
+     * V3) vs on (σ̂-keyed).  s3Lift is how much S3 dims the line; a working
+     * mask must LOWER s3Lift (line preserved) while keeping the gate.
+     */
+    @Test
+    fun probeNoiseMaskThinLine() {
+        // 1px vertical line at sensor col 48, height +24 (~3x the sensor noise
+        // 8), on a mono flat noise base 460.
+        val base = buildFlatNoise(77, 460f, 8f)
+        val line = base.copyOf()
+        for (y in 0 until SH) line[y * SW + 48] =
+            (SENSOR_BLACK + 460f + 24f + (Random(1).nextFloat() - 0.5f) * 2f * 8f)
+                .roundToInt().coerceIn(0, SENSOR_CLIP).toShort()
+        val v = View(96, 96, false, true, floatArrayOf(0f, 0f, 96f, 96f))
+        val s1 = 0.3f
+        val s3 = 0.6f
+        println("== probeNoiseMaskThinLine (s1=$s1 s3=$s3) green band dip at the line ==")
+        // Where does the coarse/fine ratio stand at the line vs off-line?  The
+        // mode-3 ω band must sit between the noise ratio and the texture ratio.
+        val onR = FloatArray(64)
+        val offR = FloatArray(64)
+        var onn = 0
+        var offn = 0
+        for (y in 40..55) {
+            for (sx in listOf(48, 49)) if (onn < 64) onR[onn++] = (coarseDevAt(line, sx, y) / maxOf(maxNbAt(line, sx, y), 1e-6f))
+            for (sx in listOf(45, 46, 50, 51)) if (offn < 64) offR[offn++] = (coarseDevAt(line, sx, y) / maxOf(maxNbAt(line, sx, y), 1e-6f))
+        }
+        java.util.Arrays.sort(onR, 0, onn)
+        java.util.Arrays.sort(offR, 0, offn)
+        println("coarse/fine ratio on-line: p50=%.2f p90=%.2f p99=%.2f   off-line: p50=%.2f p90=%.2f p99=%.2f".format(
+            onR[onn / 2], onR[onn * 9 / 10], onR[onn * 99 / 100], offR[offn / 2], offR[offn * 9 / 10], offR[offn * 99 / 100]))
+        val lift = FloatArray(5)
+        for (mode in 0..4) {
+            val dip1 = lineDip(line, v, s1, 0f, mode)
+            val dip3 = lineDip(line, v, s1, s3, mode)
+            lift[mode] = (dip1 - dip3) / max(dip1, 1e-6f)
+            println("  mode=$mode  dip(s1)=%.4f dip(s1+s3)=%.4f  s3Lift=%.1f%%".format(dip1, dip3, lift[mode] * 100))
+        }
+        // Directional flat target (mode 2) must preserve the line materially
+        // better than the shipped flat pull (mode 0).  The regional blend
+        // (mode 3) is measured below; its ω band gets calibrated to the
+        // printed ratio stats.  Mode 4 (constant directional pull) is the
+        // shipping candidate — it must beat shipped by the same margin.
+        assertTrue(
+            "directional flat target must preserve the line better than shipped V3 " +
+                "(s3Lift ${"%.1f".format(lift[0] * 100)}% -> ${"%.1f".format(lift[2] * 100)}%)",
+            lift[2] < lift[0] - 0.10f
+        )
+    }
+
+    private fun lineDip(scene: ShortArray, v: View, s1: Float, s3: Float, mode: Int): Float {
+        val pack = buildPackGL(scene, v, s1, s3, mode = mode)
+        val img = renderPreview(scene, pack, v, s1, s3, mode = mode)
+        val row = 48
+        val onLine = mutableListOf<Float>()
+        val offLine = mutableListOf<Float>()
+        for (gx in 44 until 52) {
+            val g = img[row][gx * 3 + 1]
+            if (gx in 47..49) onLine.add(g) else offLine.add(g)
+        }
+        val on = onLine.sum() / onLine.size
+        val off = offLine.sum() / offLine.size
+        return on - off
+    }
+
+    /**
+     * Multiscale foliage-like texture: vertical leaf streaks (3 sine harmonics,
+     * per-column contrast ~8-10/px), 4 single-px grass-blade spikes (+30), a
+     * slow vertical undulation, on a mono base 460 (+ noise σ when requested).
+     * The noise-free (σ=0) twin is the witness for PURE structure smearing.
+     */
+    private fun buildFoliage(seed: Int, base: Float, sigma: Float): ShortArray {
+        val rnd = Random(seed)
+        val bump = FloatArray(SW)
+        for (x in 0 until SW) {
+            bump[x] = 18f * sin(2.0 * PI * x / 16.0).toFloat() +
+                12f * sin(2.0 * PI * x / 8.0 + 1.0).toFloat() +
+                6f * sin(2.0 * PI * x / 4.0 + 2.0).toFloat()
+        }
+        val s = ShortArray(SW * SH)
+        for (y in 0 until SH) for (x in 0 until SW) {
+            var g = base + bump[x]
+            if (x == 20 || x == 34 || x == 60 || x == 78) g += 30f
+            g += 4f * sin(2.0 * PI * y / 24.0).toFloat()
+            if (sigma > 0f) g += (rnd.nextFloat() - 0.5f) * 2f * sigma
+            s[y * SW + x] = (SENSOR_BLACK + g).roundToInt().coerceIn(0, SENSOR_CLIP).toShort()
+        }
+        return s
+    }
+
+    /** Mean |G(gx+1) − G(gx)| over the green band — local texture/noise energy. */
+    private fun texEnergy(img: Array<FloatArray>, v: View): Float {
+        var sum = 0.0
+        var n = 0
+        for (gy in 4 until v.gridH - 4) {
+            for (gx in 4 until v.gridW - 1) {
+                sum += abs(img[gy][(gx + 1) * 3 + 1] - img[gy][gx * 3 + 1])
+                n++
+            }
+        }
+        return (sum / n).toFloat()
+    }
+
+    /**
+     * Real-texture regime probe: on foliage-like texture (contrast ~8-10/px ≫
+     * noise at the moderate σ used here) does the directional flat pull (modes
+     * 2-4) keep the TEXTURE while S3 still removes the NOISE, vs the shipped
+     * flat pull (mode 0)?  Two witnesses:
+     *   - texLift  = 1 − E(clean scene with S3)/E(clean scene without): how much
+     *     of the pure structure S3 flattens (0 = perfect preservation).  The
+     *     clean scene filters out the noise term so this is structure-only.
+     *   - noiseLift = 1 − E(noisy scene with S3)/E(noisy scene without): how
+     *     much TOTAL energy S3 removes (noise + whatever structure it also
+     *     takes).  A working mask keeps noiseLift near shipped while texLift
+     *     drops well below shipped.
+     */
+    @Test
+    fun probeFoliageTextureLift() {
+        val clean = buildFoliage(1, 460f, 0f)
+        val s1 = 0.3f
+        val s3 = 0.6f
+        val v = View(96, 96, false, true, floatArrayOf(0f, 0f, 96f, 96f))
+        coarseRatioCov(clean, "coarse/fine clean foliage")
+        for (sigma in listOf(8f, 14f)) {
+            val noisy = buildFoliage(1, 460f, sigma)
+            coarseRatioCov(noisy, "coarse/fine foliage sigma=$sigma")
+        }
+        val pack0 = buildPackGL(clean, v, 0f, 0f)
+        val ec0 = texEnergy(renderPreview(clean, pack0, v, 0f, 0f), v)
+        println("== probeFoliageTextureLift (s1=$s1 s3=$s3) clean energy=%.5f ==".format(ec0))
+        val modes = listOf(0, 2, 3, 4)
+        val bands = listOf(0.6f to 1.0f, 1.5f to 2.5f)
+        for (sigma in listOf(8f, 14f)) {
+            val noisy = buildFoliage(1, 460f, sigma)
+            val pN0 = buildPackGL(noisy, v, 0f, 0f)
+            val en0 = texEnergy(renderPreview(noisy, pN0, v, 0f, 0f), v)
+            println("-- sigma=$sigma  noisy energy=%.5f".format(en0))
+            for (mode in modes) {
+                if (mode == 3) {
+                    for ((lo, hi) in bands) {
+                        omegaLo = lo; omegaHi = hi
+                        val packN = buildPackGL(noisy, v, s1, s3, mode = mode)
+                        val imgN = renderPreview(noisy, packN, v, s1, s3, mode = mode)
+                        val noiseLift = 1f - texEnergy(imgN, v) / en0
+                        val packC = buildPackGL(clean, v, s1, s3, mode = mode)
+                        val imgC = renderPreview(clean, packC, v, s1, s3, mode = mode)
+                        val texLift = 1f - texEnergy(imgC, v) / ec0
+                        println("  mode=%d band=(%.1f,%.1f)  texLift=%.2f%%  noiseLift=%.2f%%".format(mode, lo, hi, texLift * 100, noiseLift * 100))
+                    }
+                    omegaLo = 0.6f; omegaHi = 1.0f
+                } else {
+                    val packN = buildPackGL(noisy, v, s1, s3, mode = mode)
+                    val imgN = renderPreview(noisy, packN, v, s1, s3, mode = mode)
+                    val noiseLift = 1f - texEnergy(imgN, v) / en0
+                    val packC = buildPackGL(clean, v, s1, s3, mode = mode)
+                    val imgC = renderPreview(clean, packC, v, s1, s3, mode = mode)
+                    val texLift = 1f - texEnergy(imgC, v) / ec0
+                    println("  mode=%d  texLift=%.2f%%  noiseLift=%.2f%%".format(mode, texLift * 100, noiseLift * 100))
+                }
+            }
+        }
+    }
+
     @Test
     fun probeHotPixelLeakDuringZoomIn() {
         val base = buildFlatNoise(2025, 460f, 28f)

@@ -716,36 +716,39 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         bindTarget(demosaicFboId, demosaicFboWidth, demosaicFboHeight)
 
         // The S1/S3 inline filter must never make the output noisier: two
-        // rules bind the demosaic configuration, probed across k=1.5..8 (the
+        // rules bound the demosaic configuration, probed across k=1.5..8 (the
         // S3PreviewGLReproTest monotonicity walk).
         //   (a) baseline bound: the effective averaging must never drop below
         //       the zero-slider 4x4 — any step-down needs the blend to already
         //       be strong enough to keep every band's sigma AT OR BELOW the
         //       previous (weaker) slider value (per-band sigma gate).
-        //   (b) with that bound, box3 is strictly dominated: 4x4 + the 4-tap
-        //       ring is cheaper AND smoother than 3x3 + the 12-tap ring, so
-        //       there is no monotone reason to ever emit box3.  The strong-s3
-        //       zone (>= 0.7) drops to 2x2 + the full 12-tap ring, whose
-        //       wider trim is what actually pulls sigma down hard up there —
-        //       the transition sits late enough that every band (incl. the
-        //       G floor, which 2x2 raises) lands below the 4x4 band's level.
-        // Baseline (s3=0, or sliders off) stays at 4, unchanged; the pack
-        // regime (k<=2) uses its own shader, boxAA=4 throughout.
-        val previewBoxAA = when {
-            previewZoomK <= 2.0f -> 4
-            s3 >= 0.7f -> 2
-            else -> 4
-        }
+        //   (b) the 4->2 box step itself is removed: the strong-s3 zone blends
+        //       the 4x4+nr2 mean toward the 2x2+nr4 mean with a smoothstep on
+        //       s3 (u_box_blend), so the box footprint is continuous and can
+        //       never pop the gate underneath the directional flat pull (the
+        //       stepped box did: any flat-branch pull != iavg popped a band).
+        //       At the s3 endpoints the blend is bit-identical to the plain
+        //       4x4 and 2x2 boxes (mirror-validated, maxDelta <= 0.00027).
+        // The pack regime (k<=2) uses its own shader, boxAA=4 throughout and
+        // never blends (u_box_blend=0).  Baseline (s3=0, or sliders off) stays
+        // at 4, unchanged.
+        val previewBoxAA = 4
         // In the box-AA=4 band the demosaic box supplies the steady averaging, so
         // the α-trim ring only needs the 4 step-2 axis neighbours
-        // (u_nr_radius=2).  The strong-s3 2x2 box needs the full 12-tap ring
-        // to actually drag sigma down.  Capture never runs this path.
-        val previewNrRadius = if (previewBoxAA == 4) 2 else 4
+        // (u_nr_radius=2).  The smooth blend's 2x2 side passes ring=4 in-shader
+        // (the full 12-tap form that drags sigma down hard up there), so the
+        // preview never switches u_nr_radius below/above while blending.
+        val previewNrRadius = 2
+        // Smooth 4->2 box weight: 0 below s3=0.65, smoothstep to 1 by s3=0.75.
+        val boxBlend = if (previewZoomK <= 2f) 0f else {
+            val t = ((s3 - 0.65f) / 0.10f).coerceIn(0f, 1f)
+            t * t * (3f - 2f * t)
+        }
 
-        val sliderSig = "%.4f:%.4f:%d:%d".format(s1, s3, previewBoxAA, previewNrRadius)
+        val sliderSig = "%.4f:%.4f:%d:%d:%.4f".format(s1, s3, previewBoxAA, previewNrRadius, boxBlend)
         if ((!synthetic && bayerRenderCount <= 3) || (sliderSig != lastDenoiseSliderSig)) {
             lastDenoiseSliderSig = sliderSig
-            android.util.Log.i(TAG, "preview sliders: s1=$s1 s3=$s3 boxAA=$previewBoxAA nrRadius=$previewNrRadius")
+            android.util.Log.i(TAG, "preview sliders: s1=$s1 s3=$s3 boxAA=$previewBoxAA nrRadius=$previewNrRadius boxBlend=$boxBlend")
         }
 
         bayerShader.drawDemosaic(
@@ -757,6 +760,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             effWhite, effBlackLevel,
             boxAA = previewBoxAA,
             nrRadius = previewNrRadius,
+            boxBlend = boxBlend,
             wbGains = floatArrayOf(wbGainR, wbGainG, wbGainB),
             colorMat = ccMatrix,
             denoisedTextureId = demosaicDenoisedId,
