@@ -143,32 +143,29 @@ class LensManager(private val context: Context) {
             }
 
             val physicalIds = try {
-                val m = CameraCharacteristics::class.java.getDeclaredMethod("getPhysicalCameraIds")
-                m.isAccessible = true
-                m.invoke(chars)?.toString()
+                // Public API since API 28 (minSdk 30); previously reflected into the
+                // hidden method (SoonBlockedPrivateApi lint + runtime greylist).
+                chars.getPhysicalCameraIds().toString()
             } catch (e: Exception) {
                 "err"
             }
 
-            val multiKeys = mutableListOf<String>()
-            val allKeysF = try {
-                val f = CameraCharacteristics::class.java.getDeclaredField("mProperties")
-                f.isAccessible = true
-                f.get(chars)
-            } catch (e: Exception) { null }
-            if (allKeysF != null) {
-                try {
-                    val keysM = allKeysF.javaClass.getMethod("getKeys")
-                    keysM.isAccessible = true
-                    val keysArr = (keysM.invoke(allKeysF) as Array<*>)
-                    keysArr.forEach { k ->
-                        val s = k?.toString() ?: ""
-                        if (s.contains("logical", ignoreCase = true) ||
-                            s.contains("physical", ignoreCase = true) ||
-                            s.contains("multi", ignoreCase = true))
-                            multiKeys.add(s)
+            // Diagnostic list of the multi-camera-related key names.  Previously
+            // reflected into the private CameraCharacteristics.mProperties field
+            // (SoonBlockedPrivateApi lint + runtime greylist); the public getKeys()
+            // surface exposes the same SDK-key names (hidden OEM keys may be
+            // omitted from the dump as a result).
+            val multiKeys = try {
+                chars.keys
+                    .filter {
+                        it.name.contains("logical", ignoreCase = true) ||
+                            it.name.contains("physical", ignoreCase = true) ||
+                            it.name.contains("multi", ignoreCase = true)
                     }
-                } catch (e: Exception) { /* ignore */ }
+                    .map { it.name }
+                    .toMutableList()
+            } catch (e: Exception) {
+                mutableListOf()
             }
 
             // Fallback: some OEM HALs (e.g. Xiaomi) don't advertise RAW in capabilities
