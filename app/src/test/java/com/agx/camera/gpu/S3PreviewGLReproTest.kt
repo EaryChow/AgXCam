@@ -138,7 +138,7 @@ class S3PreviewGLReproTest {
      *  used when the demosaic box stays 4x4; capture/box<4 keep the 12-tap.
      *  maskSigma (measurement only, not shipped) re-keys the flat/structure
      *  threshold on the measured σ̂ so the "noisy region" mask can be probed. */
-    private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float, nrRadius: Int = 4, mode: Int = 0): Float {
+    private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float, nrRadius: Int = 4, mode: Int = 0, mCoarse: Float? = null): Float {
         val c = sensorVal(v, sx, sy)
         if (s1 <= 0f && s3 <= 0f) return c
         val (mn, mx, iavg) = if (nrRadius >= 4) {
@@ -259,7 +259,10 @@ class S3PreviewGLReproTest {
                     // omegaLo/omegaHi so the pure-noise tail (gate p95=1.48) can
                     // be excluded (ω=0 -> bit-identical iavg pull) while foliage
                     // texture (80% >= 1.5) keeps ω=1.  See the module comment.
-                    val ratio = if (maxNb > 1e-6f) coarseDevAt(v, sx, sy) / maxNb else 2f
+                    // mCoarse is the per-output-pixel coarse dev threaded from
+                    // renderPreview (one read per fragment); null (probe sites)
+                    // falls back to the per-sample read.
+                    val ratio = if (maxNb > 1e-6f) (mCoarse ?: coarseDevAt(v, sx, sy)) / maxNb else 2f
                     val omega = ((ratio - omegaLo) / (omegaHi - omegaLo)).coerceIn(0f, 1f)
                     bavg = iavg + (iDir - iavg) * omega
                 } else if (mode == 4) {
@@ -423,6 +426,7 @@ class S3PreviewGLReproTest {
             if (nCells <= 1) {
                 val px = abs(scx % 2)
                 val py = abs(scy % 2)
+                val mc = coarseDevAt(scene, scx.coerceIn(0, SW - 1), scy.coerceIn(0, SH - 1))
                 for (p in 0..3) {
                     val phaseX = p and 1
                     val phaseY = p shr 1
@@ -431,7 +435,7 @@ class S3PreviewGLReproTest {
                         (scx + (px xor phaseX)).coerceIn(0, SW - 1),
                         (scy + (py xor phaseY)).coerceIn(0, SH - 1),
                         s1, s3,
-                        mode = mode
+                        mode = mode, mCoarse = mc
                     )
                 }
                 continue
@@ -459,6 +463,7 @@ class S3PreviewGLReproTest {
             if (nCells <= 4 && allClip) {
                 val px = abs(b0x % 2)
                 val py = abs(b0y % 2)
+                val mc = coarseDevAt(scene, b0x.coerceIn(0, SW - 1), b0y.coerceIn(0, SH - 1))
                 for (p in 0..3) {
                     val phaseX = p and 1
                     val phaseY = p shr 1
@@ -467,7 +472,7 @@ class S3PreviewGLReproTest {
                         (b0x + (px xor phaseX)).coerceIn(0, SW - 1),
                         (b0y + (py xor phaseY)).coerceIn(0, SH - 1),
                         s1, s3,
-                        mode = mode
+                        mode = mode, mCoarse = mc
                     )
                 }
                 continue
@@ -591,33 +596,35 @@ class S3PreviewGLReproTest {
         s1: Float, s3: Float, cx0: Int, cy0: Int,
         shiftX: Int = 0, shiftY: Int = 0,
         nrRadius: Int = 4,
-        mode: Int = 0
+        mode: Int = 0,
+        mCoarse: Float? = null
     ): Float {
         val cx = cx0.coerceIn(0, SW - 1)
         val cy = cy0.coerceIn(0, SH - 1)
         if (packActive(v)) {
             return mosaicRead(pack, v, cx, cy, shiftX, shiftY)
         }
-        return sameColorNR(scene, cx, cy, s1, s3, nrRadius, mode)
+        return sameColorNR(scene, cx, cy, s1, s3, nrRadius, mode, mCoarse)
     }
 
     /** demosaicAt: the standard 9-tap reconstruction (box-AA 4x4 host path). */
     private fun demosaicAtRGB(
         scene: ShortArray, pack: FloatArray, v: View,
-        s1: Float, s3: Float, cellX: Int, cellY: Int,
+        s1: Float, s3: Float,         cellX: Int, cellY: Int,
         shiftX: Int = 0, shiftY: Int = 0,
         nrRadius: Int = 4,
-        mode: Int = 0
+        mode: Int = 0,
+        mCoarse: Float? = null
     ): FloatArray {
-        val center = demosaicSample(scene, pack, v, s1, s3, cellX, cellY, shiftX, shiftY, nrRadius, mode)
-        val nN = demosaicSample(scene, pack, v, s1, s3, cellX, cellY - 1, shiftX, shiftY, nrRadius, mode)
-        val nS = demosaicSample(scene, pack, v, s1, s3, cellX, cellY + 1, shiftX, shiftY, nrRadius, mode)
-        val nW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY, shiftX, shiftY, nrRadius, mode)
-        val nE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY, shiftX, shiftY, nrRadius, mode)
-        val nNW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY - 1, shiftX, shiftY, nrRadius, mode)
-        val nNE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY - 1, shiftX, shiftY, nrRadius, mode)
-        val nSW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY + 1, shiftX, shiftY, nrRadius, mode)
-        val nSE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY + 1, shiftX, shiftY, nrRadius, mode)
+        val center = demosaicSample(scene, pack, v, s1, s3, cellX, cellY, shiftX, shiftY, nrRadius, mode, mCoarse)
+        val nN = demosaicSample(scene, pack, v, s1, s3, cellX, cellY - 1, shiftX, shiftY, nrRadius, mode, mCoarse)
+        val nS = demosaicSample(scene, pack, v, s1, s3, cellX, cellY + 1, shiftX, shiftY, nrRadius, mode, mCoarse)
+        val nW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY, shiftX, shiftY, nrRadius, mode, mCoarse)
+        val nE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY, shiftX, shiftY, nrRadius, mode, mCoarse)
+        val nNW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY - 1, shiftX, shiftY, nrRadius, mode, mCoarse)
+        val nNE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY - 1, shiftX, shiftY, nrRadius, mode, mCoarse)
+        val nSW = demosaicSample(scene, pack, v, s1, s3, cellX - 1, cellY + 1, shiftX, shiftY, nrRadius, mode, mCoarse)
+        val nSE = demosaicSample(scene, pack, v, s1, s3, cellX + 1, cellY + 1, shiftX, shiftY, nrRadius, mode, mCoarse)
         val color = BA_COLOR_MAP[phase(cellX, cellY)]
         return if (color == 0) {
             floatArrayOf(center, (nW + nE + nN + nS) * 0.25f, (nNW + nNE + nSW + nSE) * 0.25f)
@@ -631,6 +638,194 @@ class S3PreviewGLReproTest {
                 floatArrayOf((nW + nE) * 0.5f, center, (nN + nS) * 0.5f)
             }
         }
+    }
+
+    /** Dual-ring same-colour sample (mirror of the GLSL denoisedDualRing used by
+     *  the fused smooth-box path): computes BOTH the ring-2 sample (lo, the 4x4
+     *  box side) and the ring-4 sample (hi, the 2x2 box side) from one tap set.
+     *  Each result must be bit-identical to a standalone sameColorNR call at its
+     *  ring — the packed 4x4 ring-2 box's middle four cells are exactly the 2x2
+     *  ring-4 box, so the fusion removes those four redundant re-evaluations per
+     *  fragment without touching the output.  Arithmetic is copied verbatim from
+     *  sameColorNR's two ring branches (hi with mode 3 = the shipped regional
+     *  pull). */
+    private fun denoisedDualRing(
+        v: ShortArray, sx: Int, sy: Int,
+        s1: Float, s3: Float, mCoarse: Float?
+    ): Pair<Float, Float> {
+        val c = sensorVal(v, sx, sy)
+        if (s1 <= 0f && s3 <= 0f) return c to c
+        val nE = sensorVal(v, sx + 2, sy)
+        val nW = sensorVal(v, sx - 2, sy)
+        val nN = sensorVal(v, sx, sy - 2)
+        val nS = sensorVal(v, sx, sy + 2)
+
+        // ---- lo: ring-2 path (verbatim copy of sameColorNR's nrRadius<4)
+        val smn2 = min(min(nE, nW), min(nN, nS))
+        val smx2 = max(max(nE, nW), max(nN, nS))
+        val iavg2 = (nE + nW + nN + nS - smn2 - smx2) / 2f
+        val sigma2 = sqrt(max(isoA * max(iavg2, 0f) + isoB, 1f))
+        val band2 = max((0.1f + 0.3f * s1) * max(iavg2, 0f), (2f + 2f * s1) * sigma2)
+        var center2 = c
+        if (max(s1, 0.85f * s3) > 0f) {
+            val hot2 = (c > smx2) && (c - iavg2) > band2
+            val cold2 = (c < smn2) && (iavg2 - c) > band2
+            if (hot2 || cold2) {
+                center2 = c + (iavg2 - c) * max(max(s1, 0.85f * s3), 0.98f)
+            }
+        }
+        val lo = if (c < CLIP_SCALAR) center2 + (iavg2 - center2) * (0.98f * s3) else center2
+
+        // ---- hi: ring-4 path (verbatim copy of sameColorNR's nrRadius>=4, mode 3)
+        val nNE = sensorVal(v, sx + 2, sy - 2)
+        val nNW = sensorVal(v, sx - 2, sy - 2)
+        val nSE = sensorVal(v, sx + 2, sy + 2)
+        val nSW = sensorVal(v, sx - 2, sy + 2)
+        val nEE = sensorVal(v, sx + 4, sy)
+        val nWW = sensorVal(v, sx - 4, sy)
+        val nNN = sensorVal(v, sx, sy - 4)
+        val nSS = sensorVal(v, sx, sy + 4)
+        val smn = min(min(min(min(min(nE, nW), min(nN, nS)), min(nNE, nNW)), min(nSE, nSW)),
+            min(min(nEE, nWW), min(nNN, nSS)))
+        val smx = max(max(max(max(max(nE, nW), max(nN, nS)), max(nNE, nNW)), max(nSE, nSW)),
+            max(max(nEE, nWW), max(nNN, nSS)))
+        val iavg = (nE + nW + nN + nS + nNE + nNW + nSE + nSW + nEE + nWW + nNN + nSS - smn - smx) / 10f
+        val sigma = sqrt(max(isoA * max(iavg, 0f) + isoB, 1f))
+        val band = max((0.1f + 0.3f * s1) * max(iavg, 0f), (2f + 2f * s1) * sigma)
+
+        val aH = (nE + nW) * 0.5f
+        val aV = (nN + nS) * 0.5f
+        val a45 = (nNE + nSW) * 0.5f
+        val a135 = (nSE + nNW) * 0.5f
+        val dH = abs(nE - nW)
+        val dV = abs(nN - nS)
+        val d45 = abs(nNE - nSW)
+        val d135 = abs(nSE - nNW)
+        var iDir = aH
+        if (dV < dH && dV <= d45 && dV <= d135) iDir = aV
+        else if (d45 < dH && d45 <= dV && d45 <= d135) iDir = a45
+        else if (d135 < dH && d135 <= dV && d135 <= d45) iDir = a135
+        val tN = nNN + nNE + nNW + c - minOf(minOf(nNN, nNE), minOf(nNW, c)) - maxOf(maxOf(nNN, nNE), maxOf(nNW, c))
+        val devN = abs(nN - tN * 0.5f)
+        val tS = nSS + nSE + nSW + c - minOf(minOf(nSS, nSE), minOf(nSW, c)) - maxOf(maxOf(nSS, nSE), maxOf(nSW, c))
+        val devS = abs(nS - tS * 0.5f)
+        val tE = nEE + nNE + nSE + c - minOf(minOf(nEE, nNE), minOf(nSE, c)) - maxOf(maxOf(nEE, nNE), maxOf(nSE, c))
+        val devE = abs(nE - tE * 0.5f)
+        val tW = nWW + nNW + nSW + c - minOf(minOf(nWW, nNW), minOf(nSW, c)) - maxOf(maxOf(nWW, nNW), maxOf(nSW, c))
+        val devW = abs(nW - tW * 0.5f)
+        val maxNb = maxOf(maxOf(devN, devS), maxOf(devE, devW))
+        val minDev = minOf(devN, devS, devE, devW)
+
+        var center = c
+        if (max(s1, 0.85f * s3) > 0f) {
+            val hot = (c > smx) && (c - iavg) > band
+            val cold = (c < smn) && (iavg - c) > band
+            if (hot || cold) {
+                if (abs(c - iavg) > 6.0f * maxNb) {
+                    center = c + (iDir - c) * max(max(s1, 0.85f * s3), 0.98f)
+                }
+            }
+        }
+
+        val sg = max(sigma, 6.0f * minDev)
+        var bavg: Float
+        if (maxNb <= 6.0f * sigma) {
+            val ratio = if (maxNb > 1e-6f) (mCoarse ?: coarseDevAt(v, sx, sy)) / maxNb else 2f
+            val omega = ((ratio - omegaLo) / (omegaHi - omegaLo)).coerceIn(0f, 1f)
+            bavg = iavg + (iDir - iavg) * omega
+        } else {
+            val tau = 2.5f * sg
+            val invTau = 1f / tau
+            var wsum = 0f
+            bavg = 0f
+            fun tapW(tx: Int, ty: Int) {
+                val t = sensorVal(v, sx + tx, sy + ty)
+                val w = (1f - max(abs(t - center) - tau, 0f) * invTau).coerceIn(0f, 1f)
+                bavg += w * t
+                wsum += w
+            }
+            tapW(2, 0); tapW(-2, 0); tapW(0, -2); tapW(0, 2)
+            tapW(2, -2); tapW(-2, -2); tapW(2, 2); tapW(-2, 2)
+            tapW(4, 0); tapW(-4, 0); tapW(0, -4); tapW(0, 4)
+            if (wsum > 0f) bavg /= wsum else bavg = center
+        }
+        val hi = if (c < CLIP_SCALAR) center + (bavg - center) * (0.98f * s3) else center
+        return lo to hi
+    }
+
+    /** One dual sample (mosaic read or inline), like demosaicSample. */
+    private fun dualSample(
+        scene: ShortArray, pack: FloatArray, v: View,
+        s1: Float, s3: Float, cx0: Int, cy0: Int,
+        shiftX: Int = 0, shiftY: Int = 0,
+        mode: Int = 3,
+        mCoarse: Float? = null
+    ): Pair<Float, Float> {
+        val cx = cx0.coerceIn(0, SW - 1)
+        val cy = cy0.coerceIn(0, SH - 1)
+        if (packActive(v)) {
+            val m = mosaicRead(pack, v, cx, cy, shiftX, shiftY)
+            return m to m
+        }
+        return denoisedDualRing(scene, cx, cy, s1, s3, mCoarse)
+    }
+
+    /** Dual demosaic (mirror of the GLSL demosaicAtDual): the fused box's
+     *  mid-cell reconstruction, returning both the 4x4-side (ring-2) and the
+     *  2x2-side (ring-4) RGB.  Bit-identical to demosaicAtRGB at each ring. */
+    private fun demosaicAtDualRGB(
+        scene: ShortArray, pack: FloatArray, v: View,
+        s1: Float, s3: Float, cellX: Int, cellY: Int,
+        shiftX: Int = 0, shiftY: Int = 0,
+        mode: Int = 3,
+        mCoarse: Float? = null
+    ): Pair<FloatArray, FloatArray> {
+        fun tap(ox: Int, oy: Int): Pair<Float, Float> =
+            dualSample(scene, pack, v, s1, s3, cellX + ox, cellY + oy, shiftX, shiftY, mode, mCoarse)
+        val tapC = tap(0, 0)
+        val tapN = tap(0, -1)
+        val tapS = tap(0, 1)
+        val tapW = tap(-1, 0)
+        val tapE = tap(1, 0)
+        val tapNW = tap(-1, -1)
+        val tapNE = tap(1, -1)
+        val tapSW = tap(-1, 1)
+        val tapSE = tap(1, 1)
+        val color = BA_COLOR_MAP[phase(cellX, cellY)]
+        fun lo(): Float = tapC.first
+        fun hi(): Float = tapC.second
+        fun loOf(p: Pair<Float, Float>): Float = p.first
+        fun hiOf(p: Pair<Float, Float>): Float = p.second
+        val loR: Float
+        val loG: Float
+        val loB: Float
+        val hiR: Float
+        val hiG: Float
+        val hiB: Float
+        if (color == 0) {
+            loR = lo(); hiR = hi()
+            loG = (loOf(tapW) + loOf(tapE) + loOf(tapN) + loOf(tapS)) * 0.25f
+            hiG = (hiOf(tapW) + hiOf(tapE) + hiOf(tapN) + hiOf(tapS)) * 0.25f
+            loB = (loOf(tapNW) + loOf(tapNE) + loOf(tapSW) + loOf(tapSE)) * 0.25f
+            hiB = (hiOf(tapNW) + hiOf(tapNE) + hiOf(tapSW) + hiOf(tapSE)) * 0.25f
+        } else if (color == 2) {
+            loB = lo(); hiB = hi()
+            loG = (loOf(tapW) + loOf(tapE) + loOf(tapN) + loOf(tapS)) * 0.25f
+            hiG = (hiOf(tapW) + hiOf(tapE) + hiOf(tapN) + hiOf(tapS)) * 0.25f
+            loR = (loOf(tapNW) + loOf(tapNE) + loOf(tapSW) + loOf(tapSE)) * 0.25f
+            hiR = (hiOf(tapNW) + hiOf(tapNE) + hiOf(tapSW) + hiOf(tapSE)) * 0.25f
+        } else {
+            loG = lo(); hiG = hi()
+            val colorNS = BA_COLOR_MAP[phase(cellX, cellY - 1)]
+            if (colorNS == 0) {
+                loR = (loOf(tapN) + loOf(tapS)) * 0.5f; loB = (loOf(tapW) + loOf(tapE)) * 0.5f
+                hiR = (hiOf(tapN) + hiOf(tapS)) * 0.5f; hiB = (hiOf(tapW) + hiOf(tapE)) * 0.5f
+            } else {
+                loR = (loOf(tapW) + loOf(tapE)) * 0.5f; loB = (loOf(tapN) + loOf(tapS)) * 0.5f
+                hiR = (hiOf(tapW) + hiOf(tapE)) * 0.5f; hiB = (hiOf(tapN) + hiOf(tapS)) * 0.5f
+            }
+        }
+        return floatArrayOf(loR, loG, loB) to floatArrayOf(hiR, hiG, hiB)
     }
 
     /** demosaicBilinear + main(): render the full output image (all paths). */
@@ -660,12 +855,16 @@ class S3PreviewGLReproTest {
                 val w = boxMixW(s3)
                 val base4 = boxBase(svX, 4)
                 val baseY4 = boxBase(svY, 4)
+                // One coarse dev per output pixel, read once at the box centre
+                // (mirror of demosaicBilinear's per-fragment mCoarse).  Shared
+                // by both smooth sub-boxes — this is the S3 perf fix.
+                val mc = coarseDevAt(scene, (base4 + 2).coerceIn(0, SW - 1), (baseY4 + 2).coerceIn(0, SH - 1))
                 var sum4 = floatArrayOf(0f, 0f, 0f)
                 for (dy in 0 until 4) for (dx in 0 until 4) {
                     val c = demosaicAtRGB(
                         scene, pack, v, s1, s3,
                         (base4 + dx).coerceIn(0, SW - 1), (baseY4 + dy).coerceIn(0, SH - 1),
-                        shiftX, shiftY, nrRadius = 2, mode = mode
+                        shiftX, shiftY, nrRadius = 2, mode = mode, mCoarse = mc
                     )
                     sum4[0] += c[0]; sum4[1] += c[1]; sum4[2] += c[2]
                 }
@@ -676,7 +875,7 @@ class S3PreviewGLReproTest {
                     val c = demosaicAtRGB(
                         scene, pack, v, s1, s3,
                         (base2 + dx).coerceIn(0, SW - 1), (baseY2 + dy).coerceIn(0, SH - 1),
-                        shiftX, shiftY, nrRadius = 4, mode = mode
+                        shiftX, shiftY, nrRadius = 4, mode = mode, mCoarse = mc
                     )
                     sum2[0] += c[0]; sum2[1] += c[1]; sum2[2] += c[2]
                 }
@@ -690,6 +889,9 @@ class S3PreviewGLReproTest {
             } else {
                 val baseX = boxBase(svX, boxAA)
                 val baseY = boxBase(svY, boxAA)
+                // One coarse dev per output pixel at the box centre (box<=1:
+                // base + 0 == the clamped sample, matching the GLSL 1:1 path).
+                val mc = coarseDevAt(scene, (baseX + boxAA / 2).coerceIn(0, SW - 1), (baseY + boxAA / 2).coerceIn(0, SH - 1))
                 sum = floatArrayOf(0f, 0f, 0f)
                 for (dy in 0 until boxAA) for (dx in 0 until boxAA) {
                     val c = demosaicAtRGB(
@@ -698,7 +900,7 @@ class S3PreviewGLReproTest {
                         (baseY + dy).coerceIn(0, SH - 1),
                         shiftX, shiftY,
                         nrRadius = nrRadius,
-                        mode = mode
+                        mode = mode, mCoarse = mc
                     )
                     sum[0] += c[0]; sum[1] += c[1]; sum[2] += c[2]
                 }
@@ -759,6 +961,7 @@ class S3PreviewGLReproTest {
             val svY = v.crop[1] + v.T(aY, 1) * v.crop[3]
             val baseX = boxBase(svX, boxAA)
             val baseY = boxBase(svY, boxAA)
+            val mc = coarseDevAt(scene, (baseX + boxAA / 2).coerceIn(0, SW - 1), (baseY + boxAA / 2).coerceIn(0, SH - 1))
             var sum = floatArrayOf(0f, 0f, 0f)
             for (dy in 0 until boxAA) for (dx in 0 until boxAA) {
                 val c = demosaicAtRGB(
@@ -767,7 +970,7 @@ class S3PreviewGLReproTest {
                     (baseY + dy).coerceIn(0, SH - 1),
                     shiftX, shiftY,
                     nrRadius = nrRadius,
-                    mode = mode
+                    mode = mode, mCoarse = mc
                 )
                 sum[0] += c[0]; sum[1] += c[1]; sum[2] += c[2]
             }
@@ -986,6 +1189,83 @@ class S3PreviewGLReproTest {
         }
         assertTrue(
             "smooth box broke the per-band sigma gate:\n" + failures,
+            failures.isEmpty()
+        )
+    }
+
+    /**
+     * Acceptance gate for the fused smooth-box path (GLSL demosaicAtDual):
+     * the dual sample must be bit-identical to the two standalone ring-2 /
+     * ring-4 demosaicAt calls it replaces, at exactly the mid-box positions
+     * the smooth blend visits.  This is what makes the fusion
+     * output-invariant — the redundant 4-of-20 per-fragment re-evaluations of
+     * the k>2 smooth path are removed, nothing else changes.
+     */
+    @Test
+    fun dualFusionMatchesStandalone() {
+        val scene = buildFlatNoise(103, 460f, 28f)
+        val configs = listOf(
+            Config(24, 96, 96, false),    // k=4 back
+            Config(24, 96, 96, true),     // k=4 mirror
+            Config(12, 96, 96, false),    // k=8 back
+            Config(12, 96, 96, true)      // k=8 mirror
+        )
+        // Slider grid covering the blend zone, both tails, and the off-case.
+        val strengths = listOf(
+            floatArrayOf(0.6f, 0.65f),
+            floatArrayOf(0.3f, 0.7f),
+            floatArrayOf(0f, 0.75f),
+            floatArrayOf(0.6f, 0.8f),
+            floatArrayOf(0f, 0f)
+        )
+        val mcFixed = coarseDevAt(scene, 48, 48)
+        val mcVals = listOf<Float?>(null, mcFixed)
+        var maxDev = 0f
+        var cellCount = 0
+        val failures = StringBuilder()
+        for (cfg in configs) {
+            val v = View(cfg.grid, cfg.grid, cfg.mirror, true, floatArrayOf(0f, 0f, 96f, 96f))
+            for (s in strengths) {
+                val pack = buildPackGL(scene, v, s[0], s[1], mode = 3)
+                for (mc in mcVals) {
+                    for (gy in 0 until v.gridH) for (gx in 0 until v.gridW) {
+                        val aX = (gx + 0.5f) / v.gridW
+                        val aY = (gy + 0.5f) / v.gridH
+                        val svX = v.crop[0] + v.T(aX, 0) * v.crop[2]
+                        val svY = v.crop[1] + v.T(aY, 1) * v.crop[3]
+                        // Shared coarse dev (GLSL mCoarse = one per output pixel
+                        // at the box centre, threaded to every ring sample).
+                        val cmc = mc ?: coarseDevAt(
+                            scene,
+                            (boxBase(svX, 2) + 1).coerceIn(0, SW - 1),
+                            (boxBase(svY, 2) + 1).coerceIn(0, SH - 1)
+                        )
+                        for (dy in 0 until 2) for (dx in 0 until 2) {
+                            val cx = (boxBase(svX, 2) + dx).coerceIn(0, SW - 1)
+                            val cy = (boxBase(svY, 2) + dy).coerceIn(0, SH - 1)
+                            val loExp = demosaicAtRGB(scene, pack, v, s[0], s[1], cx, cy, nrRadius = 2, mode = 3, mCoarse = cmc)
+                            val hiExp = demosaicAtRGB(scene, pack, v, s[0], s[1], cx, cy, nrRadius = 4, mode = 3, mCoarse = cmc)
+                            val (loAct, hiAct) = demosaicAtDualRGB(scene, pack, v, s[0], s[1], cx, cy, mode = 3, mCoarse = cmc)
+                            cellCount++
+                            for (ch in 0..2) {
+                                val dLo = abs(loExp[ch] - loAct[ch])
+                                val dHi = abs(hiExp[ch] - hiAct[ch])
+                                maxDev = max(maxDev, max(dLo, dHi))
+                                if (loExp[ch] != loAct[ch] || hiExp[ch] != hiAct[ch]) {
+                                    failures.append(
+                                        "k=%.2f %s s1=%.1f s3=%.1f cell=(%d,%d) ch=%d loExp=%.9f loAct=%.9f hiExp=%.9f hiAct=%.9f\n"
+                                            .format(v.k, if (cfg.mirror) "mirror" else "back", s[0], s[1], cx, cy, ch, loExp[ch], loAct[ch], hiExp[ch], hiAct[ch])
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println("dualFusionMatchesStandalone: %d mid-box cells compared, maxDev=%.3e".format(cellCount, maxDev))
+        assertTrue(
+            "dual fusion drifted from standalone ring-2/ring-4 (must be bit-identical):\n" + failures,
             failures.isEmpty()
         )
     }

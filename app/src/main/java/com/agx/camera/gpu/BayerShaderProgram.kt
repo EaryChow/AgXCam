@@ -908,7 +908,7 @@ float coarseDevAt(ivec2 coord) {
     return m;
 }
 
-float sampleSameColorNRRing(ivec2 coord, int ring) {
+float sampleSameColorNRRing(ivec2 coord, int ring, float mCoarse) {
     float c = sampleBayerRaw(coord);
     if (u_dp_strength <= 0.0 && u_raw_nr_strength <= 0.0) return c;
 
@@ -1050,7 +1050,10 @@ float sampleSameColorNRRing(ivec2 coord, int ring) {
             // Regional directional flat pull (shipped).  omega=0 (noise) keeps
             // bavg=iavg, bit-identical to the baseline S3; omega>0 (texture)
             // pulls toward the along-feature iDir instead of the omni-mean.
-            float coarseRatio = (maxNb > 1e-6) ? coarseDevAt(coord) / maxNb : 2.0;
+            // mCoarse is the per-fragment coarse dev threaded from
+            // demosaicBilinear (computed once), NOT re-read per sample — the
+            // per-sample 3x3 cell ring was the S3 performance regression.
+            float coarseRatio = (maxNb > 1e-6) ? mCoarse / maxNb : 2.0;
             float omega = clamp((coarseRatio - 1.5) * 1.0, 0.0, 1.0);
             bavg = iavg + (iDir - iavg) * omega;
         } else {
@@ -1089,7 +1092,7 @@ float sampleSameColorNRRing(ivec2 coord, int ring) {
 // index — correct at every zoom AND in 1:1 stills, with no guard arithmetic.
 // GLSL requires the ring variant be declared before use, so the wrapper is
 // omitted (dead) and callers invoke the ring form directly.
-float denoisedSampleRawRing(ivec2 sensorCoord, int ring) {
+float denoisedSampleRawRing(ivec2 sensorCoord, int ring, float mCoarse) {
     ivec2 clampedCoord = clamp(sensorCoord, ivec2(0), ivec2(u_sensorSize) - ivec2(1));
     if (u_denoise_active > 0.5) {
         // Extreme resize capture (a whole filter footprint << one output texel,
@@ -1137,10 +1140,10 @@ float denoisedSampleRawRing(ivec2 sensorCoord, int ring) {
         return den.a;
         }
     }
-    return sampleSameColorNRRing(clampedCoord, ring);
+    return sampleSameColorNRRing(clampedCoord, ring, mCoarse);
 }
 
-vec3 demosaicAt(ivec2 sensorCoord, vec2 lsSensorUV, int ring) {
+vec3 demosaicAt(ivec2 sensorCoord, vec2 lsSensorUV, int ring, float mCoarse) {
     int phase = safePhase(sensorCoord.x, sensorCoord.y);
     int color = u_bayer_color_map[phase];
 
@@ -1164,17 +1167,17 @@ vec3 demosaicAt(ivec2 sensorCoord, vec2 lsSensorUV, int ring) {
     vec2 lsSW = lsSensorUV + vec2(-1.0,  1.0);
     vec2 lsSE = lsSensorUV + vec2( 1.0,  1.0);
 
-    float nN  = denoisedSampleRawRing(nN_coord, ring)  * lsGain(lsN);
-    float nS  = denoisedSampleRawRing(nS_coord, ring)  * lsGain(lsS);
-    float nW  = denoisedSampleRawRing(nW_coord, ring)  * lsGain(lsW);
-    float nE  = denoisedSampleRawRing(nE_coord, ring)  * lsGain(lsE);
+    float nN  = denoisedSampleRawRing(nN_coord, ring, mCoarse)  * lsGain(lsN);
+    float nS  = denoisedSampleRawRing(nS_coord, ring, mCoarse)  * lsGain(lsS);
+    float nW  = denoisedSampleRawRing(nW_coord, ring, mCoarse)  * lsGain(lsW);
+    float nE  = denoisedSampleRawRing(nE_coord, ring, mCoarse)  * lsGain(lsE);
 
-    float nNW = denoisedSampleRawRing(nNW_coord, ring) * lsGain(lsNW);
-    float nNE = denoisedSampleRawRing(nNE_coord, ring) * lsGain(lsNE);
-    float nSW = denoisedSampleRawRing(nSW_coord, ring) * lsGain(lsSW);
-    float nSE = denoisedSampleRawRing(nSE_coord, ring) * lsGain(lsSE);
+    float nNW = denoisedSampleRawRing(nNW_coord, ring, mCoarse) * lsGain(lsNW);
+    float nNE = denoisedSampleRawRing(nNE_coord, ring, mCoarse) * lsGain(lsNE);
+    float nSW = denoisedSampleRawRing(nSW_coord, ring, mCoarse) * lsGain(lsSW);
+    float nSE = denoisedSampleRawRing(nSE_coord, ring, mCoarse) * lsGain(lsSE);
 
-    float center = denoisedSampleRawRing(sensorCoord, ring) * gain;
+    float center = denoisedSampleRawRing(sensorCoord, ring, mCoarse) * gain;
     float r = 0.0, g = 0.0, b = 0.0;
 
     if (color == 0) {
@@ -1202,9 +1205,226 @@ vec3 demosaicAt(ivec2 sensorCoord, vec2 lsSensorUV, int ring) {
     return vec3(r, g, b);
 }
 
+// Dual-ring same-color sample used by the fused smooth-box path ONLY, when
+// u_nr_radius == 2.  The 2x2 ring-4 box of the smooth blend sits exactly on
+// the middle four cells of the 4x4 ring-2 box, so those four positions were
+// evaluated TWICE per fragment (once per box).  This function computes BOTH
+// the ring-2 sample (lo, the 4x4 side) and the ring-4 sample (hi, the 2x2
+// side) from ONE read set.  Each result is bit-identical to a standalone
+// sampleSameColorNRRing(coord, 2/4, mCoarse) call: same taps, same per-branch
+// arithmetic, listed verbatim.  Everything else (u_nr_radius != 2, no blend,
+// 1:1 capture, pack) keeps the plain single-ring demosaicAt.
+void denoisedDualRing(ivec2 coord, float mCoarse, out float lo, out float hi) {
+    float c = sampleBayerRaw(coord);
+    if (u_dp_strength <= 0.0 && u_raw_nr_strength <= 0.0) { lo = c; hi = c; return; }
+
+    float nE  = sampleBayerRaw(coord + ivec2( 2, 0));
+    float nW  = sampleBayerRaw(coord + ivec2(-2, 0));
+    float nN  = sampleBayerRaw(coord + ivec2( 0,-2));
+    float nS  = sampleBayerRaw(coord + ivec2( 0, 2));
+    float nNE = sampleBayerRaw(coord + ivec2( 2,-2));
+    float nNW = sampleBayerRaw(coord + ivec2(-2,-2));
+    float nSE = sampleBayerRaw(coord + ivec2( 2, 2));
+    float nSW = sampleBayerRaw(coord + ivec2(-2, 2));
+    float nEE = sampleBayerRaw(coord + ivec2( 4, 0));
+    float nWW = sampleBayerRaw(coord + ivec2(-4, 0));
+    float nNN = sampleBayerRaw(coord + ivec2( 0,-4));
+    float nSS = sampleBayerRaw(coord + ivec2( 0, 4));
+
+    float clipLo = max(u_white_level - u_black_level, 1.0);
+    float corrStrength = max(u_dp_strength, 0.85 * u_raw_nr_strength);
+    float applyStrength = max(corrStrength, 0.98);
+    float s3w = 0.98 * u_raw_nr_strength;
+
+    // ---- lo: ring-2 path (verbatim copy of the ring<4 branch) ----
+    float sumN2 = nE + nW + nN + nS;
+    float mn2 = min(min(nE, nW), min(nN, nS));
+    float mx2 = max(max(nE, nW), max(nN, nS));
+    float iavg2 = (sumN2 - mn2 - mx2) * (1.0 / 2.0);
+    float center2 = c;
+    if (corrStrength > 0.0) {
+        float sigma2 = sqrt(max(u_iso_model_a * max(iavg2, 0.0) + u_iso_model_b, 1.0));
+        float band2 = max((0.1 + 0.3 * u_dp_strength) * max(iavg2, 0.0),
+                          (2.0 + 2.0 * u_dp_strength) * sigma2);
+        bool hot = (c > mx2) && (c - iavg2) > band2;
+        bool cold = (c < mn2) && (iavg2 - c) > band2;
+        if (hot || cold) {
+            center2 = mix(c, iavg2, applyStrength);
+        }
+    }
+    lo = (c < clipLo) ? mix(center2, iavg2, s3w) : center2;
+
+    // ---- hi: ring-4 path (verbatim copy of the ring>=4 branch) ----
+    float sumN = nE + nW + nN + nS + nNE + nNW + nSE + nSW + nEE + nWW + nNN + nSS;
+    float mn = min(min(min(min(min(nE, nW), min(nN, nS)), min(nNE, nNW)), min(nSE, nSW)),
+                   min(min(nEE, nWW), min(nNN, nSS)));
+    float mx = max(max(max(max(max(nE, nW), max(nN, nS)), max(nNE, nNW)), max(nSE, nSW)),
+                   max(max(nEE, nWW), max(nNN, nSS)));
+    float iavg = (sumN - mn - mx) * (1.0 / 10.0);
+
+    float sigma = sqrt(max(u_iso_model_a * max(iavg, 0.0) + u_iso_model_b, 1.0));
+    float band = max((0.1 + 0.3 * u_dp_strength) * max(iavg, 0.0),
+                     (2.0 + 2.0 * u_dp_strength) * sigma);
+
+    float iDir = iavg;
+    float maxNb = 0.0;
+    float minDev = 0.0;
+    {
+        float aH   = (nE + nW) * 0.5;
+        float aV   = (nN + nS) * 0.5;
+        float a45  = (nNE + nSW) * 0.5;
+        float a135 = (nSE + nNW) * 0.5;
+        float dH   = abs(nE - nW);
+        float dV   = abs(nN - nS);
+        float d45  = abs(nNE - nSW);
+        float d135 = abs(nSE - nNW);
+        iDir = aH;
+        if (dV < dH && dV <= d45 && dV <= d135) iDir = aV;
+        else if (d45 < dH && d45 <= dV && d45 <= d135) iDir = a45;
+        else if (d135 < dH && d135 <= dV && d135 <= d45) iDir = a135;
+
+        float tN = nNN + nNE + nNW + c - min(min(nNN, nNE), min(nNW, c))
+            - max(max(nNN, nNE), max(nNW, c));
+        float devN = abs(nN - tN * 0.5);
+        float tS = nSS + nSE + nSW + c - min(min(nSS, nSE), min(nSW, c))
+            - max(max(nSS, nSE), max(nSW, c));
+        float devS = abs(nS - tS * 0.5);
+        float tE = nEE + nNE + nSE + c - min(min(nEE, nNE), min(nSE, c))
+            - max(max(nEE, nNE), max(nSE, c));
+        float devE = abs(nE - tE * 0.5);
+        float tW = nWW + nNW + nSW + c - min(min(nWW, nNW), min(nSW, c))
+            - max(max(nWW, nNW), max(nSW, c));
+        float devW = abs(nW - tW * 0.5);
+        maxNb = max(max(devN, devS), max(devE, devW));
+        minDev = min(min(devN, devS), min(devE, devW));
+    }
+
+    float center = c;
+    if (corrStrength > 0.0) {
+        bool hot = (c > mx) && (c - iavg) > band;
+        bool cold = (c < mn) && (iavg - c) > band;
+        if (hot || cold) {
+            if (abs(c - iavg) > 6.0 * maxNb) {
+                center = mix(c, iDir, applyStrength);
+            }
+        }
+    }
+
+    float bavg = iavg;
+    {
+        float sg = max(sigma, 6.0 * minDev);
+        if (maxNb <= 6.0 * sigma) {
+            float coarseRatio = (maxNb > 1e-6) ? mCoarse / maxNb : 2.0;
+            float omega = clamp((coarseRatio - 1.5) * 1.0, 0.0, 1.0);
+            bavg = iavg + (iDir - iavg) * omega;
+        } else {
+            float tau = 2.5 * sg;
+            float invTau = 1.0 / tau;
+            float wsum = 0.0;
+            bavg = 0.0;
+            float w;
+            w = clamp(1.0 - max(abs(nE - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nE; wsum += w;
+            w = clamp(1.0 - max(abs(nW - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nW; wsum += w;
+            w = clamp(1.0 - max(abs(nN - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nN; wsum += w;
+            w = clamp(1.0 - max(abs(nS - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nS; wsum += w;
+            w = clamp(1.0 - max(abs(nNE - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nNE; wsum += w;
+            w = clamp(1.0 - max(abs(nNW - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nNW; wsum += w;
+            w = clamp(1.0 - max(abs(nSE - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nSE; wsum += w;
+            w = clamp(1.0 - max(abs(nSW - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nSW; wsum += w;
+            w = clamp(1.0 - max(abs(nEE - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nEE; wsum += w;
+            w = clamp(1.0 - max(abs(nWW - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nWW; wsum += w;
+            w = clamp(1.0 - max(abs(nNN - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nNN; wsum += w;
+            w = clamp(1.0 - max(abs(nSS - center) - tau, 0.0) * invTau, 0.0, 1.0); bavg += w * nSS; wsum += w;
+            if (wsum > 0.0) bavg /= wsum; else bavg = center;
+        }
+    }
+    hi = (c < clipLo) ? mix(center, bavg, s3w) : center;
+}
+
+// Fused (4x4 ring-2 + 2x2 ring-4) demosaic: the smooth blend's mid-box
+// positions are evaluated once, producing both box sides.  Outputs are
+// bit-identical to the two standalone demosaicAt calls (lo = ring-2
+// reconstruction, hi = ring-4 reconstruction).
+void demosaicAtDual(ivec2 sensorCoord, vec2 lsSensorUV, float mCoarse, out vec3 lo, out vec3 hi) {
+    int phase = safePhase(sensorCoord.x, sensorCoord.y);
+    int color = u_bayer_color_map[phase];
+
+    float gain = texture(u_lens_shading_map, lsSensorUV / u_sensorSize)[phase];
+
+    ivec2 nN_coord = sensorCoord + ivec2( 0, -1);
+    ivec2 nS_coord = sensorCoord + ivec2( 0,  1);
+    ivec2 nW_coord = sensorCoord + ivec2(-1,  0);
+    ivec2 nE_coord = sensorCoord + ivec2( 1,  0);
+    ivec2 nNW_coord = sensorCoord + ivec2(-1, -1);
+    ivec2 nNE_coord = sensorCoord + ivec2( 1, -1);
+    ivec2 nSW_coord = sensorCoord + ivec2(-1,  1);
+    ivec2 nSE_coord = sensorCoord + ivec2( 1,  1);
+
+    vec2 lsN  = lsSensorUV + vec2( 0.0, -1.0);
+    vec2 lsS  = lsSensorUV + vec2( 0.0,  1.0);
+    vec2 lsW  = lsSensorUV + vec2(-1.0,  0.0);
+    vec2 lsE  = lsSensorUV + vec2( 1.0,  0.0);
+    vec2 lsNW = lsSensorUV + vec2(-1.0, -1.0);
+    vec2 lsNE = lsSensorUV + vec2( 1.0, -1.0);
+    vec2 lsSW = lsSensorUV + vec2(-1.0,  1.0);
+    vec2 lsSE = lsSensorUV + vec2( 1.0,  1.0);
+
+    float lN,  hN,  lS,  hS,  lW,  hW,  lE,  hE;
+    float lNW, hNW, lNE, hNE, lSW, hSW, lSE, hSE;
+    float lC,  hC;
+    denoisedDualRing(nN_coord, mCoarse, lN, hN);  lN *= lsGain(lsN); hN *= lsGain(lsN);
+    denoisedDualRing(nS_coord, mCoarse, lS, hS);  lS *= lsGain(lsS); hS *= lsGain(lsS);
+    denoisedDualRing(nW_coord, mCoarse, lW, hW);  lW *= lsGain(lsW); hW *= lsGain(lsW);
+    denoisedDualRing(nE_coord, mCoarse, lE, hE);  lE *= lsGain(lsE); hE *= lsGain(lsE);
+    denoisedDualRing(nNW_coord, mCoarse, lNW, hNW); lNW *= lsGain(lsNW); hNW *= lsGain(lsNW);
+    denoisedDualRing(nNE_coord, mCoarse, lNE, hNE); lNE *= lsGain(lsNE); hNE *= lsGain(lsNE);
+    denoisedDualRing(nSW_coord, mCoarse, lSW, hSW); lSW *= lsGain(lsSW); hSW *= lsGain(lsSW);
+    denoisedDualRing(nSE_coord, mCoarse, lSE, hSE); lSE *= lsGain(lsSE); hSE *= lsGain(lsSE);
+    denoisedDualRing(sensorCoord, mCoarse, lC, hC); lC *= gain; hC *= gain;
+
+    float loR = 0.0, loG = 0.0, loB = 0.0;
+    float hiR = 0.0, hiG = 0.0, hiB = 0.0;
+    if (color == 0) {
+        loR = lC;
+        float diagL = (lNW + lNE + lSW + lSE) * 0.25;
+        loG = (lW + lE + lN + lS) * 0.25;
+        loB = diagL;
+        hiR = hC;
+        float diagH = (hNW + hNE + hSW + hSE) * 0.25;
+        hiG = (hW + hE + hN + hS) * 0.25;
+        hiB = diagH;
+    } else if (color == 2) {
+        loB = lC;
+        float diagL = (lNW + lNE + lSW + lSE) * 0.25;
+        loG = (lW + lE + lN + lS) * 0.25;
+        loR = diagL;
+        hiB = hC;
+        float diagH = (hNW + hNE + hSW + hSE) * 0.25;
+        hiG = (hW + hE + hN + hS) * 0.25;
+        hiR = diagH;
+    } else {
+        loG = lC;
+        hiG = hC;
+        int colorNS = u_bayer_color_map[safePhase(sensorCoord.x, sensorCoord.y - 1)];
+        if (colorNS == 0) {
+            loR = (lN + lS) * 0.5; loB = (lW + lE) * 0.5;
+            hiR = (hN + hS) * 0.5; hiB = (hW + hE) * 0.5;
+        } else {
+            loR = (lW + lE) * 0.5; loB = (lN + lS) * 0.5;
+            hiR = (hW + hE) * 0.5; hiB = (hN + hS) * 0.5;
+        }
+    }
+    lo = vec3(loR, loG, loB);
+    hi = vec3(hiR, hiG, hiB);
+}
+
 vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
     if (u_box_aa <= 1) {
-        return demosaicAt(ivec2(clampSensor(sensorUV)), lsSensorUV, u_nr_radius);
+        // 1:1 capture: one demosaic per output pixel, the coarse dev is read
+        // once at the clamped sample (bit-identical to pre-thread GLSL).
+        vec2 s0 = clampSensor(sensorUV);
+        float mCoarse = coarseDevAt(ivec2(s0));
+        return demosaicAt(ivec2(s0), lsSensorUV, u_nr_radius, mCoarse);
     }
     // Honor the real box size: the inline S1/S3 filter carries the averaging
     // when the sliders are up, so the box can step down to 2x2/3x3 and keep
@@ -1214,6 +1434,11 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
     int bx = clamp(u_box_aa, 2, 4);
     float baseOff = (bx >= 3) ? -1.0 : 0.0;
     vec2 base = floor(sensorUV) + vec2(baseOff);
+    // One coarse dev per output fragment, read once at the box centre
+    // (base + bx/2); every box-AA ring sample shares it.  The old per-sample
+    // coarse read re-fetched the whole 3x3 coarse cell ring per ring sample
+    // (~10x the texel fetches in the smooth box path — the S3 regression).
+    float mCoarse = coarseDevAt(ivec2(base) + ivec2(bx / 2, bx / 2));
     // Smooth box-AA step (preview k>2): instead of stepping 4x4+nr2 -> 2x2+nr4
     // at s3>=0.7, blend the two box means by u_box_blend (host =
     // smoothstep(s3, 0.65, 0.75)).  A continuous box removes the sigma step
@@ -1221,21 +1446,27 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
     // bit-identical to the plain box (mirror-validated: maxDelta <= 0.00027).
     float blendW = u_box_blend;
     if (blendW > 0.0) {
+        // Fused smooth blend: the 2x2 ring-4 box sits exactly on the middle
+        // four cells of the 4x4 ring-2 box (base2 = base + mOff), so those four
+        // positions are evaluated ONCE via demosaicAtDual — one read set yields
+        // both box sides, bit-identical to the two standalone 20-evaluation
+        // loops but without re-running 4 of them per fragment (the only
+        // provably-redundant work in the inline k>2 path).
         vec3 sum4 = vec3(0.0);
+        vec3 sum2 = vec3(0.0);
+        int mOff = (bx >= 3) ? 1 : 0;
         for (int dy = 0; dy < bx; dy++) {
             for (int dx = 0; dx < bx; dx++) {
                 ivec2 c = clamp(ivec2(base) + ivec2(dx, dy), ivec2(0), ivec2(u_sensorSize) - ivec2(1));
                 vec2 lsC = lsSensorUV + vec2(float(dx) + baseOff, float(dy) + baseOff);
-                sum4 += demosaicAt(c, lsC, 2);
-            }
-        }
-        vec2 base2 = floor(sensorUV);
-        vec3 sum2 = vec3(0.0);
-        for (int dy = 0; dy < 2; dy++) {
-            for (int dx = 0; dx < 2; dx++) {
-                ivec2 c = clamp(ivec2(base2) + ivec2(dx, dy), ivec2(0), ivec2(u_sensorSize) - ivec2(1));
-                vec2 lsC = lsSensorUV + vec2(float(dx), float(dy));
-                sum2 += demosaicAt(c, lsC, 4);
+                if (dx >= mOff && dx < mOff + 2 && dy >= mOff && dy < mOff + 2) {
+                    vec3 lo, hi;
+                    demosaicAtDual(c, lsC, mCoarse, lo, hi);
+                    sum4 += lo;
+                    sum2 += hi;
+                } else {
+                    sum4 += demosaicAt(c, lsC, 2, mCoarse);
+                }
             }
         }
         return sum4 * ((1.0 - blendW) / float(bx * bx)) + sum2 * (blendW * 0.25);
@@ -1245,7 +1476,7 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
         for (int dx = 0; dx < bx; dx++) {
             ivec2 c = clamp(ivec2(base) + ivec2(dx, dy), ivec2(0), ivec2(u_sensorSize) - ivec2(1));
             vec2 lsC = lsSensorUV + vec2(float(dx) + baseOff, float(dy) + baseOff);
-            sum += demosaicAt(c, lsC, u_nr_radius);
+            sum += demosaicAt(c, lsC, u_nr_radius, mCoarse);
         }
     }
     return sum * (1.0 / float(bx * bx));
@@ -1389,7 +1620,7 @@ float coarseDevAt(ivec2 coord) {
     return m;
 }
 
-float sampleSameColorNR(ivec2 coord) {
+float sampleSameColorNR(ivec2 coord, float mCoarse) {
     float c = sampleBayerRaw(coord);
     if (u_dp_strength <= 0.0 && u_raw_nr_strength <= 0.0) return c;
 
@@ -1501,7 +1732,9 @@ float sampleSameColorNR(ivec2 coord) {
             // Regional directional flat pull (shipped, same as the demosaic
             // copy): omega=0 on noise keeps bavg=iavg bit-identical to the
             // baseline S3; omega>0 on wide-area texture keeps the texture.
-            float coarseRatio = (maxNb > 1e-6) ? coarseDevAt(coord) / maxNb : 2.0;
+            // mCoarse is the per-output-texel coarse dev (one read at the
+            // pack's 1:1 anchor), shared by all 4 phase cells.
+            float coarseRatio = (maxNb > 1e-6) ? mCoarse / maxNb : 2.0;
             float omega = clamp((coarseRatio - 1.5) * 1.0, 0.0, 1.0);
             bavg = iavg + (iDir - iavg) * omega;
         } else {
@@ -1617,6 +1850,7 @@ void main() {
 
         int parityX = abs(sc.x % 2);
         int parityY = abs(sc.y % 2);
+        float mCoarse = coarseDevAt(sc);
 
         vec4 result = vec4(0.0);
         for (int p = 0; p < 4; p++) {
@@ -1626,7 +1860,7 @@ void main() {
             // origin's parity where it does not match p, so safePhase(cc) == p.
             ivec2 cc = sc + ivec2(parityX ^ phaseX, parityY ^ phaseY);
             cc = clamp(cc, ivec2(0), ivec2(u_sensorSize) - ivec2(1));
-            result[p] = sampleSameColorNR(cc);
+            result[p] = sampleSameColorNR(cc, mCoarse);
         }
         outDenoised = result;
         return;
@@ -1662,13 +1896,14 @@ void main() {
         ivec2 sc = clamp(b0, ivec2(0), ivec2(u_sensorSize) - ivec2(1));
         int parityX = abs(sc.x % 2);
         int parityY = abs(sc.y % 2);
+        float mCoarse = coarseDevAt(sc);
         vec4 result = vec4(0.0);
         for (int p = 0; p < 4; p++) {
             int phaseX = p & 1;
             int phaseY = p >> 1;
             ivec2 cc = sc + ivec2(parityX ^ phaseX, parityY ^ phaseY);
             cc = clamp(cc, ivec2(0), ivec2(u_sensorSize) - ivec2(1));
-            result[p] = sampleSameColorNR(cc);
+            result[p] = sampleSameColorNR(cc, mCoarse);
         }
         outDenoised = result;
         return;

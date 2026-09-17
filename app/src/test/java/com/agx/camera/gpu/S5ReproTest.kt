@@ -482,7 +482,7 @@ class S5ReproTest {
     }
 
     /** Mirror of GLSL sampleSameColorNR (S1 DPC + S3 α-trim blend + directional I_D). */
-    private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float): Float {
+    private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float, mCoarse: Float? = null): Float {
         if (s1 <= 0f && s3 <= 0f) return sensorVal(v, sx, sy)
         val c = sensorVal(v, sx, sy)
         val nE = sensorVal(v, sx + 2, sy)
@@ -558,7 +558,7 @@ class S5ReproTest {
             // and pack GLSL copies): omega = clamp(coarseDev/maxNb - 1.5, 0, 1)
             // blends toward the along-feature iDir.  Noise keeps omega=0
             // (bit-identical to the baseline S3); wide-area texture preserves.
-            val ratio = if (maxNb > 1e-6f) coarseDev(v, sx, sy) / maxNb else 2f
+            val ratio = if (maxNb > 1e-6f) (mCoarse ?: coarseDev(v, sx, sy)) / maxNb else 2f
             val omega = ((ratio - 1.5f) / 1.0f).coerceIn(0f, 1f)
             bavg = iavg + (iDir - iavg) * omega
         } else {
@@ -590,15 +590,18 @@ class S5ReproTest {
             cache[key]?.let { return it }
             val phase = sensorPhase(cx, cy)
             val color = BA_COLOR_MAP[phase]
-            val nN = sameColorNR(sensor, cx, cy - 1, s1, s3)
-            val nS = sameColorNR(sensor, cx, cy + 1, s1, s3)
-            val nW = sameColorNR(sensor, cx - 1, cy, s1, s3)
-            val nE = sameColorNR(sensor, cx + 1, cy, s1, s3)
-            val nNW = sameColorNR(sensor, cx - 1, cy - 1, s1, s3)
-            val nNE = sameColorNR(sensor, cx + 1, cy - 1, s1, s3)
-            val nSW = sameColorNR(sensor, cx - 1, cy + 1, s1, s3)
-            val nSE = sameColorNR(sensor, cx + 1, cy + 1, s1, s3)
-            val center = sameColorNR(sensor, cx, cy, s1, s3)
+            // 1:1 capture: one coarse dev per output pixel (centre), shared by
+            // all 9 taps — mirrors the GLSL per-fragment mCoarse threading.
+            val mc = coarseDev(sensor, cx, cy)
+            val nN = sameColorNR(sensor, cx, cy - 1, s1, s3, mc)
+            val nS = sameColorNR(sensor, cx, cy + 1, s1, s3, mc)
+            val nW = sameColorNR(sensor, cx - 1, cy, s1, s3, mc)
+            val nE = sameColorNR(sensor, cx + 1, cy, s1, s3, mc)
+            val nNW = sameColorNR(sensor, cx - 1, cy - 1, s1, s3, mc)
+            val nNE = sameColorNR(sensor, cx + 1, cy - 1, s1, s3, mc)
+            val nSW = sameColorNR(sensor, cx - 1, cy + 1, s1, s3, mc)
+            val nSE = sameColorNR(sensor, cx + 1, cy + 1, s1, s3, mc)
+            val center = sameColorNR(sensor, cx, cy, s1, s3, mc)
             val diag = (nNW + nNE + nSW + nSE) * 0.25f
             val crs = (nW + nE + nN + nS) * 0.25f
             val out = when (color) {
@@ -1092,6 +1095,9 @@ class S5ReproTest {
                 val scx = (kotlin.math.floor((ox + 0.5f) * kx)).toInt()
                 val px = scx and 1
                 val base = (oy * resX + ox) * 4
+                // Pack mirror: one coarse dev per output texel at the anchor
+                // (scx, scy), shared by all 4 phase cells (GLSL per-texel mCoarse).
+                val mc = coarseDev(v, scx.coerceIn(0, SENSOR_W - 1), scy.coerceIn(0, SENSOR_H - 1))
                 for (p in 0..3) {
                     val phaseX = p and 1
                     val phaseY = p shr 1
@@ -1099,7 +1105,7 @@ class S5ReproTest {
                         v,
                         (scx + (px xor phaseX)).coerceIn(0, SENSOR_W - 1),
                         (scy + (py xor phaseY)).coerceIn(0, SENSOR_H - 1),
-                        s1, s3
+                        s1, s3, mc
                     )
                 }
             }
@@ -1134,6 +1140,7 @@ class S5ReproTest {
                     // exactly as the current pack does (bit-identical).
                     val px = scx and 1
                     val py = scy and 1
+                    val mc = coarseDev(v, scx.coerceIn(0, SENSOR_W - 1), scy.coerceIn(0, SENSOR_H - 1))
                     for (p in 0..3) {
                         val phaseX = p and 1
                         val phaseY = p shr 1
@@ -1141,7 +1148,7 @@ class S5ReproTest {
                             v,
                             (scx + (px xor phaseX)).coerceIn(0, SENSOR_W - 1),
                             (scy + (py xor phaseY)).coerceIn(0, SENSOR_H - 1),
-                            s1, s3
+                            s1, s3, mc
                         )
                     }
                     continue
