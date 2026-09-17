@@ -9,10 +9,12 @@ import java.nio.FloatBuffer
 /**
  * Stage 5 — output-domain denoise (plan §3 Stage 5): weighted YC1C2 + SWGF
  * self-guided filter (I=p, 8 side windows, min-variance window chosen) with a
- * Fast-GF style separable box-statistic prefilter. The pass is designed to
- * run twice with a β=0.3 noise return and κ×1.4 on round 2, but the host
- * currently runs a single iteration (round 1 only) while double-pass behavior
- * is still being tuned.
+ * Fast-GF style separable box-statistic prefilter. The pass runs twice with a
+ * β=0.3 noise return; round 2 raises the ε multiplier to 1.96 = (κ×1.4)² —
+ * the plan's "κ×1.4 on round 2" scales σ, and ε ∝ σ̂² so the variance-domain
+ * multiplier is the square.  Host side (PreviewRenderer.runStage5) runs both
+ * iterations at full strength; slider 0 skips the pass entirely (bit-exact
+ * bypass).
  *
  * Passes (all one texel per output pixel, same resolution as the demosaic FBO):
  *  statsH : horizontal 5-tap box of Y (and Y²) of the (possibly β-blended)

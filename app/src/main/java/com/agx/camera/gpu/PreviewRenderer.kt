@@ -842,7 +842,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     }
 
     /** Stage 5 — output-domain SWGF over the demosaiced RGB (plan §3 Stage 5).
-     *  Two iterations with a β=0.3 noise return and κ×1.4 on round 2. The
+     *  Two iterations with a β=0.3 noise return and κ×1.4 on round 2. "κ×1.4"
+     *  is the round-2 σ multiplier; because ε ∝ σ̂² here, the round-2 ε
+     *  multiplier is (κ×1.4)² = 1.96 (see the round-2 comment below). The
      *  returned texture id feeds the ISP (nrShader/draw) instead of the raw
      *  demosaic output.  The S5 geometry lives in output-pixel space, so the
      *  capture path passes winScale = captureRes/previewRes > 1 to widen the
@@ -861,6 +863,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val sigmaW = gridW.toFloat()
         val sigmaH = gridH.toFloat()
         val s = outNrStrength.coerceIn(0f, 1f)
+        // Slider 0 = full bypass (C6): the caller gates on outNrStrength > 0,
+        // but keep the guarantee here too so a strength-0 call can never run
+        // round 2's β-composed input (mix(outNr1, input, β)) through the final
+        // u_strength blend — that would not be bit-equal to the input.
+        if (s <= 0f) return inputTex
         // Decoupled luma/chroma response.  eps is fixed at design maximum;
         // the slider controls a linear blend toward the filtered result so
         // strength 0..100 maps to 0%..100% denoise (0% = identity,
@@ -888,9 +895,17 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val evGain2 = Math.pow(2.0, 2.0 * (exposureEv - 1.5)).toFloat().coerceIn(1f / 8f, 16f)
         val s5IsoA = isoModelA * evGain2
         val s5IsoB = isoModelB * evGain2
-        // Single SWGF iteration; round 2 (κ×1.4 + β noise return) is
-        // bypassed here pending further tuning of the double-pass behavior.
-        val iterations = 1
+        // Two SWGF iterations (plan §3 Stage 5, calibrated in the appendix-C
+        // noise-anchor table).  Round 1 blends the demosaic output with itself
+        // (β is an identity there); round 2 runs against the original with the
+        // ε multiplier raised to 1.96 = (κ×1.4)²  — the plan's "κ×1.4 on round
+        // 2" applies to σ, and since ε ∝ σ̂² (variance domain) the ε multiplier
+        // is the square of the σ multiplier.
+        val iterations = 2
+        // Round-2 ε multiplier = (κ×1.4)².  κ is the round-1 σ multiplier
+        // (lumaEpsScale/chromaEpsScale lower these into the ε base); the plan's
+        // "κ×1.4" σ ratio therefore squares in ε (ε ∝ σ̂²).
+        val round2EpsMult = 1.96f
 
         // Round 1 (κ1): demosaic output → outNr1.
         bindTarget(statsHFboId, w, h)
@@ -912,7 +927,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
         if (iterations < 2) return outNr1TexId
 
-        // Round 2 (κ×1.4): outNr1 → outNr2, β-return against the original.
+        // Round 2: outNr1 → outNr2.  ε multiplier 1.96 = (κ×1.4)², because ε ∝ σ̂²
+        // (κ×1.4 acts on σ; the variance-domain ε must scale by the square).
+        // β=0.3 noise-return blends the round-1 output toward the ORIGINAL
+        // input before stats and the final strength mix, so the second pass
+        // sees 0.7·r1 + 0.3·original instead of consolidating r1's correlated
+        // residual (flat-region low-frequency residue cleanup, plan §3).
         bindTarget(statsHFboId, w, h)
         outNrShader.drawStatsH(outNr1TexId, inputTex, beta, S5_LUMA_WEIGHTS, winScale)
         logGlError("stage5 statsH2", bayerRenderCount)
@@ -923,7 +943,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         outNrShader.drawMain(
             outNr1TexId, inputTex, statsVTexId, sigmaTex,
             sigmaW, sigmaH, w.toFloat(), h.toFloat(),
-            beta, 1.96f * lumaEpsScale, 1.96f * chromaEpsScale, sigmaDm2,
+            beta, round2EpsMult * lumaEpsScale, round2EpsMult * chromaEpsScale, sigmaDm2,
             inverseRange2, sigmaScale,
             useIsoSigma, s5IsoA, s5IsoB,
             winScale, epsBoost, strength = s
