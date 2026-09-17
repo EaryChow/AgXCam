@@ -13,6 +13,7 @@ import com.agx.camera.gpu.SyntheticBayerTest.flagCell
 import com.agx.camera.gpu.SyntheticBayerTest.avgCell
 import com.agx.camera.gpu.SyntheticBayerTest.sensorValue
 import com.agx.camera.gpu.SyntheticBayerTest.isoSigma
+import com.agx.camera.gpu.SyntheticBayerTest.isoSigmaSq
 import com.agx.camera.gpu.SyntheticBayerTest.rawPackCell
 import com.agx.camera.gpu.SyntheticBayerTest.correctedCell
 import kotlin.math.abs
@@ -148,6 +149,30 @@ class SyntheticBayerRefTest {
             val floorAtCell = isoSigma(meanSig, params.isoA, params.isoB)
             assertTrue("sigma² < per-cell floor at (${r.sx},${r.sy}): $s2 < $floorAtCell", s2 >= floorAtCell - 1e-4f)
         }
+    }
+
+    @Test
+    fun sigmaCellDarkFlatEqualsIsoFloor() {
+        // A perfectly flat dark cell (zero residual in every CFA phase) must
+        // collapse the MAD to ~0 and clamp σ̂² to the Stage-0 ISO model floor —
+        // the exact contract the Stage-6 dark AgX development relies on, and
+        // now live on the real preview + capture σ̂ texture (after S1 in the
+        // demosaic chain, S1 itself leaves flat regions untouched).
+        fun check(dn: Float) {
+            val flat: (Int, Int) -> FloatArray = { _, _ -> floatArrayOf(dn, dn, dn, dn) }
+            val (tx, ty) = cellTexelFor(0, 0, viewW, viewH)
+            val out = SyntheticBayerTest.sigmaCell(flat, tx, ty, viewW, viewH,
+                params.isoA, params.isoB)
+            val meanSignal = dn
+            val floorSq = isoSigmaSq(meanSignal, params.isoA, params.isoB)
+            assertEquals("flat dark σ̂² must equal the ISO floor (not exceed it), dn=$dn",
+                floorSq, out[0], 1e-4f)
+            assertEquals("σ̂ must be sqrt(floor) at dn=$dn",
+                kotlin.math.sqrt(maxOf(floorSq, 1e-6f)), out[1], 1e-4f)
+        }
+        check(64f)   // at black level
+        check(0f)    // fully black
+        check(12f)   // below black (clipped dark)
     }
 
     @Test

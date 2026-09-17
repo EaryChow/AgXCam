@@ -25,6 +25,12 @@ import java.nio.FloatBuffer
  * The ISO model floor (clamp lower bound) keeps AgX from "developing"
  * dark-margin noise: in flat dark patches MAD collapses to ~0, so we never
  * report a σ̂ below what the Stage-0 noise model says (DR-4 / Stage 6 note).
+ *
+ * Two input domains (same 8-neighbour channel-wise MAD):
+ *  - rgbMode=false: the sparse Bayer grid (u_domainScale = 1, raw DN);
+ *  - rgbMode=true:  a demosaiced RGB texture in 0..1 pixel units
+ *    (u_domainScale = whiteLevel-blackLevel) — the capture path's post-RAW
+ *    re-estimation point; alpha is skipped (3 channels).
  */
 class SigmaHatShaderProgram {
 
@@ -39,6 +45,8 @@ class SigmaHatShaderProgram {
     private var uBlackLevelPatternLoc = 0
     private var uIsoModelA = 0
     private var uIsoModelB = 0
+    private var uDomainScaleLoc = 0
+    private var uRgbModeLoc = 0
 
     private val quadVertices: FloatBuffer = ByteBuffer.allocateDirect(QUAD_COORDS.size * 4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer().put(QUAD_COORDS).also { it.position(0) }
@@ -61,6 +69,8 @@ class SigmaHatShaderProgram {
         uBlackLevelPatternLoc = GLES20.glGetUniformLocation(programId, "u_black_level_pattern")
         uIsoModelA = GLES20.glGetUniformLocation(programId, "u_iso_model_a")
         uIsoModelB = GLES20.glGetUniformLocation(programId, "u_iso_model_b")
+        uDomainScaleLoc = GLES20.glGetUniformLocation(programId, "u_domain_scale")
+        uRgbModeLoc = GLES20.glGetUniformLocation(programId, "u_rgb_mode")
         Log.d(TAG, "Sigma-hat shader program created: $programId")
         com.agx.camera.CrashLogger.log(TAG, "Program created: sigmaHat=$programId")
     }
@@ -73,7 +83,9 @@ class SigmaHatShaderProgram {
         sensorWidth: Float, sensorHeight: Float,
         sparseTex: Int,
         blackLevelPattern: IntArray,
-        isoModelA: Float, isoModelB: Float
+        isoModelA: Float, isoModelB: Float,
+        domainScale: Float = 1f,
+        rgbMode: Boolean = false
     ) {
         if (programId == 0) return
         GLES20.glUseProgram(programId)
@@ -92,6 +104,8 @@ class SigmaHatShaderProgram {
             blackLevelPattern[2], blackLevelPattern[3])
         GLES20.glUniform1f(uIsoModelA, isoModelA)
         GLES20.glUniform1f(uIsoModelB, isoModelB)
+        GLES20.glUniform1f(uDomainScaleLoc, domainScale)
+        GLES20.glUniform1f(uRgbModeLoc, if (rgbMode) 1f else 0f)
 
         val posHandle = GLES20.glGetAttribLocation(programId, "a_position")
         val texHandle = GLES20.glGetAttribLocation(programId, "a_texCoord")
@@ -151,6 +165,13 @@ uniform vec2 u_viewSize;
 uniform ivec4 u_black_level_pattern;
 uniform float u_iso_model_a;
 uniform float u_iso_model_b;
+// Domain of the input texels: u_domainScale = 1 for the sparse Bayer grid
+// (already black-subtracted raw DN); = whiteLevel-blackLevel for a demosaiced
+// RGBA input in 0..1 pixel units, so the MAD variance is scaled back to raw
+// DN² (×scale²) and the ISO-model floor is evaluated at DN signal (×scale).
+uniform float u_domain_scale;
+// 0 = sparse grid (4 CFA phases incl. alpha), 1 = RGB demosaic (3 channels).
+uniform float u_rgb_mode;
 
 ${DenoiseGlsl.MOSAIC_HELPERS}
 
@@ -169,12 +190,15 @@ void main() {
     ivec2 base = ivec2(gl_FragCoord.xy);
     float sig2Total = 0.0;
     vec4 sig2ByPhase = vec4(0.0);
+    int phaseCount = 4;
+    if (u_rgb_mode > 0.5) phaseCount = 3;
 
     for (int p = 0; p < 4; p++) {
+        if (p >= phaseCount) break;
         float vals[8];
         for (int k = 0; k < 8; k++) {
             ivec2 t = clamp(base + ivec2(NOX[k], NOY[k]), ivec2(0), ivec2(u_viewSize) - ivec2(1));
-            vals[k] = channelOf(texelFetch(u_sparseTex, t, 0), p);
+            vals[k] = channelOf(texelFetch(u_sparseTex, t, 0), p) * u_domain_scale;
         }
         // ascending sort (8 elements, insertion)
         for (int i = 1; i < 8; i++) {
@@ -200,7 +224,7 @@ void main() {
             devs[j + 1] = v;
         }
         float mad = (devs[3] + devs[4]) * 0.5;
-        float sig2 = 2.1981 * mad * mad; // (1.4826^2)
+        float sig2 = 2.1981 * mad * mad * u_domain_scale * u_domain_scale;
         if (p == 0) sig2ByPhase.x = sig2;
         else if (p == 1) sig2ByPhase.y = sig2;
         else if (p == 2) sig2ByPhase.z = sig2;
@@ -208,10 +232,15 @@ void main() {
         sig2Total += sig2;
     }
 
-    float sig2Mean = sig2Total * 0.25;
+    float sig2Mean = sig2Total / float(phaseCount);
 
     vec4 center = texelFetch(u_sparseTex, base, 0);
-    float meanSignal = (center.r + center.g + center.b + center.a) * 0.25;
+    float meanSignal = 0.0;
+    if (u_rgb_mode > 0.5) {
+        meanSignal = (0.25 * center.r + 0.5 * center.g + 0.25 * center.b) * u_domain_scale;
+    } else {
+        meanSignal = (center.r + center.g + center.b + center.a) * 0.25 * u_domain_scale;
+    }
     float floor2 = isoModelSigmaSq(meanSignal);
 
     float out2 = max(sig2Mean, floor2);

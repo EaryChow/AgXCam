@@ -97,6 +97,15 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var sigmaBufferWidth = 0
     private var sigmaBufferHeight = 0
 
+    // Stage 2 (sigma-hat) output for the capture path: RGBA32F at the RAW
+    // demosaic resolution, holding the post-RAW σ̂ re-estimation that feeds
+    // Stage 5 on stills (capture runs no sparse grid, so rgbMode=true on the
+    // demosaiced output is the single DR-8 re-estimation point there).
+    private var captureSigmaFboId = 0
+    private var captureSigmaTexId = 0
+    private var captureSigmaBufferWidth = 0
+    private var captureSigmaBufferHeight = 0
+
     // Stage 5 (output-domain SWGF) buffers: separable box-stats pair and two
     // iteration outputs. RGBA32F at the demosaic resolution.
     private var statsHFboId = 0
@@ -159,6 +168,19 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     @Volatile var rawNrStrength = 0f
     @Volatile var outNrStrength = 0f
     @Volatile var syntheticTestEnabled = com.agx.camera.BuildConfig.AGX_SYNTHETIC_BAYER
+    // Runs the extra Day-0 Stage-2 draw — the post-DPC σ̂ re-estimation that
+    // DR-8 requires *as the boundary between DPC and Stage 3*.  Current
+    // consumers never read it (S3's strength is a host scalar α, S5 consumes
+    // the post-S3 estimate and the overwrite is the correct DR-8 semantics),
+    // so it must NOT burn preview GPU budget every frame: OFF by default.
+    // Keep it behind a diagnostic switch for two purposes:
+    //   1. validation channel — defect injection → σ̂ must stay unpolluted by
+    //      S1 (a DPC leak shows up as a σ̂² bump at the defect texel);
+    //   2. production profiling — cross-check the post-DPC MAD cost against
+    //      the post-S3 pass before folding either into a fused shader.
+    // The draw keeps its timing instrumentation (log-and-skip: only counted
+    // frames are logged) so enabling it costs zero logging overhead.
+    @Volatile var stage2DiagnosticPostDpcPass = false
     private var syntheticSensor: ShortArray? = null
     private var syntheticBuffer: java.nio.ByteBuffer? = null
     // Live ISO used to derive the Stage-0 noise-model uniforms for every
@@ -667,24 +689,93 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             }
         }
 
-        // Stage 2: σ̂ re-estimation (MAD) on the sparse residual grid —
-        // synthetic oracle only; on the live device S5 uses the ISO model
-        // fallback (useIsoSigma = true).
-        if (synthetic && outDenoiseActive) {
+        // Stage 2: σ̂ re-estimation (MAD) on the sparse residual grid.  The
+        // post-S3 draw (below) is the DR-8 mandatory re-estimate at the
+        // Stage 3→Stage 5 boundary — S5 reads ITS output, and it overwrites
+        // the buffer so the σ̂ texture reflects the actual post-RAW residual
+        // (no analytic variance propagation).  That single draw is the cost
+        // the performance acceptance (item 3) measures.
+        //
+        // The post-DPC draw exists for DR-8's *second* mandatory point (DPC→
+        // Stage 3 boundary) but is functionally dead for the current
+        // consumers: S3's strength is a host scalar α that never samples σ̂,
+        // and S5 reads the post-S3 estimate (so the post-S3 write-over is the
+        // correct consuming write).  Running it every frame would permanently
+        // charge the preview GPU budget for an unconsumed result, so it is
+        // OFF by default — retained only for the diagnostic switch
+        // stage2DiagnosticPostDpcPass: a validation channel that injected
+        // defects must NOT pollute σ̂ (DPC leak shows up as a σ̂² bump at the
+        // defect texel), plus a profiling hook to compare post-DPC vs post-S3
+        // MAD cost.  When enabled, the post-DPC draw runs FIRST and the
+        // post-S3 draw overwrites it — same semantics as if it were on.
+        var sigmaAvailable = false
+        val sparseGridRendered = needSparseGrid && previewZoomK <= 2.0f
+        if (outDenoiseActive && sparseGridRendered) {
             ensureSigmaBuffer(gridW, gridH)
-            bindTarget(sigmaFboId, gridW, gridH)
-            sigmaHatShader.draw(
-                transformMatrix = previewTransform,
-                cropOriginX = crop[0], cropOriginY = crop[1],
-                cropSizeX = crop[2], cropSizeY = crop[3],
-                viewWidth = gridW.toFloat(), viewHeight = gridH.toFloat(),
-                sensorWidth = effW.toFloat(), sensorHeight = effH.toFloat(),
-                sparseTex = if (rawDenoiseActive) denoisedTexId
-                    else if (dpEnabled) dpcWorkBTexId else dpcWorkATexId,
-                blackLevelPattern = effBlack,
-                isoModelA = isoModelA, isoModelB = isoModelB
-            )
-            logGlError("after stage2 sigma", bayerRenderCount)
+            val postDpcTex = if (dpEnabled) dpcWorkBTexId else dpcWorkATexId
+            val postS3Tex = if (rawDenoiseActive) denoisedTexId else postDpcTex
+            val logS2 = bayerRenderCount <= 8 || bayerRenderCount % 120 == 0
+            if (stage2DiagnosticPostDpcPass) {
+                val t0 = System.nanoTime()
+                bindTarget(sigmaFboId, gridW, gridH)
+                sigmaHatShader.draw(
+                    transformMatrix = previewTransform,
+                    cropOriginX = crop[0], cropOriginY = crop[1],
+                    cropSizeX = crop[2], cropSizeY = crop[3],
+                    viewWidth = gridW.toFloat(), viewHeight = gridH.toFloat(),
+                    sensorWidth = effW.toFloat(), sensorHeight = effH.toFloat(),
+                    sparseTex = postDpcTex,
+                    blackLevelPattern = effBlack,
+                    isoModelA = isoModelA, isoModelB = isoModelB
+                )
+                logGlError("after stage2 sigma (post-DPC diag)", bayerRenderCount)
+                val t1 = System.nanoTime()
+                bindTarget(sigmaFboId, gridW, gridH)
+                sigmaHatShader.draw(
+                    transformMatrix = previewTransform,
+                    cropOriginX = crop[0], cropOriginY = crop[1],
+                    cropSizeX = crop[2], cropSizeY = crop[3],
+                    viewWidth = gridW.toFloat(), viewHeight = gridH.toFloat(),
+                    sensorWidth = effW.toFloat(), sensorHeight = effH.toFloat(),
+                    sparseTex = postS3Tex,
+                    blackLevelPattern = effBlack,
+                    isoModelA = isoModelA, isoModelB = isoModelB
+                )
+                logGlError("after stage2 sigma (post-S3)", bayerRenderCount)
+                val t2 = System.nanoTime()
+                sigmaAvailable = true
+                if (logS2) {
+                    CrashLogger.log(
+                        TAG, "Stage2 MAD (preview): post-DPC=" +
+                            "%.3f".format((t1 - t0) / 1.0e6) +
+                            "ms post-S3=" + "%.3f".format((t2 - t1) / 1.0e6) +
+                            "ms grid=${gridW}x${gridH} diag=ON"
+                    )
+                }
+            } else {
+                val t0 = System.nanoTime()
+                bindTarget(sigmaFboId, gridW, gridH)
+                sigmaHatShader.draw(
+                    transformMatrix = previewTransform,
+                    cropOriginX = crop[0], cropOriginY = crop[1],
+                    cropSizeX = crop[2], cropSizeY = crop[3],
+                    viewWidth = gridW.toFloat(), viewHeight = gridH.toFloat(),
+                    sensorWidth = effW.toFloat(), sensorHeight = effH.toFloat(),
+                    sparseTex = postS3Tex,
+                    blackLevelPattern = effBlack,
+                    isoModelA = isoModelA, isoModelB = isoModelB
+                )
+                logGlError("after stage2 sigma (post-S3)", bayerRenderCount)
+                val t1 = System.nanoTime()
+                sigmaAvailable = true
+                if (logS2) {
+                    CrashLogger.log(
+                        TAG, "Stage2 MAD (preview): post-S3=" +
+                            "%.3f".format((t1 - t0) / 1.0e6) +
+                            "ms grid=${gridW}x${gridH}"
+                    )
+                }
+            }
         }
 
         // CPU cross-check against the synthetic oracle whenever the RAW-domain
@@ -779,9 +870,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         if (outDenoiseActive) {
             ispInputTex = runStage5(
                 demosaicFboWidth, demosaicFboHeight, demosaicFboTextureId,
-                sigmaTexId,
+                if (sigmaAvailable) sigmaTexId else 0,
                 whiteRange, gridW, gridH,
-                useIsoSigma = sigmaFboId == 0,
+                useIsoSigma = !sigmaAvailable,
                 isoModelA = isoModelA, isoModelB = isoModelB
             )
             logGlError("after stage5 outDenoise", bayerRenderCount)
@@ -1304,13 +1395,49 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         rawDemosaicFboWidth.toFloat() / maxOf(previewS5W, 1).toFloat()
                     )
                     val capEpsBoost = if (captureBoxAA > 0) 1f else 16f
+                    // Stage 2: σ̂ re-estimation on the demosaiced still. Capture
+                    // keeps the inline S1/S3 (no sparse grid chain), so the two
+                    // DR-8 points collapse to this single post-RAW re-estimate
+                    // feeding S5; rgbMode=true reads the R/G/B channels of the
+                    // 0..1 demosaic output with domainScale=whiteRange (→DN²).
+                    // The σ̂ buffer also carries the dark-region ISO-model floor
+                    // that Stage 6's AgX development relies on (previously dead
+                    // on the real capture path).  If buffer/shader are missing,
+                    // useIsoSigma falls back to the ISO model formula.
+                    ensureCaptureSigmaBuffer(rawDemosaicFboWidth, rawDemosaicFboHeight)
+                    var captureSigmaTex = 0
+                    if (outNrStrength > 0f && outNrShader.isReady() && sigmaHatShader.isReady() && captureSigmaFboId != 0) {
+                        val capSigmaNs0 = System.nanoTime()
+                        bindTarget(captureSigmaFboId, rawDemosaicFboWidth, rawDemosaicFboHeight)
+                        sigmaHatShader.draw(
+                            transformMatrix = captureMatrix,
+                            cropOriginX = crop[0], cropOriginY = crop[1],
+                            cropSizeX = crop[2], cropSizeY = crop[3],
+                            viewWidth = rawDemosaicFboWidth.toFloat(),
+                            viewHeight = rawDemosaicFboHeight.toFloat(),
+                            sensorWidth = rawCaptureReq.rawW.toFloat(),
+                            sensorHeight = rawCaptureReq.rawH.toFloat(),
+                            sparseTex = rawDemosaicFboTextureId,
+                            blackLevelPattern = bayerBlackLevelPattern,
+                            isoModelA = captureIsoModelA, isoModelB = captureIsoModelB,
+                            domainScale = captureWhiteRange,
+                            rgbMode = true
+                        )
+                        logGlError("capture stage2 sigma", bayerRenderCount)
+                        CrashLogger.log(
+                            TAG, "Stage2 MAD (capture): post-RAW=" +
+                                "%.3f".format((System.nanoTime() - capSigmaNs0) / 1.0e6) +
+                                "ms ${rawDemosaicFboWidth}x${rawDemosaicFboHeight}"
+                        )
+                        captureSigmaTex = captureSigmaTexId
+                    }
                     var captureIspInputTex = rawDemosaicFboTextureId
                     if (outNrStrength > 0f && outNrShader.isReady()) {
                         captureIspInputTex = runStage5(
                             rawDemosaicFboWidth, rawDemosaicFboHeight, rawDemosaicFboTextureId,
-                            0,
+                            captureSigmaTex,
                             captureWhiteRange, rawDemosaicFboWidth, rawDemosaicFboHeight,
-                            useIsoSigma = true,
+                            useIsoSigma = captureSigmaTex == 0,
                             isoModelA = captureIsoModelA, isoModelB = captureIsoModelB,
                             winScale = capWinScale, epsBoost = capEpsBoost
                         )
@@ -2093,6 +2220,17 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         CrashLogger.log(TAG, "Stage-2 sigma buffer: ${width}x${height} tex=$sigmaTexId")
     }
 
+    private fun ensureCaptureSigmaBuffer(width: Int, height: Int) {
+        if (captureSigmaBufferWidth == width && captureSigmaBufferHeight == height && captureSigmaFboId != 0) return
+        deleteFboTex(captureSigmaFboId, captureSigmaTexId)
+        captureSigmaFboId = 0; captureSigmaTexId = 0
+        captureSigmaBufferWidth = width
+        captureSigmaBufferHeight = height
+        val (t, f) = allocRgba32fFbo(width, height)
+        captureSigmaTexId = t; captureSigmaFboId = f
+        CrashLogger.log(TAG, "Capture Stage-2 sigma buffer: ${width}x${height} tex=$captureSigmaTexId")
+    }
+
     private fun ensureOutNrBuffers(width: Int, height: Int) {
         if (outNrBufferWidth == width && outNrBufferHeight == height && outNr2FboId != 0) return
         deleteFboTex(statsHFboId, statsHTexId)
@@ -2189,6 +2327,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             dpcWorkBFboId = 0; dpcWorkBTexId = 0
             deleteFboTex(sigmaFboId, sigmaTexId)
             sigmaFboId = 0; sigmaTexId = 0
+            deleteFboTex(captureSigmaFboId, captureSigmaTexId)
+            captureSigmaFboId = 0; captureSigmaTexId = 0
             deleteFboTex(statsHFboId, statsHTexId)
             deleteFboTex(statsVFboId, statsVTexId)
             deleteFboTex(outNr1FboId, outNr1TexId)

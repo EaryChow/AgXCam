@@ -282,6 +282,46 @@ class S5NoiseAnchorCalibTest {
     private fun cfgEpsY(cfg: Cfg, yccY: Float): Float = cfg.lumaEpsScale * epsBaseImageUnits(cfg, yccY)
     private fun cfgEpsC(cfg: Cfg, yccY: Float): Float = cfg.chromaEpsScale * epsBaseImageUnits(cfg, yccY)
 
+    /**
+     * MAD σ̂ mirror of SigmaHatShaderProgram (rgbMode=true domain): per-pixel
+     * σ̂² as the mean over the R/G/B channels of 2.1981·MAD² of the 8 spatial
+     * neighbours (±1 texel), scaled by whiteRange² to raw-DN², then clamped up
+     * to the Stage-0 ISO model floor at the centre luma — i.e. exactly what
+     * Stage 5 consumes as the σ̂ texture when useIsoSigma=false.
+     */
+    private fun madSigma2Dn(img: Pln, cfg: Cfg): Array<FloatArray> {
+        val w = img.w
+        val h = img.h
+        val whiteRange = 1f / sqrt(cfg.inverseRange2)
+        val nox = intArrayOf(1, -1, 0, 0, 1, -1, 1, -1)
+        val noy = intArrayOf(0, 0, 1, -1, 1, 1, -1, -1)
+        val out = Array(h) { FloatArray(w) }
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                var sig2Total = 0f
+                for (p in 0 until 3) {
+                    val vals = FloatArray(8)
+                    for (k in 0 until 8) {
+                        val nx = (x + nox[k]).coerceIn(0, w - 1)
+                        val ny = (y + noy[k]).coerceIn(0, h - 1)
+vals[k] = img.at(nx, ny, p) * whiteRange
+                }
+                vals.sort()
+                val med = (vals[3] + vals[4]) * 0.5f
+                val devs = FloatArray(8) { abs(vals[it] - med) }
+                devs.sort()
+                val mad = (devs[3] + devs[4]) * 0.5f
+                sig2Total += 2.1981f * mad * mad
+                }
+                val sig2Mean = sig2Total / 3f
+                val luma = lumaOf(img.at(x, y, 0), img.at(x, y, 1), img.at(x, y, 2))
+                val floor2 = max(cfg.isoModelA * max(luma * whiteRange, 0f) + cfg.isoModelB, 0f)
+                out[y][x] = max(sig2Mean, floor2)
+            }
+        }
+        return out
+    }
+
     // GLSL round() is half-away-from-zero; Kotlin roundToInt() is half-up.
     private fun glslRound(v: Float): Int = if (v >= 0f) (v + 0.5f).toInt() else (v - 0.5f).toInt()
 
@@ -294,7 +334,8 @@ class S5NoiseAnchorCalibTest {
      */
     private fun s5Pass(
         inImg: Pln, baseImg: Pln, cfg: Cfg, epsMult: Float = 1f,
-        epsYAnchor: Float? = null, epsCAnchor: Float? = null
+        epsYAnchor: Float? = null, epsCAnchor: Float? = null,
+        sigma2Dn: Array<FloatArray>? = null
     ): Pln {
         val w = inImg.w
         val h = inImg.h
@@ -314,6 +355,12 @@ class S5NoiseAnchorCalibTest {
                 if (epsYAnchor != null && epsCAnchor != null) {
                     epsY = epsYAnchor * epsMult
                     epsC = epsCAnchor * epsMult
+                } else if (sigma2Dn != null) {
+                    // Texture-driven σ̂ (useIsoSigma=false): ε from the per-pixel
+                    // MAD σ̂² (DN²), same σ_dm² base as the formula branch.
+                    val base = (sigma2Dn[y][x] + cfg.sigmaDm2) * cfg.inverseRange2 * cfg.sigmaScale * cfg.epsBoost
+                    epsY = cfg.lumaEpsScale * base * epsMult
+                    epsC = cfg.chromaEpsScale * base * epsMult
                 } else {
                     val base = epsBaseImageUnits(cfg, yccIn[0])
                     epsY = cfg.lumaEpsScale * base * epsMult
@@ -366,11 +413,12 @@ class S5NoiseAnchorCalibTest {
     }
 
     /** Run the double pass as the host does (host skips at strength 0 → bit-exact). */
-    private fun runS5(img: Pln, cfg: Cfg, epsYAnchor: Float? = null, epsCAnchor: Float? = null): Pln {
+    private fun runS5(img: Pln, cfg: Cfg, epsYAnchor: Float? = null, epsCAnchor: Float? = null,
+        sigma2Dn: Array<FloatArray>? = null): Pln {
         if (cfg.strength <= 0f) return img
-        val r1 = s5Pass(img, img, cfg, 1f, epsYAnchor, epsCAnchor)
+        val r1 = s5Pass(img, img, cfg, 1f, epsYAnchor, epsCAnchor, sigma2Dn)
         if (cfg.iterations < 2) return r1
-        return s5Pass(r1, img, cfg, cfg.round2EpsMult, epsYAnchor, epsCAnchor)
+        return s5Pass(r1, img, cfg, cfg.round2EpsMult, epsYAnchor, epsCAnchor, sigma2Dn)
     }
 
     // ------------------------------------------------------------------
@@ -541,6 +589,67 @@ class S5NoiseAnchorCalibTest {
             f.writeText(current + sb.toString())
         }
         assertTrue("anchor identity: all tiers within tolerance of the doc theory lower bounds", allOk)
+    }
+
+    // ------------------------------------------------------------------
+    // 3. MAD σ̂ texture vs ISO-formula σ̂ (DR-8 re-calibration check).
+    //    Re-runs the three anchor tiers with ε built from the MAD σ̂² texture
+    //    instead of ε=κ²·σ²; deviation vs the formula-driven (item-1)
+    //    attenuation must stay within ±10% on flat noise, else only the
+    //    sigmaScale term may be retuned (as opposed to touching S5 math).
+    // ------------------------------------------------------------------
+
+    @Test
+    fun madSigmaTextureDrivenMatchesFormulaWithinTenPct() {
+        val sign = 0.5f
+        val size = 128
+        val lo = 10
+        val hi = size - 10
+        val sb = StringBuilder()
+        sb.append("=== MAD-σ̂ texture vs ISO-formula σ̂, three anchor tiers (mid signal=0.5) ===\n\n")
+        sb.append(String.format("%-8s %-8s %-9s %-10s %-11s %-12s %-10s %-10s\n",
+            "ISO", "σDN", "att_form", "att_mad", "rel-diff", "MAD σ̂²/DN²", "model σ̂²/DN²", "verdict"))
+        var allOk = true
+        var seed = 7001L
+        for (iso in intArrayOf(800, 3200, 12800)) {
+            val cfg = Cfg(iso = iso, evGain2 = 1f)
+            val signalDN = sign * (1f / sqrt(cfg.inverseRange2))
+            val sigma2Ref = cfg.isoModelA * signalDN + cfg.isoModelB
+            val sigmaChPx = sqrt(sigma2Ref) / (1f / sqrt(cfg.inverseRange2))
+            val img = noiseBlock(size, sign, sigmaChPx, seed = seed)
+            val sigLumaIn = lumaStd(img, lo, hi)
+
+            // Formula-driven (useIsoSigma=true semantics — the item-1 anchor).
+            val outF = runS5(img, cfg)
+            val attF = lumaStd(outF, lo, hi) / sigLumaIn
+
+            // Texture-driven (useIsoSigma=false): ε from the MAD σ̂² map.
+            val madMap = madSigma2Dn(img, cfg)
+            val outT = runS5(img, cfg, sigma2Dn = madMap)
+            val attT = lumaStd(outT, lo, hi) / sigLumaIn
+
+            // Sampled texel MAD vs model for the acceptance-(a) table.
+            val mid = size / 2
+            val madMid = madMap[mid][mid]
+            val rel = (abs(attT - attF) / attF)
+
+            // Acceptance (b): no visible regression vs the item-1 values.
+            val inTol = rel <= 0.10f
+            sb.append(String.format("%-8s %-8s %-9s %-10s %-11s %-12s %-10s %-10s\n",
+                "$iso", f3(sqrt(sigma2Ref).toDouble()), f4(attF.toDouble()), f4(attT.toDouble()),
+                f4(rel.toDouble()), f2(madMid.toDouble()), f2(sigma2Ref.toDouble()),
+                if (inTol) "PASS" else "FAIL"))
+            if (!inTol) allOk = false
+            seed += 17
+        }
+        sb.append("\nDR-8 VERDICT (within ±10% → keep item-1 sigmaScale): " +
+            if (allOk) "PASS\n\n" else "FAIL (retune sigmaScale only)\n\n")
+
+        java.io.File("build/s5noise_anchor.txt").let { f ->
+            val current = if (f.exists()) f.readText() else ""
+            f.writeText(current + sb.toString())
+        }
+        assertTrue("MAD σ̂-driven S5 must stay within ±10% of the ISO-formula attenuation on flat noise", allOk)
     }
 
     // ------------------------------------------------------------------
