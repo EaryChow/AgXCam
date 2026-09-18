@@ -603,12 +603,16 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         }
 
         ensureDemosaicFbo(fboWidth, fboHeight)
-        // Preview S1/S3 denoising now runs per-sample inside the demosaic
-        // (same-colour neighbourhood filter, no fixed grid).  The RAW sparse
-        // grid chain (pack/DPC/S3/S2 sigma) is kept ONLY as the synthetic
-        // oracle's reference path; on the live device it is skipped entirely,
-        // which also removes the non-integer grid->sensor collapse that the
-        // old output-res grid caused at this sensor/grid ratio.
+        // Preview S1/S3 denoising has two forms.  The RAW sparse grid chain
+        // (pack/DPC/S3/S2 sigma) runs whenever needSparseGrid is true (a RAW
+        // slider engaged, or the synthetic oracle driving S5) AND the grid is
+        // dense enough at the current zoom (previewZoomK <= 2, roughly 3x+
+        // zoom-in); at wider zoom it is skipped and the demosaic's per-sample
+        // sampleSameColorNRRing runs inline instead (see needSparseGrid below).
+        // The grid chain is preview (live/synthetic) only — capture never runs
+        // it — and its density gate also removes the non-integer grid->sensor
+        // collapse that the old output-res grid caused at this sensor/grid
+        // ratio.
         val cellGridW = demosaicFboWidth
         val cellGridH = demosaicFboHeight
 

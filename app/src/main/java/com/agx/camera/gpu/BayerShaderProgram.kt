@@ -1756,9 +1756,15 @@ float sampleSameColorNR(ivec2 coord, float mCoarse) {
                   max(max(nEE, nWW), max(nNN, nSS)));
     float iavg = (sumN - mn - mx) * (1.0 / 10.0);
 
+    // S3_PACK fallback theta mapping = 2+4s, unified with the active DPC grid
+    // chain (PreviewRenderer thetav) and the doc's full-strength theta=6.  The
+    // demosaic inline DPC (DEMOSAIC_FRAGMENT_SHADER's sampleSameColorNRRing)
+    // intentionally keeps 2+2s: it is the shipped single-frame precision path
+    // where the tighter theta ceiling is coherent with no temporal averaging
+    // (see additions doc §5).
     float sigma = sqrt(max(u_iso_model_a * max(iavg, 0.0) + u_iso_model_b, 1.0));
     float band = max((0.1 + 0.3 * u_dp_strength) * max(iavg, 0.0),
-                     (2.0 + 2.0 * u_dp_strength) * sigma);
+                     (2.0 + 4.0 * u_dp_strength) * sigma);
 
     // Directional I_D (feature-preserving correction target): 4 direction pairs
     // from the same-color 2px-lattice.  The smoothest direction (min |e-w|)
@@ -1887,9 +1893,10 @@ vec4 boxedBlend(vec4 b) {
     float mxx = max(max(max(bN.r, bN.g), bN.b), bN.a);
     float iavg = (bN.r + bN.g + bN.b + bN.a - mn - mxx) * 0.5;
 
+    // S3_PACK fallback theta mapping = 2+4s (see the sibling function above).
     float sigma = sqrt(max(u_iso_model_a * max(iavg, 0.0) + u_iso_model_b, 1.0));
     float band = max((0.1 + 0.3 * u_dp_strength) * max(iavg, 0.0),
-                     (2.0 + 2.0 * u_dp_strength) * sigma);
+                     (2.0 + 4.0 * u_dp_strength) * sigma);
     float corr = max(u_dp_strength, 0.85 * u_raw_nr_strength);
     float clipLo = max(u_white_level - u_black_level, 1.0);
 

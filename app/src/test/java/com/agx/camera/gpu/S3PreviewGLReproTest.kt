@@ -37,6 +37,15 @@ private val SENSOR_H2 = 96
  *     The shader-side k>=16 inline defer is subsumed by the k>2 gate in the
  *     live path and is modelled for completeness only.
  *
+ *     theta (S1 DPC threshold multiple) differs by path:
+ *       - S3_PACK fallback mirrors (buildPackGL -> sameColorNR(dpThetaCoef=4f),
+ *         boxedBlend) use the unified grid/pack mapping theta=2+4s (full 6).
+ *       - DEMOSAIC inline mirrors (denoisedDualRing, and demosaicAtRGB /
+ *         demosaicSample -> sameColorNR default dpThetaCoef=2f) keep theta=2+2s,
+ *         matching the deployed DEMOSAIC_FRAGMENT_SHADER.
+ *     S5ReproTest's demosaicImage is the other inline-demosaic mirror; see
+ *     additions doc §5.1.
+ *
  * Asserts the two user-visible invariants headlessly before any APK handover:
  *   (a) a non-zero slider NEVER adds noise (gNoise(s1|s3) <= gNoise(0) );
  *   (b) zoom-in shows no magenta mosaic (magErr(s1|s3) bounded by baseline).
@@ -137,8 +146,12 @@ class S3PreviewGLReproTest {
      *  At nrRadius<4 mirrors the preview-only 4-tap (step-2 axis neighbours)
      *  used when the demosaic box stays 4x4; capture/box<4 keep the 12-tap.
      *  maskSigma (measurement only, not shipped) re-keys the flat/structure
-     *  threshold on the measured σ̂ so the "noisy region" mask can be probed. */
-    private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float, nrRadius: Int = 4, mode: Int = 0, mCoarse: Float? = null): Float {
+     *  threshold on the measured σ̂ so the "noisy region" mask can be probed.
+     *  `dpThetaCoef` selects the DPC threshold interpolation: 2f (default)
+     *  mirrors the DEMOSAIC inline forms (sampleSameColorNRRing / the 4-tap
+     *  inline branch, θ=2+2s), 4f mirrors the S3_PACK sampleSameColorNR
+     *  (θ=2+4s, the unified grid/pack mapping); see additions doc §5. */
+    private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float, nrRadius: Int = 4, mode: Int = 0, mCoarse: Float? = null, dpThetaCoef: Float = 2f): Float {
         val c = sensorVal(v, sx, sy)
         if (s1 <= 0f && s3 <= 0f) return c
         val (mn, mx, iavg) = if (nrRadius >= 4) {
@@ -170,7 +183,7 @@ class S3PreviewGLReproTest {
             Triple(smn, smx, (nE + nW + nN + nS - smn - smx) / 2f)
         }
         val sigma = sqrt(max(isoA * max(iavg, 0f) + isoB, 1f))
-        val band = max((0.1f + 0.3f * s1) * max(iavg, 0f), (2f + 2f * s1) * sigma)
+        val band = max((0.1f + 0.3f * s1) * max(iavg, 0f), (2f + dpThetaCoef * s1) * sigma)
 
         // Directional I_D: smoothest direction pair (12-tap path only)
         var iDir = iavg
@@ -435,7 +448,7 @@ class S3PreviewGLReproTest {
                         (scx + (px xor phaseX)).coerceIn(0, SW - 1),
                         (scy + (py xor phaseY)).coerceIn(0, SH - 1),
                         s1, s3,
-                        mode = mode, mCoarse = mc
+                        mode = mode, mCoarse = mc, dpThetaCoef = 4f
                     )
                 }
                 continue
@@ -472,7 +485,7 @@ class S3PreviewGLReproTest {
                         (b0x + (px xor phaseX)).coerceIn(0, SW - 1),
                         (b0y + (py xor phaseY)).coerceIn(0, SH - 1),
                         s1, s3,
-                        mode = mode, mCoarse = mc
+                        mode = mode, mCoarse = mc, dpThetaCoef = 4f
                     )
                 }
                 continue
@@ -519,7 +532,7 @@ class S3PreviewGLReproTest {
         val mx = max(max(max(bn[0], bn[1]), bn[2]), bn[3])
         val iavg = (bn[0] + bn[1] + bn[2] + bn[3] - mn - mx) * 0.5f
         val sigma = sqrt(max(isoA * max(iavg, 0f) + isoB, 1f))
-        val band = max((0.1f + 0.3f * s1) * max(iavg, 0f), (2f + 2f * s1) * sigma)
+        val band = max((0.1f + 0.3f * s1) * max(iavg, 0f), (2f + 4f * s1) * sigma)
         val corr = max(s1, 0.85f * s3)
         val o = FloatArray(4)
         fun omxx(p: Int): Float {
@@ -648,7 +661,10 @@ class S3PreviewGLReproTest {
      *  ring-4 box, so the fusion removes those four redundant re-evaluations per
      *  fragment without touching the output.  Arithmetic is copied verbatim from
      *  sameColorNR's two ring branches (hi with mode 3 = the shipped regional
-     *  pull). */
+     *  pull), including the DPC θ mapping: the deployed denoisedDualRing lives in
+     *  DEMOSAIC_FRAGMENT_SHADER (the inline fused smooth-box), so both bands keep
+     *  θ=2+2s here — the S3_PACK mirror is the separate boxedBlend/sameColorNR
+     *  (dpThetaCoef=4f) path; see additions doc §5. */
     private fun denoisedDualRing(
         v: ShortArray, sx: Int, sy: Int,
         s1: Float, s3: Float, mCoarse: Float?

@@ -481,8 +481,11 @@ class S5ReproTest {
         return m
     }
 
-    /** Mirror of GLSL sampleSameColorNR (S1 DPC + S3 α-trim blend + directional I_D). */
-    private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float, mCoarse: Float? = null): Float {
+    /** Mirror of GLSL sampleSameColorNR (S1 DPC + S3 α-trim blend + directional I_D).
+     *  `dpThetaCoef` selects the theta interpolation: 2f (default) mirrors the
+     *  demosaic inline DPC's 2+2s, 4f mirrors the unified S3_PACK fallback /
+     *  active grid chain 2+4s (see additions doc §5). */
+    private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float, mCoarse: Float? = null, dpThetaCoef: Float = 2f): Float {
         if (s1 <= 0f && s3 <= 0f) return sensorVal(v, sx, sy)
         val c = sensorVal(v, sx, sy)
         val nE = sensorVal(v, sx + 2, sy)
@@ -504,7 +507,7 @@ class S5ReproTest {
             maxOf(maxOf(nEE, nWW), maxOf(nNN, nSS)))
         val iavg = (sumN - mn - mx) / 10f
         val sigma = kotlin.math.sqrt(max(isoA * max(iavg, 0f) + isoB, 1f))
-        val band = max((0.1f + 0.3f * s1) * max(iavg, 0f), (2f + 2f * s1) * sigma)
+        val band = max((0.1f + 0.3f * s1) * max(iavg, 0f), (2f + dpThetaCoef * s1) * sigma)
 
         // Directional I_D: smoothest direction pair from the same-color lattice
         val aH = (nE + nW) * 0.5f
@@ -1105,7 +1108,7 @@ class S5ReproTest {
                         v,
                         (scx + (px xor phaseX)).coerceIn(0, SENSOR_W - 1),
                         (scy + (py xor phaseY)).coerceIn(0, SENSOR_H - 1),
-                        s1, s3, mc
+                        s1, s3, mc, dpThetaCoef = 4f
                     )
                 }
             }
@@ -1148,7 +1151,7 @@ class S5ReproTest {
                             v,
                             (scx + (px xor phaseX)).coerceIn(0, SENSOR_W - 1),
                             (scy + (py xor phaseY)).coerceIn(0, SENSOR_H - 1),
-                            s1, s3, mc
+                            s1, s3, mc, dpThetaCoef = 4f
                         )
                     }
                     continue
@@ -1200,7 +1203,7 @@ class S5ReproTest {
                 val t = (srt[1] + srt[2]) * 0.5f
                 val iavg = t
                 val sigma = kotlin.math.sqrt(max(isoA * max(iavg, 0f) + isoB, 1f))
-                val band = max((0.1f + 0.3f * s1) * max(iavg, 0f), (2f + 2f * s1) * sigma)
+                val band = max((0.1f + 0.3f * s1) * max(iavg, 0f), (2f + 4f * s1) * sigma)
                 val corrStrength = max(s1, 0.85f * s3)
                 val clipLo = (SENSOR_CLIP - SENSOR_BLACK).toFloat()
                 for (p in 0..3) {
