@@ -990,8 +990,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // boxAA) x ~2 (S3 alpha≈0.5 blend) — NOT a unit conversion: whiteRange
         // enters exactly once via inverseRange2 (12-bit would give 16x, the
         // 1023-vs-959 mirror slip is 7%). It therefore absorbs scene/alpha
-        // dependence and is retained + documented as known debt (v1.2 additions
-        // appendix E) rather than re-derived at the source.
+        // dependence and is retained + documented as known debt rather than re-derived at the source.
         // S5D f#1200 crash evidence: σ̂² is the sparse-grid DN² noise floor
         // (readNoiseVariance(3200)=111.5 → sig2≈113), but the filter actually
         // sees the S3 + 4x4-boxAA-denoised demosaic residual (measured var
