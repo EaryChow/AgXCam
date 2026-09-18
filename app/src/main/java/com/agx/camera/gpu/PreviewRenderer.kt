@@ -970,13 +970,22 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val sigmaDm2 = 10f
         // ε lives in the pixel domain (0..1); σ̂² and σ_dm² are in raw-DN².
         val inverseRange2 = 1f / (whiteRange * whiteRange)
+        // Domain normalization factor: the S2 σ̂ grid (or the Stage-0 ISO model
+        // fallback) reports σ̂² in the raw-DN² calibration domain (pre-demosaic),
+        // while this pass sees the post-S3 + 4x4-boxAA-demosaic residual in the
+        // formed-image domain. The 32x is an operating-point fold — 16 (4x4
+        // boxAA) x ~2 (S3 alpha≈0.5 blend) — NOT a unit conversion: whiteRange
+        // enters exactly once via inverseRange2 (12-bit would give 16x, the
+        // 1023-vs-959 mirror slip is 7%). It therefore absorbs scene/alpha
+        // dependence and is retained + documented as known debt (v1.2 additions
+        // appendix E) rather than re-derived at the source.
         // S5D f#1200 crash evidence: σ̂² is the sparse-grid DN² noise floor
         // (readNoiseVariance(3200)=111.5 → sig2≈113), but the filter actually
         // sees the S3 + 4x4-boxAA-denoised demosaic residual (measured var
         // ≈2-6e-6 → σ≈1.5-2.5 DN). Using the DN² floor verbatim makes
         // ε≈30-100× the true residual → aY≈0.02 → output collapses to the
         // window mean (brighten + pixel-art). Scale ε to the real residual.
-        val sigmaScale = 1f / 32f
+        val calibToResidualScale = 1f / 32f
         // EV PP multiplies the linear scene by exp2(EV) AFTER Stage 5 in the
         // formed picture read, so the noise the viewer sees grows with EV exactly as
         // if the sensor ISO had been raised.  Fold the EV gain (σ² ∝ gain²)
@@ -1010,7 +1019,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             inputTex, inputTex, statsVTexId, sigmaTex,
             sigmaW, sigmaH, w.toFloat(), h.toFloat(),
             beta, lumaEpsScale, chromaEpsScale, sigmaDm2,
-            inverseRange2, sigmaScale,
+            inverseRange2, calibToResidualScale,
             useIsoSigma, s5IsoA, s5IsoB,
             winScale, epsBoost, strength = s
         )
@@ -1035,7 +1044,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             outNr1TexId, inputTex, statsVTexId, sigmaTex,
             sigmaW, sigmaH, w.toFloat(), h.toFloat(),
             beta, round2EpsMult * lumaEpsScale, round2EpsMult * chromaEpsScale, sigmaDm2,
-            inverseRange2, sigmaScale,
+            inverseRange2, calibToResidualScale,
             useIsoSigma, s5IsoA, s5IsoB,
             winScale, epsBoost, strength = s
         )
