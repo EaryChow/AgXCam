@@ -44,9 +44,12 @@ class OutNrShaderProgram {
     private var hBetaLoc = 0
     private var hYWeightsLoc = 0
     private var hWinScaleLoc = 0
+    private var hFlagTexLoc = 0
+    private var hFlagAvailLoc = 0
 
     private var vStatsTexLoc = 0
     private var vWinScaleLoc = 0
+    private var vFlagAvailLoc = 0
 
     private var mInTexLoc = 0
     private var mBaseTexLoc = 0
@@ -66,6 +69,8 @@ class OutNrShaderProgram {
     private var mWinScaleLoc = 0
     private var mEpsBoostLoc = 0
     private var mStrengthLoc = 0
+    private var mFlagTexLoc = 0
+    private var mFlagAvailLoc = 0
 
     private val quadVertices: FloatBuffer = ByteBuffer.allocateDirect(QUAD_COORDS.size * 4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer().put(QUAD_COORDS).also { it.position(0) }
@@ -87,9 +92,12 @@ class OutNrShaderProgram {
         hBetaLoc = GLES20.glGetUniformLocation(statsHProgramId, "u_beta")
         hYWeightsLoc = GLES20.glGetUniformLocation(statsHProgramId, "u_yWeights")
         hWinScaleLoc = GLES20.glGetUniformLocation(statsHProgramId, "u_win_scale")
+        hFlagTexLoc = GLES20.glGetUniformLocation(statsHProgramId, "u_flagTex")
+        hFlagAvailLoc = GLES20.glGetUniformLocation(statsHProgramId, "u_flag_available")
 
         vStatsTexLoc = GLES20.glGetUniformLocation(statsVProgramId, "u_statsTex")
         vWinScaleLoc = GLES20.glGetUniformLocation(statsVProgramId, "u_win_scale")
+        vFlagAvailLoc = GLES20.glGetUniformLocation(statsVProgramId, "u_flag_available")
 
         mInTexLoc = GLES20.glGetUniformLocation(mainProgramId, "u_inTex")
         mBaseTexLoc = GLES20.glGetUniformLocation(mainProgramId, "u_baseTex")
@@ -109,6 +117,8 @@ class OutNrShaderProgram {
         mWinScaleLoc = GLES20.glGetUniformLocation(mainProgramId, "u_win_scale")
         mEpsBoostLoc = GLES20.glGetUniformLocation(mainProgramId, "u_eps_boost")
         mStrengthLoc = GLES20.glGetUniformLocation(mainProgramId, "u_strength")
+        mFlagTexLoc = GLES20.glGetUniformLocation(mainProgramId, "u_flagTex")
+        mFlagAvailLoc = GLES20.glGetUniformLocation(mainProgramId, "u_flag_available")
 
         ready = true
         Log.d(TAG, "Stage-5 denoise programs created: h=$statsHProgramId v=$statsVProgramId m=$mainProgramId")
@@ -131,7 +141,10 @@ class OutNrShaderProgram {
         if (texHandle >= 0) GLES20.glDisableVertexAttribArray(texHandle)
     }
 
-    fun drawStatsH(inTex: Int, baseTex: Int, beta: Float, yWeights: FloatArray, winScale: Float = 1f) {
+    fun drawStatsH(
+        inTex: Int, baseTex: Int, beta: Float, yWeights: FloatArray, winScale: Float = 1f,
+        flagTex: Int = 0, flagAvailable: Boolean = false
+    ) {
         if (statsHProgramId == 0) return
         GLES20.glUseProgram(statsHProgramId)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -143,16 +156,26 @@ class OutNrShaderProgram {
         GLES20.glUniform1f(hBetaLoc, beta)
         GLES20.glUniform3f(hYWeightsLoc, yWeights[0], yWeights[1], yWeights[2])
         GLES20.glUniform1f(hWinScaleLoc, winScale)
+        // Defect mask sampler: always bind a complete float texture (bind inTex
+        // as the placeholder when the mask is unavailable) so the used sampler
+        // never leaves a unit incomplete; the u_flag_available gate decides
+        // whether the shader actually reads it.
+        val ft = if (flagTex != 0) flagTex else inTex
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE4)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ft)
+        GLES20.glUniform1i(hFlagTexLoc, 4)
+        GLES20.glUniform1f(hFlagAvailLoc, if (flagAvailable && flagTex != 0) 1f else 0f)
         drawQuad(statsHProgramId)
     }
 
-    fun drawStatsV(statsTex: Int, winScale: Float = 1f) {
+    fun drawStatsV(statsTex: Int, winScale: Float = 1f, flagAvailable: Boolean = false) {
         if (statsVProgramId == 0) return
         GLES20.glUseProgram(statsVProgramId)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, statsTex)
         GLES20.glUniform1i(vStatsTexLoc, 0)
         GLES20.glUniform1f(vWinScaleLoc, winScale)
+        GLES20.glUniform1f(vFlagAvailLoc, if (flagAvailable) 1f else 0f)
         drawQuad(statsVProgramId)
     }
 
@@ -164,7 +187,8 @@ class OutNrShaderProgram {
         useIsoSigma: Boolean = false,
         isoModelA: Float = 0f, isoModelB: Float = 0f,
         winScale: Float = 1f, epsBoost: Float = 1f,
-        strength: Float = 1f
+        strength: Float = 1f,
+        flagTex: Int = 0, flagAvailable: Boolean = false
     ) {
         if (mainProgramId == 0) return
         GLES20.glUseProgram(mainProgramId)
@@ -194,6 +218,11 @@ class OutNrShaderProgram {
         GLES20.glUniform1f(mWinScaleLoc, winScale)
         GLES20.glUniform1f(mEpsBoostLoc, epsBoost)
         GLES20.glUniform1f(mStrengthLoc, strength)
+        val ft = if (flagTex != 0) flagTex else inTex
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE4)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ft)
+        GLES20.glUniform1i(mFlagTexLoc, 4)
+        GLES20.glUniform1f(mFlagAvailLoc, if (flagAvailable && flagTex != 0) 1f else 0f)
         drawQuad(mainProgramId)
     }
 
@@ -244,8 +273,12 @@ out vec4 outColor;
 
 uniform sampler2D u_inTex;
 uniform sampler2D u_baseTex;
+uniform sampler2D u_flagTex;
 uniform float u_beta;
 uniform vec3 u_yWeights;
+// 1.0 => the defect mask is valid: flagged taps are excluded from the box
+// statistics and the surviving count is carried in .b (see header note).
+uniform float u_flag_available;
 // Scaling the stats box alongside the window centres keeps the 8 SWGF
 // candidate windows self-similar at any resolution: preview (winScale=1)
 // keeps the exact 5-tap box (R=2, bit-identical), while the capture path
@@ -256,21 +289,51 @@ uniform float u_win_scale;
 
 float lumaOf(vec3 rgb) { return dot(u_yWeights, rgb); }
 
+// Defect mask convention: a texel is flagged if ANY channel magnitude exceeds
+// 0.5.  The preview's DPC flag map stores ±1 in the owning phase channel(s)
+// (hot/cold), the capture map writes 0/1 to all four channels — one test
+// covers both, with no second indexing scheme.
+float flagOf(ivec2 t) {
+    vec4 f = texelFetch(u_flagTex, t, 0);
+    return (abs(f.r) + abs(f.g) + abs(f.b) + abs(f.a) > 0.5) ? 1.0 : 0.0;
+}
+
 void main() {
     ivec2 base = ivec2(gl_FragCoord.xy);
     int R = max(2, int(round(2.0 * u_win_scale)));
     float sum = 0.0;
     float sumSq = 0.0;
-    for (int dx = -R; dx <= R; dx++) {
-        ivec2 t = base + ivec2(dx, 0);
-        vec3 a = texelFetch(u_inTex, t, 0).rgb;
-        vec3 b = texelFetch(u_baseTex, t, 0).rgb;
-        vec3 rgb = mix(a, b, u_beta);
-        float y = lumaOf(rgb);
-        sum += y;
-        sumSq += y * y;
+    if (u_flag_available > 0.5) {
+        // Defect-aware GF box: flagged taps are dropped and the mean/variance
+        // are renormalized by the surviving count, written to .b so statsV can
+        // combine the two axes with the exact per-tap weight.  When a whole row
+        // is flagged the row is left empty (count 0) and statsV falls back.
+        float cnt = 0.0;
+        for (int dx = -R; dx <= R; dx++) {
+            ivec2 t = base + ivec2(dx, 0);
+            if (flagOf(t) > 0.5) continue;
+            vec3 a = texelFetch(u_inTex, t, 0).rgb;
+            vec3 b = texelFetch(u_baseTex, t, 0).rgb;
+            vec3 rgb = mix(a, b, u_beta);
+            float y = lumaOf(rgb);
+            sum += y;
+            sumSq += y * y;
+            cnt += 1.0;
+        }
+        if (cnt < 0.5) outColor = vec4(0.0, 0.0, 0.0, 0.0);
+        else outColor = vec4(sum / cnt, sumSq / cnt, cnt, 0.0);
+    } else {
+        for (int dx = -R; dx <= R; dx++) {
+            ivec2 t = base + ivec2(dx, 0);
+            vec3 a = texelFetch(u_inTex, t, 0).rgb;
+            vec3 b = texelFetch(u_baseTex, t, 0).rgb;
+            vec3 rgb = mix(a, b, u_beta);
+            float y = lumaOf(rgb);
+            sum += y;
+            sumSq += y * y;
+        }
+        outColor = vec4(sum / float(2 * R + 1), sumSq / float(2 * R + 1), 0.0, 0.0);
     }
-    outColor = vec4(sum / float(2 * R + 1), sumSq / float(2 * R + 1), 0.0, 0.0);
 }
 """
 
@@ -284,18 +347,35 @@ out vec4 outColor;
 
 uniform sampler2D u_statsTex;
 uniform float u_win_scale;
+uniform float u_flag_available;
 
 void main() {
     ivec2 base = ivec2(gl_FragCoord.xy);
     int R = max(2, int(round(2.0 * u_win_scale)));
     float sum = 0.0;
     float sumSq = 0.0;
-    for (int dy = -R; dy <= R; dy++) {
-        vec2 s = texelFetch(u_statsTex, base + ivec2(0, dy), 0).rg;
-        sum += s.r;
-        sumSq += s.g;
+    if (u_flag_available > 0.5) {
+        // statsH rows carry their surviving-sample count in .b; weight the
+        // (already renormalized) row means by it to reconstruct the true 2D box
+        // mean/variance with flagged taps removed.  An all-flagged row has
+        // count 0 and contributes nothing; count is forwarded for statsAt().
+        float cnt = 0.0;
+        for (int dy = -R; dy <= R; dy++) {
+            vec3 s = texelFetch(u_statsTex, base + ivec2(0, dy), 0).rgb;
+            sum += s.r * s.b;
+            sumSq += s.g * s.b;
+            cnt += s.b;
+        }
+        if (cnt < 0.5) outColor = vec4(0.0, 0.0, 0.0, 0.0);
+        else outColor = vec4(sum / cnt, sumSq / cnt, cnt, 0.0);
+    } else {
+        for (int dy = -R; dy <= R; dy++) {
+            vec2 s = texelFetch(u_statsTex, base + ivec2(0, dy), 0).rg;
+            sum += s.r;
+            sumSq += s.g;
+        }
+        outColor = vec4(sum / float(2 * R + 1), sumSq / float(2 * R + 1), 0.0, 0.0);
     }
-    outColor = vec4(sum / float(2 * R + 1), sumSq / float(2 * R + 1), 0.0, 0.0);
 }
 """
 
@@ -310,6 +390,8 @@ uniform sampler2D u_inTex;
 uniform sampler2D u_baseTex;
 uniform sampler2D u_statsTex;
 uniform sampler2D u_sigmaTex;
+uniform sampler2D u_flagTex;
+uniform float u_flag_available;
 uniform vec2 u_sigmaSize;
 uniform vec2 u_outSize;
 uniform float u_beta;
@@ -348,9 +430,18 @@ vec3 rgbOf(vec3 ycc) {
     return vec3(y + 0.5*c1 + 0.5*c2, y - 0.5*c2, y - 0.5*c1 + 0.5*c2);
 }
 
-// stats at a window centre in output-pixel coordinates
-vec2 statsAt(ivec2 base, ivec2 winCentre) {
-    return texelFetch(u_statsTex, base + winCentre, 0).rg;
+// stats at a window centre in output-pixel coordinates:
+// .xy = mean / mean-square, .z = surviving-sample count (0 when the mask is
+// unavailable, the full box count otherwise).
+vec3 statsAt(ivec2 base, ivec2 winCentre) {
+    return texelFetch(u_statsTex, base + winCentre, 0).rgb;
+}
+
+// Defect mask convention: a texel is flagged if ANY channel magnitude exceeds
+// 0.5 (preview ±1 per-phase DPC map and capture 0/1 map share this test).
+float flagOf(ivec2 t) {
+    vec4 f = texelFetch(u_flagTex, t, 0);
+    return (abs(f.r) + abs(f.g) + abs(f.b) + abs(f.a) > 0.5) ? 1.0 : 0.0;
 }
 
 // mean chroma over a DENSE box of half-width R = max(2, round(2*u_win_scale))
@@ -374,6 +465,29 @@ vec2 statsAt(ivec2 base, ivec2 winCentre) {
 // clip-attenuator and the S3 clipped-centre guard instead.
 vec2 chromaMean(ivec2 base, ivec2 winCentre) {
     int R = min(max(2, int(round(2.0 * u_win_scale))), 8);
+    if (u_flag_available > 0.5) {
+        // Defect-aware dense box: flagged taps are dropped and the chroma mean
+        // is renormalized by the surviving count.  Only entered when a mask is
+        // present, so the shipped arithmetic below stays bit-identical.
+        float h1t = 0.0;
+        float h2t = 0.0;
+        float cnt = 0.0;
+        for (int dy = -R; dy <= R; dy++) {
+            ivec2 rr = base + winCentre + ivec2(0, dy);
+            for (int dx = -R; dx <= R; dx++) {
+                ivec2 t = rr + ivec2(dx, 0);
+                if (flagOf(t) > 0.5) continue;
+                vec3 a = texelFetch(u_inTex, t, 0).rgb;
+                vec3 b = texelFetch(u_baseTex, t, 0).rgb;
+                vec3 ycc = yccOf(mix(a, b, u_beta));
+                h1t += ycc.y;
+                h2t += ycc.z;
+                cnt += 1.0;
+            }
+        }
+        if (cnt < 0.5) return vec2(0.0);
+        return vec2(h1t, h2t) / cnt;
+    }
     vec2 row[17];
     for (int dy = -R; dy <= R; dy++) {
         ivec2 rr = base + winCentre + ivec2(0, dy);
@@ -450,9 +564,17 @@ void main() {
     vec2 sndStat = vec2(0.0);
     float bestVar = 0.0;
     float sndVar = 0.0;
+    int Rwin = max(2, int(round(2.0 * u_win_scale)));
+    float fullCount = float((2 * Rwin + 1) * (2 * Rwin + 1));
+    bool anyEligible = false;
     for (int k = 0; k < 8; k++) {
         ivec2 c = ivec2(vec2(SW_WIN[k]) * u_win_scale);
-        vec2 st = statsAt(base, c);
+        vec3 st = statsAt(base, c);
+        // Defect gate: a window whose box lost any tap to the mask (count <
+        // full) is disqualified.  With no mask every count is full, so every
+        // window stays eligible and the selection is bit-identical.
+        if (u_flag_available > 0.5 && st.b < fullCount - 0.5) continue;
+        anyEligible = true;
         float v = max(st.g - st.r * st.r, 0.0);
         float score = abs(st.r - yccIn.x) / (v + epsY);
         if (score < bestScore) {
@@ -461,11 +583,34 @@ void main() {
             sndStat = bestStat;
             bestScore = score;
             bestVar = v;
-            bestStat = st;
+            bestStat = st.xy;
         } else if (score < sndScore) {
             sndScore = score;
             sndVar = v;
-            sndStat = st;
+            sndStat = st.xy;
+        }
+    }
+    // Every window is disqualified: fall back to the renormalized stats of all
+    // windows so a defect-dense pixel degrades gracefully instead of switching
+    // the filter off (the masks are sparse, so this is the rare corner).
+    if (!anyEligible) {
+        for (int k = 0; k < 8; k++) {
+            ivec2 c = ivec2(vec2(SW_WIN[k]) * u_win_scale);
+            vec3 st = statsAt(base, c);
+            float v = max(st.g - st.r * st.r, 0.0);
+            float score = abs(st.r - yccIn.x) / (v + epsY);
+            if (score < bestScore) {
+                sndScore = bestScore;
+                sndVar = bestVar;
+                sndStat = bestStat;
+                bestScore = score;
+                bestVar = v;
+                bestStat = st.xy;
+            } else if (score < sndScore) {
+                sndScore = score;
+                sndVar = v;
+                sndStat = st.xy;
+            }
         }
     }
     float wBest = 1.0 / (bestScore * bestScore + 1e-12);

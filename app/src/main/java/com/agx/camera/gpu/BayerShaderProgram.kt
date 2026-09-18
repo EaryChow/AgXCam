@@ -77,6 +77,7 @@ class BayerShaderProgram {
     private var dURawNrStrengthLoc = 0
     private var dUIsoModelALoc = 0
     private var dUIsoModelBLoc = 0
+    private var dUFlagOutputLoc = 0
 
     // S1/S3 same-colour pack fallback program: precomputes the S3 filter once
     // per texel per CFA phase into an RGBA32F denoised mosaic, which the
@@ -188,6 +189,7 @@ class BayerShaderProgram {
         dURawNrStrengthLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_raw_nr_strength")
         dUIsoModelALoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_iso_model_a")
         dUIsoModelBLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_iso_model_b")
+        dUFlagOutputLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_flag_output")
 
         s3PackProgramId = createProgram(VERTEX_SHADER, S3_PACK_FRAGMENT_SHADER)
         if (s3PackProgramId == 0) {
@@ -399,7 +401,8 @@ class BayerShaderProgram {
         dpStrength: Float = 0f,
         rawNrStrength: Float = 0f,
         isoModelA: Float = 0f,
-        isoModelB: Float = 0f
+        isoModelB: Float = 0f,
+        flagOutput: Boolean = false
     ) {
         GLES20.glUseProgram(demosaicProgramId)
 
@@ -453,6 +456,18 @@ class BayerShaderProgram {
         GLES20.glUniform1f(dURawNrStrengthLoc, rawNrStrength)
         GLES20.glUniform1f(dUIsoModelALoc, isoModelA)
         GLES20.glUniform1f(dUIsoModelBLoc, isoModelB)
+        GLES20.glUniform1f(dUFlagOutputLoc, if (flagOutput) 1f else 0f)
+        // MRT: the demosaic declares a second output (fragFlag) so the capture
+        // still can emit the DPC defect mask on COLOR_ATTACHMENT1 of the raw
+        // demosaic FBO.  When the flag is off (preview / S5 inactive) only
+        // attachment 0 is drawn so the extra output is discarded and the path
+        // stays byte-identical.
+        val drawBufs = if (flagOutput) {
+            intArrayOf(GLES20.GL_COLOR_ATTACHMENT0, GLES30.GL_COLOR_ATTACHMENT1)
+        } else {
+            intArrayOf(GLES20.GL_COLOR_ATTACHMENT0)
+        }
+        GLES30.glDrawBuffers(drawBufs.size, drawBufs, 0)
 
         val posHandle = GLES20.glGetAttribLocation(demosaicProgramId, "a_position")
         val texHandle = GLES20.glGetAttribLocation(demosaicProgramId, "a_texCoord")
@@ -776,7 +791,12 @@ precision highp usampler2D;
 precision highp int;
 
 in vec2 v_texCoord;
-out vec4 fragColor;
+layout(location = 0) out vec4 fragColor;
+// S5 defect-mask attachment (MRT location 1): 1.0 where the inline DPC
+// detected a hot/cold defect inside this output texel's demosaic box, else 0.
+// Written to all four channels so Stage 5 can use a single "any channel
+// non-zero" test for both this map and the preview's ±1 per-phase DPC flag map.
+layout(location = 1) out vec4 fragFlag;
 
 uniform usampler2D u_bayerTex;
 uniform sampler2D u_lens_shading_map;
@@ -808,6 +828,8 @@ uniform float u_dp_strength;
 uniform float u_raw_nr_strength;
 uniform float u_iso_model_a;
 uniform float u_iso_model_b;
+// 1.0 => emit the S5 defect mask on fragFlag (capture still + S5 active).
+uniform float u_flag_output;
 
 ${AgxCoreGlsl.CORE_HELPERS}
 
@@ -1496,6 +1518,79 @@ vec3 compensateNegatives(vec3 rgb) {
     return max((rgb - minimum) * ratio, vec3(0.0));
 }
 
+// --- S5 defect-mask emitters ------------------------------------------------
+// Replicates ONLY the centre hot/cold detection of sampleSameColorNRRing for
+// the given ring, returning 1.0 when that sample is DPC-corrected.  The
+// arithmetic (alpha-trim neighbour mean, band, min/max guard) is listed
+// verbatim from that function; it runs no correction itself, so the S1/S3
+// algorithm and its output are unchanged.  Gated on u_dp_strength so the mask
+// reflects DPC (S1) detections only — an S3-only draw emits no mask.
+float inlineDefectFlagAt(ivec2 coord, int ring) {
+    if (u_dp_strength <= 0.0) return 0.0;
+    float c = sampleBayerRaw(coord);
+    float nE, nW, nN, nS, nNE, nNW, nSE, nSW, nEE, nWW, nNN, nSS;
+    float sumN, mn, mx, iavg;
+    if (ring >= 4) {
+        nE  = sampleBayerRaw(coord + ivec2( 2, 0));
+        nW  = sampleBayerRaw(coord + ivec2(-2, 0));
+        nN  = sampleBayerRaw(coord + ivec2( 0,-2));
+        nS  = sampleBayerRaw(coord + ivec2( 0, 2));
+        nNE = sampleBayerRaw(coord + ivec2( 2,-2));
+        nNW = sampleBayerRaw(coord + ivec2(-2,-2));
+        nSE = sampleBayerRaw(coord + ivec2( 2, 2));
+        nSW = sampleBayerRaw(coord + ivec2(-2, 2));
+        nEE = sampleBayerRaw(coord + ivec2( 4, 0));
+        nWW = sampleBayerRaw(coord + ivec2(-4, 0));
+        nNN = sampleBayerRaw(coord + ivec2( 0,-4));
+        nSS = sampleBayerRaw(coord + ivec2( 0, 4));
+        sumN = nE + nW + nN + nS + nNE + nNW + nSE + nSW + nEE + nWW + nNN + nSS;
+        mn = min(min(min(min(min(nE, nW), min(nN, nS)), min(nNE, nNW)), min(nSE, nSW)),
+                 min(min(nEE, nWW), min(nNN, nSS)));
+        mx = max(max(max(max(max(nE, nW), max(nN, nS)), max(nNE, nNW)), max(nSE, nSW)),
+                 max(max(nEE, nWW), max(nNN, nSS)));
+        iavg = (sumN - mn - mx) * (1.0 / 10.0);
+    } else {
+        nE  = sampleBayerRaw(coord + ivec2( 2, 0));
+        nW  = sampleBayerRaw(coord + ivec2(-2, 0));
+        nN  = sampleBayerRaw(coord + ivec2( 0,-2));
+        nS  = sampleBayerRaw(coord + ivec2( 0, 2));
+        sumN = nE + nW + nN + nS;
+        mn = min(min(nE, nW), min(nN, nS));
+        mx = max(max(nE, nW), max(nN, nS));
+        iavg = (sumN - mn - mx) * (1.0 / 2.0);
+    }
+    float sigma = sqrt(max(u_iso_model_a * max(iavg, 0.0) + u_iso_model_b, 1.0));
+    float band = max((0.1 + 0.3 * u_dp_strength) * max(iavg, 0.0),
+                     (2.0 + 2.0 * u_dp_strength) * sigma);
+    bool hot = (c > mx) && (c - iavg) > band;
+    bool cold = (c < mn) && (iavg - c) > band;
+    return (hot || cold) ? 1.0 : 0.0;
+}
+
+// OR of the inline defect detection over every centre sample in this output
+// texel's demosaic box (box<=1 => the single reverse-mapped sample).  Mirrors
+// demosaicBilinear's sample enumeration so the mask is aligned with the output
+// texel it influences.  Capture passes boxBlend=0, so the ring-2 middle-box
+// variant is not reached; the mask stays conservative (any hit flags the texel).
+float inlineSceneFlag(vec2 sensorUV) {
+    if (u_dp_strength <= 0.0) return 0.0;
+    if (u_box_aa <= 1) {
+        vec2 s0 = clampSensor(sensorUV);
+        return inlineDefectFlagAt(ivec2(s0), u_nr_radius);
+    }
+    int bx = clamp(u_box_aa, 2, 4);
+    float baseOff = (bx >= 3) ? -1.0 : 0.0;
+    vec2 base = floor(sensorUV) + vec2(baseOff);
+    float f = 0.0;
+    for (int dy = 0; dy < bx; dy++) {
+        for (int dx = 0; dx < bx; dx++) {
+            ivec2 c = clamp(ivec2(base) + ivec2(dx, dy), ivec2(0), ivec2(u_sensorSize) - ivec2(1));
+            f = max(f, inlineDefectFlagAt(c, u_nr_radius));
+        }
+    }
+    return f;
+}
+
 void main() {
     vec2 uv = v_texCoord;
     vec2 lsSensorUV = u_cropOrigin + uv * u_cropSize;
@@ -1532,6 +1627,11 @@ void main() {
     linearRGB = u_color_mat * linearRGB;
     linearRGB = linearRGB / max(u_white_level - u_black_level, 1.0);
     fragColor = vec4(linearRGB, 1.0);
+
+    // S5 defect mask (MRT location 1).  The uniform gate keeps the cost off
+    // every frame that does not consume it (preview demosaic, S5 inactive).
+    float defectFlag = (u_flag_output > 0.5) ? inlineSceneFlag(sensorUV) : 0.0;
+    fragFlag = vec4(defectFlag);
 }
 """
 

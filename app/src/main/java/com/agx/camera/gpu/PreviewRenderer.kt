@@ -106,6 +106,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var captureSigmaBufferWidth = 0
     private var captureSigmaBufferHeight = 0
 
+    // S5 defect-mask attachment for the capture still: COLOR_ATTACHMENT1 of the
+    // raw demosaic FBO (same resolution/lifecycle as rawDemosaicFboTextureId),
+    // written by the demosaic's MRT flag output.  Zero when DPC/S5 are off.
+    private var captureFlagTexId = 0
+
     // Stage 5 (output-domain SWGF) buffers: separable box-stats pair and two
     // iteration outputs. RGBA32F at the demosaic resolution.
     private var statsHFboId = 0
@@ -868,12 +873,19 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
         var ispInputTex = demosaicFboTextureId
         if (outDenoiseActive) {
+            // Defect mask for S5: only meaningful on the sparse-grid (DPC)
+            // path.  S1 off or no grid chain (inline/S3-only/S5-only) leaves
+            // flagAvailable=false, which keeps Stage 5 bit-identical to the
+            // shipped filter.  The grid flag map is already at the S5 grid.
+            val previewFlagAvailable = demosaicDenoisedId != 0 && dpEnabled && dpcFlagTexId != 0
             ispInputTex = runStage5(
                 demosaicFboWidth, demosaicFboHeight, demosaicFboTextureId,
                 if (sigmaAvailable) sigmaTexId else 0,
                 whiteRange, gridW, gridH,
                 useIsoSigma = !sigmaAvailable,
-                isoModelA = isoModelA, isoModelB = isoModelB
+                isoModelA = isoModelA, isoModelB = isoModelB,
+                flagTex = if (previewFlagAvailable) dpcFlagTexId else 0,
+                flagAvailable = previewFlagAvailable
             )
             logGlError("after stage5 outDenoise", bayerRenderCount)
         }
@@ -945,7 +957,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private fun runStage5(
         w: Int, h: Int, inputTex: Int, sigmaTex: Int, whiteRange: Float, gridW: Int, gridH: Int,
         useIsoSigma: Boolean = false, isoModelA: Float = 0f, isoModelB: Float = 0f,
-        winScale: Float = 1f, epsBoost: Float = 1f
+        winScale: Float = 1f, epsBoost: Float = 1f,
+        flagTex: Int = 0, flagAvailable: Boolean = false
     ): Int {
         if (!outNrShader.isReady()) return inputTex
         ensureOutNrBuffers(w, h)
@@ -1008,11 +1021,15 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val round2EpsMult = 1.96f
 
         // Round 1 (κ1): demosaic output → outNr1.
+        val flagConsumeNs0 = System.nanoTime()
         bindTarget(statsHFboId, w, h)
-        outNrShader.drawStatsH(inputTex, inputTex, beta, S5_LUMA_WEIGHTS, winScale)
+        outNrShader.drawStatsH(
+            inputTex, inputTex, beta, S5_LUMA_WEIGHTS, winScale,
+            flagTex = flagTex, flagAvailable = flagAvailable
+        )
         logGlError("stage5 statsH1", bayerRenderCount)
         bindTarget(statsVFboId, w, h)
-        outNrShader.drawStatsV(statsHTexId, winScale)
+        outNrShader.drawStatsV(statsHTexId, winScale, flagAvailable)
         logGlError("stage5 statsV1", bayerRenderCount)
         bindTarget(outNr1FboId, w, h)
         outNrShader.drawMain(
@@ -1021,7 +1038,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             beta, lumaEpsScale, chromaEpsScale, sigmaDm2,
             inverseRange2, calibToResidualScale,
             useIsoSigma, s5IsoA, s5IsoB,
-            winScale, epsBoost, strength = s
+            winScale, epsBoost, strength = s,
+            flagTex = flagTex, flagAvailable = flagAvailable
         )
         logGlError("stage5 main1", bayerRenderCount)
 
@@ -1034,11 +1052,20 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // sees 0.7·r1 + 0.3·original instead of consolidating r1's correlated
         // residual (flat-region low-frequency residue cleanup, plan §3).
         bindTarget(statsHFboId, w, h)
-        outNrShader.drawStatsH(outNr1TexId, inputTex, beta, S5_LUMA_WEIGHTS, winScale)
+        outNrShader.drawStatsH(
+            outNr1TexId, inputTex, beta, S5_LUMA_WEIGHTS, winScale,
+            flagTex = flagTex, flagAvailable = flagAvailable
+        )
         logGlError("stage5 statsH2", bayerRenderCount)
         bindTarget(statsVFboId, w, h)
-        outNrShader.drawStatsV(statsHTexId, winScale)
+        outNrShader.drawStatsV(statsHTexId, winScale, flagAvailable)
         logGlError("stage5 statsV2", bayerRenderCount)
+        if (flagAvailable && (bayerRenderCount <= 8 || bayerRenderCount % 120 == 0)) {
+            CrashLogger.log(
+                TAG, "S5 flag consume (stats h/v x2): " +
+                    "%.3f".format((System.nanoTime() - flagConsumeNs0) / 1.0e6) + "ms ${w}x$h"
+            )
+        }
         bindTarget(outNr2FboId, w, h)
         outNrShader.drawMain(
             outNr1TexId, inputTex, statsVTexId, sigmaTex,
@@ -1046,7 +1073,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             beta, round2EpsMult * lumaEpsScale, round2EpsMult * chromaEpsScale, sigmaDm2,
             inverseRange2, calibToResidualScale,
             useIsoSigma, s5IsoA, s5IsoB,
-            winScale, epsBoost, strength = s
+            winScale, epsBoost, strength = s,
+            flagTex = flagTex, flagAvailable = flagAvailable
         )
         logGlError("stage5 main2", bayerRenderCount)
 
@@ -1359,6 +1387,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         rawCaptureReq.rawH.toFloat() / rawDemosaicFboHeight.toFloat()
                     )
 
+                    // Emit the S5 defect mask from this demosaic draw only when
+                    // both S1 and S5 are active; otherwise the MRT output is
+                    // never written and Stage 5 sees no flag map.
+                    val captureFlagWanted =
+                        outNrStrength > 0f && dpcStrength > 0f && captureFlagTexId != 0
+                    val flagWriteNs0 = System.nanoTime()
                     bayerShader.drawDemosaic(
                         rawDemosaicFboWidth, rawDemosaicFboHeight,
                         captureMatrix,
@@ -1377,8 +1411,16 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         dpStrength = dpcStrength.coerceIn(0f, 1f),
                         rawNrStrength = rawNrStrength.coerceIn(0f, 1f),
                         isoModelA = captureIsoModelA,
-                        isoModelB = captureIsoModelB
+                        isoModelB = captureIsoModelB,
+                        flagOutput = captureFlagWanted
                     )
+                    if (captureFlagWanted) {
+                        CrashLogger.log(
+                            TAG, "S5 flag write (inline DPC): " +
+                                "%.3f".format((System.nanoTime() - flagWriteNs0) / 1.0e6) +
+                                "ms ${rawDemosaicFboWidth}x$rawDemosaicFboHeight"
+                        )
+                    }
                     logGlError("raw after drawDemosaic", bayerRenderCount)
 
                     // Stage-5 output-domain SWGF at capture resolution, fed from
@@ -1448,7 +1490,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                             captureWhiteRange, rawDemosaicFboWidth, rawDemosaicFboHeight,
                             useIsoSigma = captureSigmaTex == 0,
                             isoModelA = captureIsoModelA, isoModelB = captureIsoModelB,
-                            winScale = capWinScale, epsBoost = capEpsBoost
+                            winScale = capWinScale, epsBoost = capEpsBoost,
+                            flagTex = if (captureFlagWanted) captureFlagTexId else 0,
+                            flagAvailable = captureFlagWanted
                         )
                         logGlError("raw after Stage-5 outDenoise", bayerRenderCount)
                     }
@@ -1861,6 +1905,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             rawDemosaicFboId = 0
             rawDemosaicFboTextureId = 0
         }
+        if (captureFlagTexId != 0) {
+            GLES20.glDeleteTextures(1, intArrayOf(captureFlagTexId), 0)
+            captureFlagTexId = 0
+        }
 
         rawDemosaicFboWidth = width
         rawDemosaicFboHeight = height
@@ -1879,6 +1927,23 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
+        // S5 defect mask (MRT attachment 1), same size/format/lifecycle as the
+        // colour attachment.  The demosaic writes it only on flag-enabled
+        // capture draws; glDrawBuffers below keeps it inactive otherwise.
+        val flagBuf = IntArray(1)
+        GLES20.glGenTextures(1, flagBuf, 0)
+        captureFlagTexId = flagBuf[0]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, captureFlagTexId)
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES30.GL_RGBA32F,
+            width, height, 0,
+            GLES20.GL_RGBA, GLES20.GL_FLOAT, null
+        )
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+
         val fboBuf = IntArray(1)
         GLES20.glGenFramebuffers(1, fboBuf, 0)
         rawDemosaicFboId = fboBuf[0]
@@ -1887,6 +1952,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
             GLES20.GL_TEXTURE_2D, rawDemosaicFboTextureId, 0
         )
+        GLES20.glFramebufferTexture2D(
+            GLES20.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT1,
+            GLES20.GL_TEXTURE_2D, captureFlagTexId, 0
+        )
+        GLES30.glDrawBuffers(1, intArrayOf(GLES20.GL_COLOR_ATTACHMENT0), 0)
 
         val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
         if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
@@ -1895,7 +1965,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         }
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-        CrashLogger.log(TAG, "Raw demosaic FBO created RGBA32F: ${width}x${height}")
+        CrashLogger.log(TAG, "Raw demosaic FBO created RGBA32F: ${width}x${height} flag=$captureFlagTexId")
     }
 
     private fun allocRgba32fTexture(width: Int, height: Int): Int {
@@ -2309,6 +2379,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             if (rawDemosaicFboTextureId != 0) {
                 GLES20.glDeleteTextures(1, intArrayOf(rawDemosaicFboTextureId), 0)
                 rawDemosaicFboTextureId = 0
+            }
+            if (captureFlagTexId != 0) {
+                GLES20.glDeleteTextures(1, intArrayOf(captureFlagTexId), 0)
+                captureFlagTexId = 0
             }
             if (denoiseFboId != 0) {
                 GLES20.glDeleteFramebuffers(1, intArrayOf(denoiseFboId), 0)

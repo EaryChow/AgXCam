@@ -1961,4 +1961,281 @@ class S5ReproTest {
         }
         java.io.File("build/s1_chromatic_line.txt").writeText(sb.toString())
     }
+
+    // ==================================================================
+    // S5 defect-mask (DPC flag) gate.  Mirrors the flag-aware
+    // STATS_H/STATS_V + MAIN window selection added to OutNrShaderProgram:
+    // flagged taps are dropped from the GF box stats (renormalized by the
+    // surviving count) and any SWGF window whose box lost a tap is
+    // disqualified.  The mask-off path is the verbatim shipped filter.
+    // ==================================================================
+
+    private class FStats3(
+        val mean: Array<FloatArray>,
+        val meanSq: Array<FloatArray>,
+        val count: Array<FloatArray>
+    )
+
+    private fun flagAt(flags: Array<BooleanArray>, x: Int, y: Int): Boolean =
+        flags[y.coerceIn(0, flags.size - 1)][x.coerceIn(0, flags[0].size - 1)]
+
+    /** Mirrors the flag-aware STATS_H/STATS_V pair.  available=false is the
+     *  shipped no-mask arithmetic (verbatim), for the equivalence assertion. */
+    private fun flagStatBox(
+        img: Img, flags: Array<BooleanArray>, winScale: Float, available: Boolean
+    ): FStats3 {
+        val r = max(2, Math.round(2f * winScale))
+        val full = (2 * r + 1).toFloat()
+        val hMean = Array(img.h) { FloatArray(img.w) }
+        val hSq = Array(img.h) { FloatArray(img.w) }
+        val hCnt = Array(img.h) { FloatArray(img.w) }
+        for (y in 0 until img.h) {
+            for (x in 0 until img.w) {
+                var s = 0f
+                var sq = 0f
+                var c = 0f
+                for (dx in -r..r) {
+                    val xx = (x + dx).coerceIn(0, img.w - 1)
+                    if (available && flags[y][xx]) continue
+                    val yv = luma(img.at(xx, y, 0), img.at(xx, y, 1), img.at(xx, y, 2))
+                    s += yv
+                    sq += yv * yv
+                    c += 1f
+                }
+                if (available) {
+                    if (c < 0.5f) { hMean[y][x] = 0f; hSq[y][x] = 0f } else {
+                        hMean[y][x] = s / c; hSq[y][x] = sq / c
+                    }
+                    hCnt[y][x] = c
+                } else {
+                    hMean[y][x] = s / full
+                    hSq[y][x] = sq / full
+                    hCnt[y][x] = 0f
+                }
+            }
+        }
+        val mean = Array(img.h) { FloatArray(img.w) }
+        val mSq = Array(img.h) { FloatArray(img.w) }
+        val cnt = Array(img.h) { FloatArray(img.w) }
+        for (y in 0 until img.h) {
+            for (x in 0 until img.w) {
+                if (available) {
+                    var s = 0f
+                    var sq = 0f
+                    var c = 0f
+                    for (dy in -r..r) {
+                        val yy = (y + dy).coerceIn(0, img.h - 1)
+                        s += hMean[yy][x] * hCnt[yy][x]
+                        sq += hSq[yy][x] * hCnt[yy][x]
+                        c += hCnt[yy][x]
+                    }
+                    if (c < 0.5f) { mean[y][x] = 0f; mSq[y][x] = 0f } else {
+                        mean[y][x] = s / c; mSq[y][x] = sq / c
+                    }
+                    cnt[y][x] = c
+                } else {
+                    var s = 0f
+                    var sq = 0f
+                    for (dy in -r..r) {
+                        val yy = (y + dy).coerceIn(0, img.h - 1)
+                        s += hMean[yy][x]
+                        sq += hSq[yy][x]
+                    }
+                    mean[y][x] = s / full
+                    mSq[y][x] = sq / full
+                    cnt[y][x] = 0f
+                }
+            }
+        }
+        return FStats3(mean, mSq, cnt)
+    }
+
+    /** Flag-aware SWGF winner (argmin |mean-y|/(var+eps)); disqualified windows
+     *  are skipped, with a renormalized-stats fallback when all are flagged. */
+    private fun selectWinFlagged(
+        stats: FStats3, x: Int, y: Int, yLuma: Float, epsY: Float, winScale: Float, available: Boolean
+    ): Int {
+        val r = max(2, Math.round(2f * winScale))
+        val full = ((2 * r + 1) * (2 * r + 1)).toFloat()
+        fun pick(skipFlagged: Boolean): Int {
+            var bi = -1
+            var bs = 1.0e30f
+            for (k in 0..7) {
+                val sx = (x + windowCenters[k][0]).coerceIn(0, stats.mean[0].size - 1)
+                val sy = (y + windowCenters[k][1]).coerceIn(0, stats.mean.size - 1)
+                if (skipFlagged && stats.count[sy][sx] < full - 0.5f) continue
+                val v = max(stats.meanSq[sy][sx] - stats.mean[sy][sx] * stats.mean[sy][sx], 0f)
+                val sc = abs(stats.mean[sy][sx] - yLuma) / (v + epsY)
+                if (sc < bs) { bs = sc; bi = k }
+            }
+            return bi
+        }
+        if (available) {
+            val b = pick(true)
+            return if (b >= 0) b else pick(false)
+        }
+        return pick(false)
+    }
+
+    /** Flag-aware dense chroma box, mirroring chromaMean()'s new branch. */
+    private fun chromaMeanFlagged(
+        img: Img, flags: Array<BooleanArray>, cx: Int, cy: Int, winScale: Float, available: Boolean
+    ): FloatArray {
+        val r = max(2, Math.round(2f * winScale))
+        var s1 = 0f
+        var s2 = 0f
+        var c = 0f
+        for (iy in -r..r) {
+            for (ix in -r..r) {
+                val xx = (cx + ix).coerceIn(0, img.w - 1)
+                val yy = (cy + iy).coerceIn(0, img.h - 1)
+                if (available && flags[yy][xx]) continue
+                val rr = img.at(xx, yy, 0)
+                val gg = img.at(xx, yy, 1)
+                val bb = img.at(xx, yy, 2)
+                s1 += rr - bb
+                s2 += 0.5f * (rr + bb) - gg
+                c += 1f
+            }
+        }
+        if (available) return if (c < 0.5f) floatArrayOf(0f, 0f) else floatArrayOf(s1 / c, s2 / c)
+        val n = ((2 * r + 1) * (2 * r + 1)).toFloat()
+        return floatArrayOf(s1 / n, s2 / n)
+    }
+
+    private fun flatScene(w: Int, h: Int): Img {
+        val px = Array(h) { FloatArray(w * 3) }
+        for (y in 0 until h) for (x in 0 until w) {
+            px[y][x * 3] = 0.5f; px[y][x * 3 + 1] = 0.5f; px[y][x * 3 + 2] = 0.5f
+        }
+        return Img(w, h, px)
+    }
+
+    /** Single-pixel S5 (luma argmin + dense chroma) with the mask gate. */
+    private fun s5Pixel(
+        img: Img, flags: Array<BooleanArray>, x: Int, y: Int,
+        available: Boolean, epsY: Float, epsC: Float, winScale: Float
+    ): FloatArray {
+        val stats = flagStatBox(img, flags, winScale, available)
+        val r = img.at(x, y, 0); val g = img.at(x, y, 1); val b = img.at(x, y, 2)
+        val y0 = luma(r, g, b)
+        val k = selectWinFlagged(stats, x, y, y0, epsY, winScale, available)
+        val sx = (x + windowCenters[k][0]).coerceIn(0, stats.mean[0].size - 1)
+        val sy = (y + windowCenters[k][1]).coerceIn(0, stats.mean.size - 1)
+        val meanY = stats.mean[sy][sx]
+        val varY = max(stats.meanSq[sy][sx] - meanY * meanY, 0f)
+        val cm = chromaMeanFlagged(img, flags, x, y, winScale, available)
+        val aY = varY / (varY + epsY)
+        val aC = varY / (varY + epsC)
+        return floatArrayOf(
+            aY * y0 + (1f - aY) * meanY,
+            aC * (r - b) + (1f - aC) * cm[0],
+            aC * (0.5f * (r + b) - g) + (1f - aC) * cm[1]
+        )
+    }
+
+    @Test
+    fun flagMaskExcludesDefectsFromSwgfWindows() {
+        val img = flatScene(9, 9)
+        val flags = Array(9) { BooleanArray(9) }
+        // Hot luma defect at (5,3): right window centre (+2,0) of query (3,3).
+        for (ch in 0..2) img.c[3][5 * 3 + ch] = 0.9f
+        flags[3][5] = true
+
+        val epsY = 1.0e-4f
+        val statsOn = flagStatBox(img, flags, 1f, true)
+        val statsOff = flagStatBox(img, flags, 1f, false)
+
+        // GF stats exclude the flagged sample: the contaminated window's mean
+        // is the clean-field value with the mask on, higher without it.
+        assertTrue(
+            "flagged GF box must drop the defect: on=${statsOn.mean[3][5]} off=${statsOff.mean[3][5]}",
+            statsOn.mean[3][5] < statsOff.mean[3][5] - 1e-3f
+        )
+        assertTrue(
+            "clean-field mean must be restored with the mask on",
+            abs(statsOn.mean[3][5] - 0.5f) < 1e-4f
+        )
+
+        // Query luma sits exactly on the contaminated window mean, so the
+        // unflagged argmin selects the defect window (score ~0).  The flagged
+        // selection must pick a window whose 5x5 anchor box holds no defect.
+        val yContaminated = statsOff.mean[3][5]
+        val kOn = selectWinFlagged(statsOn, 3, 3, yContaminated, epsY, 1f, true)
+        val kOff = selectWinFlagged(statsOff, 3, 3, yContaminated, epsY, 1f, false)
+        assertTrue("unflagged version must fall for the contaminated window", kOff == 1)
+        assertTrue("flagged version must not pick the contaminated window", kOn != 1)
+
+        val sx = (3 + windowCenters[kOn][0]).coerceIn(0, 8)
+        val sy = (3 + windowCenters[kOn][1]).coerceIn(0, 8)
+        for (dy in -2..2) for (dx in -2..2) {
+            val xx = sx + dx
+            val yy = sy + dy
+            if (xx in 0..8 && yy in 0..8) {
+                assertTrue(
+                    "flagged pixel ($xx,$yy) must not lie in the selected window anchor set (k=$kOn)",
+                    !flagAt(flags, xx, yy)
+                )
+            }
+        }
+
+        // All-windows-flagged fallback: a centre defect sits in every ±2 box,
+        // so the gate must fall back to the renormalized stats, not return none.
+        val flags2 = Array(9) { BooleanArray(9) }
+        flags2[4][4] = true
+        val stats2 = flagStatBox(img, flags2, 1f, true)
+        val kFallback = selectWinFlagged(stats2, 4, 4, 0.5f, epsY, 1f, true)
+        assertTrue("all-flagged must fall back to a window, not disable S5", kFallback >= 0)
+    }
+
+    @Test
+    fun flagMaskReducesS5DefectNeighborhoodError() {
+        val truth = flatScene(9, 9)
+        val defect = flatScene(9, 9)
+        val flags = Array(9) { BooleanArray(9) }
+        // Chroma-only defect at (5,3): same luma (0.5), C1 shifted by +0.4.
+        defect.c[3][5 * 3 + 0] = 0.7f
+        defect.c[3][5 * 3 + 1] = 0.5f
+        defect.c[3][5 * 3 + 2] = 0.3f
+        flags[3][5] = true
+
+        val epsY = 1.0e-4f
+        val epsC = 1.0e-3f
+        var errOff = 0f
+        var errOn = 0f
+        for (y in 2..4) for (x in 2..4) {
+            val t = s5Pixel(truth, flags, x, y, false, epsY, epsC, 1f)
+            val off = s5Pixel(defect, flags, x, y, false, epsY, epsC, 1f)
+            val on = s5Pixel(defect, flags, x, y, true, epsY, epsC, 1f)
+            for (ch in 1..2) {
+                errOff += abs(off[ch] - t[ch])
+                errOn += abs(on[ch] - t[ch])
+            }
+        }
+        System.out.println("flag e2e chroma err: unflagged=$errOff flagged=$errOn")
+        assertTrue(
+            "defect-mask S5 must not increase neighborhood chroma error (on=$errOn off=$errOff)",
+            errOn <= errOff + 1e-6f
+        )
+        assertTrue("defect-mask S5 must actually remove the defect contribution", errOn < errOff)
+        assertTrue("unflagged chroma mean must be contaminated by the defect", errOff > 1e-3f)
+    }
+
+    @Test
+    fun flagMaskOffPathMatchesShippedStats() {
+        // available=false must reproduce the shipped statBox bit-for-bit, so a
+        // missing/disabled mask cannot perturb Stage 5.
+        val rnd = Random(11)
+        val px = Array(11) { FloatArray(11 * 3) { rnd.nextFloat() * 0.6f } }
+        val img = Img(11, 11, px)
+        val flags = Array(11) { BooleanArray(11) { rnd.nextFloat() < 0.15f } }
+        val ref = statBox(img)
+        val off = flagStatBox(img, flags, 1f, false)
+        for (y in 0 until 11) for (x in 0 until 11) {
+            assertTrue("mean off-path differs at ($x,$y)", abs(ref.mean[y][x] - off.mean[y][x]) <= 1e-6f)
+            val refVar = ref.variance[y][x]
+            val offVar = max(off.meanSq[y][x] - off.mean[y][x] * off.mean[y][x], 0f)
+            assertTrue("var off-path differs at ($x,$y)", abs(refVar - offVar) <= 1e-6f)
+        }
+    }
 }
