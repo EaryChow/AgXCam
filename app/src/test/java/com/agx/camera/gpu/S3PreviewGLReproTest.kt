@@ -80,6 +80,26 @@ class S3PreviewGLReproTest {
         return max((raw - SENSOR_BLACK).toFloat(), 0f)
     }
 
+    // H2 extended veto mirror (GLSL l1DefectDev + maxNbExtAt): the +-1
+    // cross-colour lattice sites' structure dev, folded into the S1 defect gate.
+    private val L1X = intArrayOf(1, -1, 0, 0, 1, -1, 1, -1)
+    private val L1Y = intArrayOf(0, 0, 1, -1, 1, 1, -1, -1)
+    private val L2X = intArrayOf(2, -2, 0, 0, 2, -2, 2, -2)
+    private val L2Y = intArrayOf(0, 0, 2, -2, 2, 2, -2, -2)
+
+    private fun devAtSensor(v: ShortArray, x: Int, y: Int): Float {
+        val s = FloatArray(8) { sensorVal(v, x + L2X[it], y + L2Y[it]) }.sorted()
+        var acc = 0f
+        for (k in 1 until 7) acc += s[k]
+        return abs(sensorVal(v, x, y) - acc / 6f)
+    }
+
+    private fun maxNbExtAt(v: ShortArray, sx: Int, sy: Int, maxNb: Float): Float {
+        var m = maxNb
+        for (k in 0 until 8) m = maxOf(m, devAtSensor(v, sx + L1X[k], sy + L1Y[k]))
+        return m
+    }
+
     /** Mirror of the Stage-2 σ̂ pass (SigmaHatShaderProgram FRAGMENT_SHADER),
      *  evaluated from the RAW sensor values: per-CFA-phase MAD over the 8
      *  same-phase neighbouring cells (grid offsets ±1, clamped), mean over
@@ -235,7 +255,7 @@ class S3PreviewGLReproTest {
             val cold = (c < mn) && (iavg - c) > band
             if (hot || cold) {
                 if (nrRadius >= 4) {
-                    if (abs(c - iavg) > 6.0f * maxNb) {
+                    if (abs(c - iavg) > 6.0f * maxNbExtAt(v, sx, sy, maxNb)) {
                         center = c + (iDir - c) * max(max(s1, 0.85f * s3), 0.98f)
                     }
                 } else {

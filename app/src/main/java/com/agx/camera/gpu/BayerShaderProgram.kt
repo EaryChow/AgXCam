@@ -930,6 +930,50 @@ float coarseDevAt(ivec2 coord) {
     return m;
 }
 
+// M2-style cross-colour structure dev (H2 extended veto): for a neighbouring
+// site on the +-1 cross-colour lattice, |site - its own 6-of-8 trimmed
+// same-colour mean| is zero on a truly isolated single-pixel defect (the site
+// sits at the local background) and large on spatially continuous bright
+// structure (a letter stroke, an off-lattice thin line).  Fully unrolled (no
+// arrays, no loop) so the driver never spills the register array; this is the
+// mirror of the Kotlin probe devAtSensor/VAL1() extension.
+float l1DefectDev(ivec2 s) {
+    float se2 = sampleBayerRaw(s + ivec2( 2, 0));
+    float sw2 = sampleBayerRaw(s + ivec2(-2, 0));
+    float sn2 = sampleBayerRaw(s + ivec2( 0,-2));
+    float ss2 = sampleBayerRaw(s + ivec2( 0, 2));
+    float sne = sampleBayerRaw(s + ivec2( 2,-2));
+    float snw = sampleBayerRaw(s + ivec2(-2,-2));
+    float sse = sampleBayerRaw(s + ivec2( 2, 2));
+    float ssw = sampleBayerRaw(s + ivec2(-2, 2));
+    float mn8 = min(min(min(se2, sw2), min(sn2, ss2)), min(min(sne, snw), min(sse, ssw)));
+    float mx8 = max(max(max(se2, sw2), max(sn2, ss2)), max(max(sne, snw), max(sse, ssw)));
+    float mean6 = (se2 + sw2 + sn2 + ss2 + sne + snw + sse + ssw - mn8 - mx8) * (1.0 / 6.0);
+    return abs(sampleBayerRaw(s) - mean6);
+}
+
+// H2 extended isolation veto as an early-exit predicate.  The caller's cheap
+// gate already ensured d > 6*maxNb (d = abs(c-iavg)), so d > 6*maxNbExt
+// reduces to 'every +-1 site dev < d/6' -- bail at the FIRST connected site
+// instead of folding all 8 (72 fetches).  Bit-identical to the Kotlin mirror
+// maxNbExt (tie: dev == d/6 vetoes, matching strict '>').  Iterates the
+// +-1 cross-colour offsets over a constant array: the fully-flattened
+// if-chain version tripled the inlined texelFetch load on this fragment and
+// stalled the on-device GLSL compiler (black preview), while the array loop
+// keeps the identical early-exit semantics in a small, driver-friendly form.
+bool l1IsolatedAt(ivec2 coord, float d) {
+    float thr = d * (1.0 / 6.0);
+    const ivec2 offs[8] = ivec2[8](
+        ivec2(-1, -1), ivec2(0, -1), ivec2(1, -1),
+        ivec2(-1,  0), ivec2(1,  0),
+        ivec2(-1,  1), ivec2(0,  1), ivec2(1,  1)
+    );
+    for (int k = 0; k < 8; k++) {
+        if (l1DefectDev(coord + offs[k]) >= thr) return false;
+    }
+    return true;
+}
+
 float sampleSameColorNRRing(ivec2 coord, int ring, float mCoarse) {
     float c = sampleBayerRaw(coord);
     if (u_dp_strength <= 0.0 && u_raw_nr_strength <= 0.0) return c;
@@ -1035,8 +1079,13 @@ float sampleSameColorNRRing(ivec2 coord, int ring, float mCoarse) {
         bool cold = (c < mn) && (iavg - c) > band;
         if (hot || cold) {
             if (ring >= 4) {
+                // H2 extended veto, nested after the cheap same-colour gate
+                // (GLSL ES does not short-circuit '&&'): d > 6*maxNb first,
+                // then the early-exit +-1 cross-colour predicate.
                 if (abs(c - iavg) > 6.0 * maxNb) {
-                    center = mix(c, iDir, applyStrength);
+                    if (l1IsolatedAt(coord, abs(c - iavg))) {
+                        center = mix(c, iDir, applyStrength);
+                    }
                 }
             } else {
                 center = mix(c, iavg, applyStrength);
@@ -1326,8 +1375,12 @@ void denoisedDualRing(ivec2 coord, float mCoarse, out float lo, out float hi) {
         bool hot = (c > mx) && (c - iavg) > band;
         bool cold = (c < mn) && (iavg - c) > band;
         if (hot || cold) {
+            // H2 extended veto, nested after the cheap same-colour gate
+            // (GLSL ES does not short-circuit '&&').
             if (abs(c - iavg) > 6.0 * maxNb) {
-                center = mix(c, iDir, applyStrength);
+                if (l1IsolatedAt(coord, abs(c - iavg))) {
+                    center = mix(c, iDir, applyStrength);
+                }
             }
         }
     }
@@ -1477,6 +1530,23 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
         vec3 sum4 = vec3(0.0);
         vec3 sum2 = vec3(0.0);
         int mOff = (bx >= 3) ? 1 : 0;
+        if (blendW >= 1.0) {
+            // S3 endpoint (>= 0.75): the 4x4 side is weighted by (1-blendW)=0,
+            // so only the pure 2x2 ring-4 box survives.  Skip the 12 outer
+            // ring-2 evaluations entirely — 4 demosaicAtDual calls instead of
+            // 16 demosaic evaluations per texel.  sum4*0 + sum2*0.25 ==
+            // sum2*0.25, so this is bit-identical to the fused loop below.
+            for (int dy = 0; dy < 2; dy++) {
+                for (int dx = 0; dx < 2; dx++) {
+                    ivec2 c = clamp(ivec2(base) + ivec2(mOff + dx, mOff + dy), ivec2(0), ivec2(u_sensorSize) - ivec2(1));
+                    vec2 lsC = lsSensorUV + vec2(float(mOff + dx) + baseOff, float(mOff + dy) + baseOff);
+                    vec3 lo, hi;
+                    demosaicAtDual(c, lsC, mCoarse, lo, hi);
+                    sum2 += hi;
+                }
+            }
+            return sum2 * 0.25;
+        }
         for (int dy = 0; dy < bx; dy++) {
             for (int dx = 0; dx < bx; dx++) {
                 ivec2 c = clamp(ivec2(base) + ivec2(dx, dy), ivec2(0), ivec2(u_sensorSize) - ivec2(1));
@@ -1564,7 +1634,40 @@ float inlineDefectFlagAt(ivec2 coord, int ring) {
                      (2.0 + 2.0 * u_dp_strength) * sigma);
     bool hot = (c > mx) && (c - iavg) > band;
     bool cold = (c < mn) && (iavg - c) > band;
-    return (hot || cold) ? 1.0 : 0.0;
+    if (!(hot || cold)) return 0.0;
+    // H2 extended-isolation veto: a centre that is hot/cold only counts as a
+    // defect when it is truly isolated.  Fold the same-colour directional
+    // devs (devN..devW) and the +-1 cross-colour structure devs into maxNb
+    // and require abs(c - iavg) > 6*maxNb — identical to the S1 correction
+    // gate, so the flag map covers exactly what S1 would actually correct.
+    // Without this, the un-gated hot||cold flag fires across a whole
+    // continuous bright letter, S5 then drops the letter's own taps from its
+    // SWGF windows, and the letter collapses into dark grid-anchored blocks.
+    if (ring >= 4) {
+        float tN = nNN + nNE + nNW + c - min(min(nNN, nNE), min(nNW, c))
+            - max(max(nNN, nNE), max(nNW, c));
+        float devN = abs(nN - tN * 0.5);
+        float tS = nSS + nSE + nSW + c - min(min(nSS, nSE), min(nSW, c))
+            - max(max(nSS, nSE), max(nSW, c));
+        float devS = abs(nS - tS * 0.5);
+        float tE = nEE + nNE + nSE + c - min(min(nEE, nNE), min(nSE, c))
+            - max(max(nEE, nNE), max(nSE, c));
+        float devE = abs(nE - tE * 0.5);
+        float tW = nWW + nNW + nSW + c - min(min(nWW, nNW), min(nSW, c))
+            - max(max(nWW, nNW), max(nSW, c));
+        float devW = abs(nW - tW * 0.5);
+        float maxNb = max(max(devN, devS), max(devE, devW));
+        // Cheap same-colour gate first (GLSL ES does not short-circuit '&&'):
+        // the expensive +-1 cross-colour fold runs only for pixels the
+        // same-colour gate alone would accept.  Early-exit predicate, so the
+        // flag map covers exactly what S1 would correct.
+        float d = abs(c - iavg);
+        if (d > 6.0 * maxNb) {
+            return l1IsolatedAt(coord, d) ? 1.0 : 0.0;
+        }
+        return 0.0;
+    }
+    return 1.0;
 }
 
 // OR of the inline defect detection over every centre sample in this output
@@ -1720,6 +1823,39 @@ float coarseDevAt(ivec2 coord) {
     return m;
 }
 
+// M2-style cross-colour structure dev (H2 extended veto) — the unrolled form
+// from the demosaic copy.  See there for the full rationale.
+float l1DefectDev(ivec2 s) {
+    float se2 = sampleBayerRaw(s + ivec2( 2, 0));
+    float sw2 = sampleBayerRaw(s + ivec2(-2, 0));
+    float sn2 = sampleBayerRaw(s + ivec2( 0,-2));
+    float ss2 = sampleBayerRaw(s + ivec2( 0, 2));
+    float sne = sampleBayerRaw(s + ivec2( 2,-2));
+    float snw = sampleBayerRaw(s + ivec2(-2,-2));
+    float sse = sampleBayerRaw(s + ivec2( 2, 2));
+    float ssw = sampleBayerRaw(s + ivec2(-2, 2));
+    float mn8 = min(min(min(se2, sw2), min(sn2, ss2)), min(min(sne, snw), min(sse, ssw)));
+    float mx8 = max(max(max(se2, sw2), max(sn2, ss2)), max(max(sne, snw), max(sse, ssw)));
+    float mean6 = (se2 + sw2 + sn2 + ss2 + sne + snw + sse + ssw - mn8 - mx8) * (1.0 / 6.0);
+    return abs(sampleBayerRaw(s) - mean6);
+}
+
+// H2 extended isolation veto as an early-exit predicate — see demosaic copy.
+// The constant-array loop (not a flattened if-chain) so the 12-tap S3_PACK
+// fragment stays small enough for the on-device GLSL compiler.
+bool l1IsolatedAt(ivec2 coord, float d) {
+    float thr = d * (1.0 / 6.0);
+    const ivec2 offs[8] = ivec2[8](
+        ivec2(-1, -1), ivec2(0, -1), ivec2(1, -1),
+        ivec2(-1,  0), ivec2(1,  0),
+        ivec2(-1,  1), ivec2(0,  1), ivec2(1,  1)
+    );
+    for (int k = 0; k < 8; k++) {
+        if (l1DefectDev(coord + offs[k]) >= thr) return false;
+    }
+    return true;
+}
+
 float sampleSameColorNR(ivec2 coord, float mCoarse) {
     float c = sampleBayerRaw(coord);
     if (u_dp_strength <= 0.0 && u_raw_nr_strength <= 0.0) return c;
@@ -1818,8 +1954,15 @@ float sampleSameColorNR(ivec2 coord, float mCoarse) {
         bool hot = (c > mx) && (c - iavg) > band;
         bool cold = (c < mn) && (iavg - c) > band;
         if (hot || cold) {
-            if (abs(c - iavg) > 6.0 * maxNb) {
-                center = mix(c, iDir, applyStrength);
+            // H2 extended veto, nested after the cheap same-colour gate
+            // (GLSL ES does not short-circuit '&&').  The S3_PACK copy is
+            // unconditional (12-tap), so the early-exit predicate is what
+            // keeps a bright stroke off the expensive path.
+            float d = abs(c - iavg);
+            if (d > 6.0 * maxNb) {
+                if (l1IsolatedAt(coord, d)) {
+                    center = mix(c, iDir, applyStrength);
+                }
             }
         }
     }

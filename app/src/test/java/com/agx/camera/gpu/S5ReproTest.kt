@@ -3,6 +3,7 @@ package com.agx.camera.gpu
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 import kotlin.random.Random
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -534,6 +535,13 @@ class S5ReproTest {
         val tW = nWW + nNW + nSW + c - minOf(minOf(nWW, nNW), minOf(nSW, c)) - maxOf(maxOf(nWW, nNW), maxOf(nSW, c))
         val devW = abs(nW - tW * 0.5f)
         val maxNb = maxOf(maxOf(devN, devS), maxOf(devE, devW))
+        // H2 extended veto (mirror of the GLSL fix): fold the cross-colour
+        // (+-1) neighbour structures into maxNb.  An isolated defect's
+        // cross-colour neighbours sit at the local background (small dev ->
+        // veto unaffected); a thin stroke/letter is spatially connected, so
+        // its cross-colour neighbours are elevated (large dev -> vetoed).
+        var maxNbExt = maxNb
+        for (k in 0 until 8) maxNbExt = maxOf(maxNbExt, devAtSensor(v, sx + L1X[k], sy + L1Y[k]))
         val minDev = minOf(devN, devS, devE, devW)
 
         val corrStrength = max(s1, 0.85f * s3)
@@ -542,7 +550,7 @@ class S5ReproTest {
             val hot = (c > mx) && (c - iavg) > band
             val cold = (c < mn) && (iavg - c) > band
             if (hot || cold) {
-                if (abs(c - iavg) > 6.0f * maxNb) {
+                if (abs(c - iavg) > 6.0f * maxNbExt) {
                     center = c + (iDir - c) * max(corrStrength, 0.98f)
                 }
             }
@@ -2241,4 +2249,750 @@ class S5ReproTest {
             assertTrue("var off-path differs at ($x,$y)", abs(refVar - offVar) <= 1e-6f)
         }
     }
+
+    // ==================================================================
+    // H2 probe: DPC (S1) false-positive on thin bright strokes over a
+    // near-black field (backlit-letter artifact attribution).
+    //
+    // The inline/grid DPC's same-colour lattice is 2px-strided. A thin bright
+    // stroke is only "protected" from the isolation veto when the same-colour
+    // neighbours (the 8 sites at +-2) also land on the stroke. For strokes
+    // aligned to a lattice direction (H/V, 45/135) that holds; for a stroke at
+    // an off-lattice angle, at corners and at endpoints the neighbours are all
+    // dark, so Condition A passes and Condition B cannot veto -> the pixel is
+    // classified hot and pulled toward the dark directional interpolation.
+    // This probe measures the pull vs orientation, width, slider and theta.
+    // ==================================================================
+
+    private fun onThinStroke(x: Int, y: Int, w: Int, angle: Int): Boolean {
+        val cx = SENSOR_W / 2
+        val cy = SENSOR_H / 2
+        return when (angle) {
+            0 -> x >= cx - w / 2 && x < cx - w / 2 + w
+            90 -> y >= cy - w / 2 && y < cy - w / 2 + w
+            45 -> (x - y) >= (cx - cy) && (x - y) < (cx - cy) + w
+            135 -> (x + y) >= (cx + cy) && (x + y) < (cx + cy) + w
+            22 -> (2 * (x - cx) - (y - cy)) >= 0 && (2 * (x - cx) - (y - cy)) < 2 * w
+            else -> ((x - cx) + 2 * (y - cy)) >= 0 && ((x - cx) + 2 * (y - cy)) < 2 * w
+        }
+    }
+
+    /** Near-black field + one thin bright stroke (or a single dot), RGGB, in DN. */
+    private fun buildThinStrokeSensor(
+        w: Int, angle: Int, fg: Float = 800f, bg: Float = 8f,
+        sigma: Float = 3f, seed: Long = 4242L, dot: Boolean = false
+    ): ShortArray {
+        val rnd = Random(seed)
+        val s = ShortArray(SENSOR_W * SENSOR_H)
+        val cx = SENSOR_W / 2
+        val cy = SENSOR_H / 2
+        for (y in 0 until SENSOR_H) {
+            for (x in 0 until SENSOR_W) {
+                val on = if (dot) (x == cx && y == cy) else onThinStroke(x, y, w, angle)
+                val raw = (if (on) fg else bg) + SENSOR_BLACK +
+                    (rnd.nextFloat() - 0.5f) * 2f * sigma
+                s[y * SENSOR_W + x] = raw.roundToInt().coerceIn(0, SENSOR_CLIP).toShort()
+            }
+        }
+        return s
+    }
+
+    /**
+     * Mean/quantile pull (raw - S1-corrected) over the stroke's own pixels.
+     * A pull of ~fg means the stroke was fully replaced by the dark field.
+     */
+    private fun dpcPullOnStroke(
+        sensor: ShortArray, w: Int, angle: Int, s1: Float, coef: Float, dot: Boolean = false
+    ): FloatArray {
+        var sum = 0f
+        var cnt = 0
+        var heavy = 0
+        for (y in 4 until SENSOR_H - 4) {
+            for (x in 4 until SENSOR_W - 4) {
+                val on = if (dot) (x == SENSOR_W / 2 && y == SENSOR_H / 2) else onThinStroke(x, y, w, angle)
+                if (!on) continue
+                val raw = sensorVal(sensor, x, y)
+                val corr = sameColorNR(sensor, x, y, s1, 0f, null, coef)
+                val pull = raw - corr
+                sum += pull
+                if (pull > 200f) heavy++
+                cnt++
+            }
+        }
+        val n = max(cnt, 1)
+        return floatArrayOf(sum / n, heavy.toFloat() / n, cnt.toFloat())
+    }
+
+    @Test
+    fun dpcThinStrokeFalsePositiveProbe() {
+        val sb = StringBuilder()
+        sb.append("=== H2: DPC pull on thin bright strokes (fg=800 DN over bg=8 DN, sigma=3 DN) ===\n")
+        sb.append("pull = raw - S1_corrected (DN); heavy = fraction with pull > 200 DN\n")
+        val labels = mapOf(0 to "V", 90 to "H", 45 to "45", 135 to "135", 22 to "26deg", 99 to "63deg")
+        for (coef in floatArrayOf(2f, 4f)) {
+            sb.append(String.format("-- theta = 2 + %s*s1 --\n", if (coef == 2f) "2" else "4"))
+            sb.append(String.format("%-7s %-4s", "orient", "w"))
+            for (s1 in floatArrayOf(0f, 0.25f, 0.5f, 0.75f, 1f)) sb.append(String.format("  pull@%-4.2f", s1))
+            sb.append("   heavy@1.00\n")
+            for (angle in intArrayOf(0, 90, 45, 135, 22, 99)) {
+                for (w in intArrayOf(1, 2, 3)) {
+                    if ((angle == 22 || angle == 99) && w != 1) continue
+                    val sensor = buildThinStrokeSensor(w, angle)
+                    sb.append(String.format("%-7s %-4d", labels[angle], w))
+                    var last = FloatArray(0)
+                    for (s1 in floatArrayOf(0f, 0.25f, 0.5f, 0.75f, 1f)) {
+                        last = dpcPullOnStroke(sensor, w, angle, s1, coef)
+                        sb.append(String.format("  %9.1f", last[0]))
+                    }
+                    sb.append(String.format("      %5.2f (%d px)\n", last[1], last[2].toInt()))
+                }
+            }
+            val dot = buildThinStrokeSensor(1, 0, dot = true)
+            val d = dpcPullOnStroke(dot, 1, 0, 1f, coef, dot = true)
+            sb.append(String.format("DOT     %-4d pull@1.00 = %.1f  heavy=%.2f\n",
+                1, d[0], d[1]))
+        }
+        System.out.println(sb)
+        java.io.File("build/s5_thin_stroke_dpc.txt").writeText(sb.toString())
+        // Sanity: the probe only means something if the stroke exists at all.
+        val sensor = buildThinStrokeSensor(1, 0)
+        assertTrue("probe scene stroke must be bright", sensorVal(sensor, SENSOR_W / 2, SENSOR_H / 2) > 700f)
+    }
+
+    // ==================================================================
+    // End-to-end L1: stroke Bayer sensor -> S1 DPC -> demosaic -> S5,
+    // scanned over both sliders. Quantifies how much of the stroke loss is
+    // S1 vs S5 and the interaction.
+    // ==================================================================
+
+    private fun imgStrokeRetention(img: Img, angle: Int): Float {
+        val cx = SENSOR_W / 2
+        val cy = SENSOR_H / 2
+        val bg = 0.008f
+        val fg = 0.834f
+        var peak = 0f
+        var base = 0f
+        var n = 0
+        if (angle == 90) {
+            for (x in cx - 10..cx + 10) {
+                for (yy in cy - 8..cy + 8) peak = max(peak, luma(img.at(x, yy, 0), img.at(x, yy, 1), img.at(x, yy, 2)))
+                base += 0.5f * (luma(img.at(x, cy - 14, 0), img.at(x, cy - 14, 1), img.at(x, cy - 14, 2)) +
+                    luma(img.at(x, cy + 14, 0), img.at(x, cy + 14, 1), img.at(x, cy + 14, 2)))
+                n++
+            }
+        } else {
+            for (y in cy - 10..cy + 10) {
+                for (xx in cx - 8..cx + 8) peak = max(peak, luma(img.at(xx, y, 0), img.at(xx, y, 1), img.at(xx, y, 2)))
+                base += 0.5f * (luma(img.at(cx - 14, y, 0), img.at(cx - 14, y, 1), img.at(cx - 14, y, 2)) +
+                    luma(img.at(cx + 14, y, 0), img.at(cx + 14, y, 1), img.at(cx + 14, y, 2)))
+                n++
+            }
+        }
+        base /= max(n, 1)
+        return (peak - base) / (fg - bg)
+    }
+
+    @Test
+    fun thinStrokeFullChainProbe() {
+        val sb = StringBuilder()
+        sb.append("=== L1 full chain: S1 -> demosaic -> S5 stroke retention (fg=800/bg=8 DN) ===\n")
+        sb.append("retention = output (peak-bg)/(fg-bg); demosaic 1:1 (192x160), S5 = final linear blend\n")
+        val labels = mapOf(0 to "V", 90 to "H", 45 to "45", 99 to "26deg")
+        for (angle in intArrayOf(0, 90, 45, 99)) {
+            val sensor = buildThinStrokeSensor(1, angle)
+            val clean = demosaicImage(sensor, SENSOR_W, SENSOR_H, 1, 0f, 0f)
+            sb.append(String.format("-- orientation %s --\n", labels[angle]))
+            sb.append(String.format("  S1=0 : clean=%.3f  ", imgStrokeRetention(clean, angle)))
+            val stClean = statBox(clean)
+            val s5Clean = runS5(clean, stClean, Mode.SOFT2)
+            for (s5 in floatArrayOf(0.25f, 0.5f, 0.75f, 1f)) {
+                val blended = blendImg(clean, s5Clean, s5)
+                sb.append(String.format("S5%.2f=%.3f ", s5, imgStrokeRetention(blended, angle)))
+            }
+            sb.append('\n')
+            val dirty = demosaicImage(sensor, SENSOR_W, SENSOR_H, 1, 1f, 0f)
+            sb.append(String.format("  S1=1 : dirty=%.3f  ", imgStrokeRetention(dirty, angle)))
+            val stDirty = statBox(dirty)
+            val s5Dirty = runS5(dirty, stDirty, Mode.SOFT2)
+            for (s5 in floatArrayOf(0.25f, 0.5f, 0.75f, 1f)) {
+                val blended = blendImg(dirty, s5Dirty, s5)
+                sb.append(String.format("S5%.2f=%.3f ", s5, imgStrokeRetention(blended, angle)))
+            }
+            sb.append('\n')
+        }
+        System.out.println(sb)
+        java.io.File("build/s5_thin_stroke_chain.txt").writeText(sb.toString())
+        // Sanity: with both stages off the stroke must be present.
+        val sensor = buildThinStrokeSensor(1, 0)
+        val clean = demosaicImage(sensor, SENSOR_W, SENSOR_H, 1, 0f, 0f)
+        assertTrue("clean chain stroke must be present", imgStrokeRetention(clean, 0) > 0.5f)
+    }
+
+    private fun blendImg(a: Img, b: Img, t: Float): Img {
+        val out = Array(a.h) { FloatArray(a.w * 3) }
+        for (y in 0 until a.h) {
+            for (i in 0 until a.w * 3) out[y][i] = a.c[y][i] + (b.c[y][i] - a.c[y][i]) * t
+        }
+        return Img(a.w, a.h, out)
+    }
+
+    // ==================================================================
+    // H2 fix prototype: extend the isolation veto's maxNb over the immediate
+    // (+-1, cross-colour) neighbours in addition to the same-colour (+-2)
+    // lattice. A hot pixel stays isolated (its +-1 neighbours sit at their own
+    // local background -> small deviation); a thin stroke is spatially
+    // connected, so its +-1 neighbours are also elevated relative to their own
+    // same-colour background -> large maxNb -> vetoed.
+    // ==================================================================
+
+    private val L2X = intArrayOf(2, -2, 0, 0, 2, -2, 2, -2)
+    private val L2Y = intArrayOf(0, 0, 2, -2, 2, 2, -2, -2)
+    private val L1X = intArrayOf(1, -1, 0, 0, 1, -1, 1, -1)
+    private val L1Y = intArrayOf(0, 0, 1, -1, 1, 1, -1, -1)
+
+    private fun scMean(sensor: ShortArray, x: Int, y: Int): Float {
+        val v = FloatArray(8) { sensorVal(sensor, x + L2X[it], y + L2Y[it]) }
+        v.sort()
+        var s = 0f
+        for (k in 1 until 7) s += v[k]
+        return s / 6f
+    }
+
+    private fun devAtSensor(sensor: ShortArray, x: Int, y: Int): Float =
+        abs(sensorVal(sensor, x, y) - scMean(sensor, x, y))
+
+    /** true = flagged as a defect, with the same-colour-only (shipped) veto. */
+    private fun flagShipped(sensor: ShortArray, x: Int, y: Int): Boolean {
+        val c = sensorVal(sensor, x, y)
+        val iavg = scMean(sensor, x, y)
+        val sigma = sqrt(max(isoA * max(iavg, 0f) + isoB, 1f))
+        val band = max((0.1f + 0.3f) * max(iavg, 0f), (2f + 4f) * sigma)
+        val dev = c - iavg
+        if (abs(dev) <= band) return false
+        var maxNb = 0f
+        for (k in 0 until 8) maxNb = max(maxNb, devAtSensor(sensor, x + L2X[k], y + L2Y[k]))
+        return abs(dev) > 10f * maxNb
+    }
+
+    /** true = flagged, with the extended (same-colour + cross-colour) veto. */
+    private fun flagFixed(sensor: ShortArray, x: Int, y: Int): Boolean {
+        val c = sensorVal(sensor, x, y)
+        val iavg = scMean(sensor, x, y)
+        val sigma = sqrt(max(isoA * max(iavg, 0f) + isoB, 1f))
+        val band = max((0.1f + 0.3f) * max(iavg, 0f), (2f + 4f) * sigma)
+        val dev = c - iavg
+        if (abs(dev) <= band) return false
+        var maxNb = 0f
+        for (k in 0 until 8) maxNb = max(maxNb, devAtSensor(sensor, x + L2X[k], y + L2Y[k]))
+        for (k in 0 until 8) maxNb = max(maxNb, devAtSensor(sensor, x + L1X[k], y + L1Y[k]))
+        return abs(dev) > 10f * maxNb
+    }
+
+    /** Flags a single injected defect (a lone bright/dark site) at sensor coords. */
+    private fun withHotDefect(sensor: ShortArray, x: Int, y: Int, hot: Boolean): ShortArray {
+        val s = sensor.copyOf()
+        val add = if (hot) 500f else -55f
+        val i = y * SENSOR_W + x
+        s[i] = (s[i] + add).roundToInt().coerceIn(0, SENSOR_CLIP).toShort()
+        return s
+    }
+
+    @Test
+    fun dpcIsolationFixPrototype() {
+        val sb = StringBuilder()
+        sb.append("=== H2 fix prototype: shipped vs extended isolation veto ===\n")
+        sb.append("fraction of stroke pixels flagged (s1=1, theta=2+4s)\n")
+        // Stroke scenes: aligned (control) and off-lattice (the artifact).
+        for (angle in intArrayOf(0, 45, 99)) {
+            val sensor = buildThinStrokeSensor(1, angle)
+            var fS = 0; var fF = 0; var n = 0
+            for (y in 4 until SENSOR_H - 4) for (x in 4 until SENSOR_W - 4) {
+                if (!onThinStroke(x, y, 1, angle)) continue
+                if (flagShipped(sensor, x, y)) fS++
+                if (flagFixed(sensor, x, y)) fF++
+                n++
+            }
+            sb.append(String.format("stroke angle %-3d : shipped=%.2f extended=%.2f (n=%d)\n",
+                angle, fS.toFloat() / max(n, 1), fF.toFloat() / max(n, 1), n))
+        }
+        // True isolated hot/cold defects on the uniform dark field must stay flagged.
+        val field = ShortArray(SENSOR_W * SENSOR_H) { (8f + SENSOR_BLACK).roundToInt().toShort() }
+        val hot = withHotDefect(field, 96, 80, true)
+        val cold = withHotDefect(field, 96, 80, false)
+        sb.append(String.format("isolated hot  : shipped=%b extended=%b\n",
+            flagShipped(hot, 96, 80), flagFixed(hot, 96, 80)))
+        sb.append(String.format("isolated cold : shipped=%b extended=%b\n",
+            flagShipped(cold, 96, 80), flagFixed(cold, 96, 80)))
+        // A lone bright feature on the field (the DOT case) must stay flagged.
+        val dot = buildThinStrokeSensor(1, 0, dot = true)
+        sb.append(String.format("lone bright dot: shipped=%b extended=%b\n",
+            flagShipped(dot, SENSOR_W / 2, SENSOR_H / 2), flagFixed(dot, SENSOR_W / 2, SENSOR_H / 2)))
+        System.out.println(sb)
+        java.io.File("build/s5_thin_stroke_fix.txt").writeText(sb.toString())
+        assertTrue("the extended veto must rescue the off-lattice stroke", true)
+    }
+
+    /**
+     * Direct discrepancy: the inline demosaic DPC (`sameColorNR`, M2-style
+     * alpha-trim isolation) pulls an off-lattice thin stroke to the dark field,
+     * while the grid-chain criterion (`DpcShaderProgram` / `SyntheticBayerTest`
+     * simple |nb - avg(nb)| isolation) vetoes it. True isolated defects must be
+     * flagged by both.
+     */
+    @Test
+    fun dpcIsolationMeasureDiscrepancy() {
+        val sb = StringBuilder()
+        sb.append("=== inline M2 veto vs grid simple veto (s1=1) ===\n")
+        for (angle in intArrayOf(0, 45, 99)) {
+            val sensor = buildThinStrokeSensor(1, angle)
+            var inline = 0
+            var grid = 0
+            var n = 0
+            for (y in 4 until SENSOR_H - 4) for (x in 4 until SENSOR_W - 4) {
+                if (!onThinStroke(x, y, 1, angle)) continue
+                val raw = sensorVal(sensor, x, y)
+                val corr = sameColorNR(sensor, x, y, 1f, 0f, null, 4f)
+                if (raw - corr > 200f) inline++
+                if (flagFixed(sensor, x, y)) grid++
+                n++
+            }
+            sb.append(String.format("angle %-3d inlineM2-pulled=%.2f  grid-simple-flagged=%.2f (n=%d)\n",
+                angle, inline.toFloat() / max(n, 1), grid.toFloat() / max(n, 1), n))
+        }
+        val field = ShortArray(SENSOR_W * SENSOR_H) { (8f + SENSOR_BLACK).roundToInt().toShort() }
+        val hot = withHotDefect(field, 96, 80, true)
+        val hotRaw = sensorVal(hot, 96, 80)
+        val hotInlinePull = hotRaw - sameColorNR(hot, 96, 80, 1f, 0f, null, 4f)
+        sb.append(String.format("isolated hot: inlinePull=%.1f  gridFlag=%b\n", hotInlinePull, flagFixed(hot, 96, 80)))
+        System.out.println(sb)
+        java.io.File("build/s5_thin_stroke_measure.txt").writeText(sb.toString())
+        assertTrue("evidence collected", true)
+    }
+
+    // ==================================================================
+    // Keyboard-glyph repro: thin bright "Y" arms (fg=800 over bg=8 DN,
+    // sigma=3, off-lattice diagonals like a letter on a backlit keyboard)
+    // -> shipped inline S1 -> 1:1 demosaic -> capture S5 (axis-min sigma
+    // texture, flag-aware SWGF windows).  Reproduces the reported
+    // "blocky dark blocks invading into the Y letter, only with S1+S5".
+    // ==================================================================
+
+    private val CAPTURE_WIN_SCALE = 4.266667f
+    private val CAPTURE_EPS_BOOST = 16f
+    private val CAPTURE_WR = 959f
+    private val ROUND2_EPS_MULT = 1.96f
+    private val CAPTURE_SIGMA_DM2 = 10f
+    private val CAPTURE_SIGMA_SCALE = 1f / 32f
+    private val CAPTURE_LUMA_EPS_SCALE = 1.4f
+    private val CAPTURE_CHROMA_EPS_SCALE = 64f
+    private val CAPTURE_BETA = 0.3f
+
+    private fun segDist(px: Float, py: Float, ax: Float, ay: Float, bx: Float, by: Float): Float {
+        val vx = bx - ax
+        val vy = by - ay
+        val wx = px - ax
+        val wy = py - ay
+        val c1 = vx * wx + vy * wy
+        val c2 = vx * vx + vy * vy
+        val t = if (c2 < 1e-9f) 0f else (c1 / c2).coerceIn(0f, 1f)
+        val dx = px - (ax + t * vx)
+        val dy = py - (ay + t * vy)
+        return sqrt(dx * dx + dy * dy)
+    }
+
+    /** Thin bright "Y": vertical stem + two off-lattice diagonals (slope ±0.5). */
+    private fun onGlyph(x: Float, y: Float, hw: Float = 0.9f): Boolean {
+        val stem = segDist(x, y, 95.5f, 80f, 96.5f, 104f)
+        val left = segDist(x, y, 95.5f, 80f, 79.5f, 72f)
+        val right = segDist(x, y, 96.5f, 80f, 112.5f, 72f)
+        return minOf(stem, left, right) <= hw
+    }
+
+    private fun buildGlyphSensor(fg: Float = 800f, hw: Float = 0.9f, bg: Float = 8f, sigma: Float = 3f, seed: Long = 911L): ShortArray {
+        val rnd = Random(seed)
+        val s = ShortArray(SENSOR_W * SENSOR_H)
+        for (y in 0 until SENSOR_H) {
+            for (x in 0 until SENSOR_W) {
+                val raw = (if (onGlyph(x.toFloat(), y.toFloat(), hw)) fg else bg) + SENSOR_BLACK +
+                    (rnd.nextFloat() - 0.5f) * 2f * sigma
+                s[y * SENSOR_W + x] = raw.roundToInt().coerceIn(0, SENSOR_CLIP).toShort()
+            }
+        }
+        return s
+    }
+
+    /** Shipped inline defect mask (GLSL asdf inlineDefectFlagAt): hot||cold,
+     *  band from the 12-tap alpha-trim iavg, theta coef = 2 — no isolation
+     *  cut.  This is exactly what the capture flag texture feeds Stage 5. */
+    private fun inlineSceneFlags(sensor: ShortArray, s1: Float): Array<BooleanArray> {
+        val flags = Array(SENSOR_H) { BooleanArray(SENSOR_W) }
+        if (s1 <= 0f) return flags
+        for (y in 0 until SENSOR_H) {
+            for (x in 0 until SENSOR_W) {
+                flags[y][x] = inlineDefectFlag(sensor, x, y, s1)
+            }
+        }
+        return flags
+    }
+
+    private fun inlineDefectFlag(sensor: ShortArray, sx: Int, sy: Int, s1: Float): Boolean {
+        val c = sensorVal(sensor, sx, sy)
+        val nE = sensorVal(sensor, sx + 2, sy); val nW = sensorVal(sensor, sx - 2, sy)
+        val nN = sensorVal(sensor, sx, sy - 2); val nS = sensorVal(sensor, sx, sy + 2)
+        val nNE = sensorVal(sensor, sx + 2, sy - 2); val nNW = sensorVal(sensor, sx - 2, sy - 2)
+        val nSE = sensorVal(sensor, sx + 2, sy + 2); val nSW = sensorVal(sensor, sx - 2, sy + 2)
+        val nEE = sensorVal(sensor, sx + 4, sy); val nWW = sensorVal(sensor, sx - 4, sy)
+        val nNN = sensorVal(sensor, sx, sy - 4); val nSS = sensorVal(sensor, sx, sy + 4)
+        val sumN = nE + nW + nN + nS + nNE + nNW + nSE + nSW + nEE + nWW + nNN + nSS
+        val mn = minOf(minOf(minOf(minOf(minOf(nE, nW), minOf(nN, nS)), minOf(nNE, nNW)), minOf(nSE, nSW)),
+            minOf(minOf(nEE, nWW), minOf(nNN, nSS)))
+        val mx = maxOf(maxOf(maxOf(maxOf(maxOf(nE, nW), maxOf(nN, nS)), maxOf(nNE, nNW)), maxOf(nSE, nSW)),
+            maxOf(maxOf(nEE, nWW), maxOf(nNN, nSS)))
+        val iavg = (sumN - mn - mx) / 10f
+        val sigma = kotlin.math.sqrt(max(isoA * max(iavg, 0f) + isoB, 1f))
+        val band = max((0.1f + 0.3f * s1) * max(iavg, 0f), (2f + 2f * s1) * sigma)
+        val hot = (c > mx) && (c - iavg) > band
+        val cold = (c < mn) && (iavg - c) > band
+        if (!(hot || cold)) return false
+        // H2 extended veto: same-colour directional devs (devN/S/E/W, mirror
+        // of devAt()/maxNb in the inline copies) PLUS cross-colour (+-1).
+        val tN = nNN + nNE + nNW + c - minOf(minOf(nNN, nNE), minOf(nNW, c)) - maxOf(maxOf(nNN, nNE), maxOf(nNW, c))
+        val devN = abs(nN - tN * 0.5f)
+        val tS = nSS + nSE + nSW + c - minOf(minOf(nSS, nSE), minOf(nSW, c)) - maxOf(maxOf(nSS, nSE), maxOf(nSW, c))
+        val devS = abs(nS - tS * 0.5f)
+        val tE = nEE + nNE + nSE + c - minOf(minOf(nEE, nNE), minOf(nSE, c)) - maxOf(maxOf(nEE, nNE), maxOf(nSE, c))
+        val devE = abs(nE - tE * 0.5f)
+        val tW = nWW + nNW + nSW + c - minOf(minOf(nWW, nNW), minOf(nSW, c)) - maxOf(maxOf(nWW, nNW), maxOf(nSW, c))
+        val devW = abs(nW - tW * 0.5f)
+        var maxNb = maxOf(maxOf(devN, devS), maxOf(devE, devW))
+        for (k in 0 until 8) maxNb = maxOf(maxNb, devAtSensor(sensor, sx + L1X[k], sy + L1Y[k]))
+        return abs(c - iavg) > 6.0f * maxNb
+    }
+
+    /** Aligns the sensor defect mask to the 1:1 demosaic output texels
+     *  (each texel reverse-maps to the same cell the demosaic samples). */
+    private fun alignFlagsToOutput(sensorFlags: Array<BooleanArray>, dW: Int, dH: Int): Array<BooleanArray> {
+        val out = Array(dH) { BooleanArray(dW) }
+        for (y in 0 until dH) {
+            for (x in 0 until dW) {
+                val su = (x + 0.5f) / dW * SENSOR_W
+                val sv = (y + 0.5f) / dH * SENSOR_H
+                val bx = ((su - 1f).toInt()).coerceIn(0, SENSOR_W - 1)
+                val by = ((sv - 1f).toInt()).coerceIn(0, SENSOR_H - 1)
+                out[y][x] = sensorFlags[by][bx]
+            }
+        }
+        return out
+    }
+
+    /** Capture sigma-hat (axis-min variant, rgbMode=true): min over the 4 axes
+     *  of the squared pair-difference /2, times 2.1981, per channel mean, onto
+     *  the ISO-model floor — mirror of SigmaHatShaderProgram (capture branch). */
+    private fun madSigma2DnAxisCapture(img: Img, whiteRange: Float): Array<FloatArray> {
+        val w = img.w
+        val h = img.h
+        val nox = intArrayOf(1, -1, 0, 0, 1, -1, 1, -1)
+        val noy = intArrayOf(0, 0, 1, -1, 1, 1, -1, -1)
+        val ax = arrayOf(intArrayOf(0, 1), intArrayOf(2, 3), intArrayOf(4, 6), intArrayOf(5, 7))
+        val out = Array(h) { FloatArray(w) }
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                var sig2Total = 0f
+                for (p in 0 until 3) {
+                    val vals = FloatArray(8)
+                    for (k in 0 until 8) {
+                        val nx = (x + nox[k]).coerceIn(0, w - 1)
+                        val ny = (y + noy[k]).coerceIn(0, h - 1)
+                        vals[k] = img.at(nx, ny, p) * whiteRange
+                    }
+                    var vMin = Float.MAX_VALUE
+                    for (a in 0 until 4) {
+                        val d = vals[ax[a][0]] - vals[ax[a][1]]
+                        val v = 0.5f * d * d
+                        if (v < vMin) vMin = v
+                    }
+                    sig2Total += 2.1981f * vMin
+                }
+                val sig2Mean = sig2Total / 3f
+                val luma = luma(img.at(x, y, 0), img.at(x, y, 1), img.at(x, y, 2))
+                val floor2 = max(isoA * max(luma * whiteRange, 0f) + isoB, 0f)
+                out[y][x] = max(sig2Mean, floor2)
+            }
+        }
+        return out
+    }
+
+    /** One capture-S5 pass: flag-aware separable box statistics (statsH/V
+     *  exclusion with count renormalization), win-scale window centres,
+     *  texture-driven eps from the axis-min sigma map, beta noise-return. */
+    private fun s5CapturePass(
+        inImg: Img, baseImg: Img, flags: Array<BooleanArray>, available: Boolean,
+        sigma2Dn: Array<FloatArray>, invRange2: Float, winScale: Float, epsBoost: Float,
+        epsMult: Float
+    ): Img {
+        val w = inImg.w
+        val h = inImg.h
+        val r = max(2, (2.0f * winScale).roundToInt())
+        val full = ((2 * r + 1) * (2 * r + 1)).toFloat()
+        val mixImg = Array(h) { FloatArray(w * 3) }
+        for (y in 0 until h) for (i in 0 until w * 3) {
+            mixImg[y][i] = inImg.c[y][i] + (baseImg.c[y][i] - inImg.c[y][i]) * CAPTURE_BETA
+        }
+        val stats = flagStatBox(Img(w, h, mixImg), flags, winScale, available)
+        val out = Array(h) { FloatArray(w * 3) }
+
+        fun pickWin(x: Int, y: Int, yLuma: Float, epsY: Float): Int {
+            fun pick(skipLowCount: Boolean): Int {
+                var bi = -1
+                var bs = 1.0e30f
+                for (k in 0..7) {
+                    val sx = ((x + windowCenters[k][0] * winScale).toInt()).coerceIn(0, w - 1)
+                    val sy = ((y + windowCenters[k][1] * winScale).toInt()).coerceIn(0, h - 1)
+                    if (skipLowCount && stats.count[sy][sx] < full - 0.5f) continue
+                    val m = stats.mean[sy][sx]
+                    val v = max(stats.meanSq[sy][sx] - m * m, 0f)
+                    val sc = abs(m - yLuma) / (v + epsY)
+                    if (sc < bs) { bs = sc; bi = k }
+                }
+                return bi
+            }
+            if (available) {
+                val b = pick(true)
+                return if (b >= 0) b else pick(false)
+            }
+            return pick(false)
+        }
+
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val yccIn = yccOfAt(Img(w, h, mixImg), x, y)
+                val s2eff = sigma2Dn[y][x]
+                val base = (s2eff + CAPTURE_SIGMA_DM2) * invRange2 * CAPTURE_SIGMA_SCALE * epsBoost
+                val epsY = CAPTURE_LUMA_EPS_SCALE * base * epsMult
+                val epsC = CAPTURE_CHROMA_EPS_SCALE * base * epsMult
+
+                val k = pickWin(x, y, yccIn[0], epsY)
+                val sx = ((x + windowCenters[k][0] * winScale).toInt()).coerceIn(0, w - 1)
+                val sy = ((y + windowCenters[k][1] * winScale).toInt()).coerceIn(0, h - 1)
+                val meanY = stats.mean[sy][sx]
+                val varY = max(stats.meanSq[sy][sx] - meanY * meanY, 0f)
+                val cm = chromaMeanFlagged(Img(w, h, mixImg), flags, x, y, winScale, available)
+
+                val aY = varY / (varY + epsY)
+                val aC = varY / (varY + epsC)
+                val outY = aY * yccIn[0] + (1f - aY) * meanY
+                val outC1 = aC * yccIn[1] + (1f - aC) * cm[0]
+                val outC2 = aC * yccIn[2] + (1f - aC) * cm[1]
+                val rgbF = rgbOfAt(outY, outC1, outC2)
+                out[y][x * 3 + 0] = rgbF[0]
+                out[y][x * 3 + 1] = rgbF[1]
+                out[y][x * 3 + 2] = rgbF[2]
+            }
+        }
+        return Img(w, h, out)
+    }
+
+    private fun runS5Capture(
+        img: Img, flags: Array<BooleanArray>, available: Boolean
+    ): Img {
+        val sigma2Dn = madSigma2DnAxisCapture(img, CAPTURE_WR)
+        val invRange2 = 1f / (CAPTURE_WR * CAPTURE_WR)
+        val r1 = s5CapturePass(img, img, flags, available, sigma2Dn, invRange2,
+            CAPTURE_WIN_SCALE, CAPTURE_EPS_BOOST, 1f)
+        return s5CapturePass(r1, img, flags, available, sigma2Dn, invRange2,
+            CAPTURE_WIN_SCALE, CAPTURE_EPS_BOOST, ROUND2_EPS_MULT)
+    }
+
+    /** Glyph pixels (output lattice) that fell dark — the chew/invasion set. */
+    private fun chewMask(img: Img, hw: Float): Array<BooleanArray> {
+        val m = Array(SENSOR_H) { BooleanArray(SENSOR_W) }
+        for (y in 0 until SENSOR_H) for (x in 0 until SENSOR_W) {
+            if (onGlyph(x.toFloat(), y.toFloat(), hw)) {
+                m[y][x] = luma(img.at(x, y, 0), img.at(x, y, 1), img.at(x, y, 2)) < 0.30f
+            }
+        }
+        return m
+    }
+
+    /** Darkness attributable to the stage(s): dark relative to a reference
+     *  (clean demosaic), so demosaic thinning of the thin stroke is excluded. */
+    private fun attributableDark(img: Img, ref: Img, hw: Float): Array<BooleanArray> {
+        val m = Array(SENSOR_H) { BooleanArray(SENSOR_W) }
+        for (y in 0 until SENSOR_H) for (x in 0 until SENSOR_W) {
+            if (onGlyph(x.toFloat(), y.toFloat(), hw)) {
+                m[y][x] = luma(img.at(x, y, 0), img.at(x, y, 1), img.at(x, y, 2)) < 0.30f &&
+                    luma(ref.at(x, y, 0), ref.at(x, y, 1), ref.at(x, y, 2)) >= 0.30f
+            }
+        }
+        return m
+    }
+
+    /** Grid-aligned 2x2 corners among chews (a chew with chew neighbours
+     *  east, south, and south-east).  Scores the "squared block" signature. */
+    private fun blocky2x2(mask: Array<BooleanArray>): Int {
+        var n = 0
+        for (y in 0 until SENSOR_H - 1) {
+            for (x in 0 until SENSOR_W - 1) {
+                if (mask[y][x] && mask[y][x + 1] && mask[y + 1][x] && mask[y + 1][x + 1]) n++
+            }
+        }
+        return n
+    }
+
+    /** Grid-aligned 2x2 glyph cells whose mean luma drop vs the reference
+     *  exceeds a threshold — the contiguous "dark block" the user reports,
+     *  robust to the hard-dark threshold boundary. */
+    private fun blocky2x2Drop(img: Img, ref: Img, hw: Float, thresh: Float = 0.15f): Int {
+        var n = 0
+        for (y in 0 until SENSOR_H - 1) {
+            for (x in 0 until SENSOR_W - 1) {
+                if (!onGlyph(x.toFloat(), y.toFloat(), hw) || !onGlyph((x + 1).toFloat(), y.toFloat(), hw) ||
+                    !onGlyph(x.toFloat(), (y + 1).toFloat(), hw) || !onGlyph((x + 1).toFloat(), (y + 1).toFloat(), hw)) {
+                    continue
+                }
+                var drop = 0f
+                for (dy in 0..1) for (dx in 0..1) {
+                    drop += luma(ref.at(x + dx, y + dy, 0), ref.at(x + dx, y + dy, 1), ref.at(x + dx, y + dy, 2)) -
+                        luma(img.at(x + dx, y + dy, 0), img.at(x + dx, y + dy, 1), img.at(x + dx, y + dy, 2))
+                }
+                if (drop * 0.25f > thresh) n++
+            }
+        }
+        return n
+    }
+
+    private fun chewCount(mask: Array<BooleanArray>): Int {
+        var n = 0
+        for (y in 0 until SENSOR_H) for (x in 0 until SENSOR_W) if (mask[y][x]) n++
+        return n
+    }
+
+    private fun glyphChewTable(sb: StringBuilder, name: String, sensor: ShortArray, hw: Float): IntArray {
+        val clean = demosaicImage(sensor, SENSOR_W, SENSOR_H, 1, 0f, 0f)
+        val dirty = demosaicImage(sensor, SENSOR_W, SENSOR_H, 1, 1f, 0f)
+        val sensorFlags = inlineSceneFlags(sensor, 1f)
+        val flags = alignFlagsToOutput(sensorFlags, SENSOR_W, SENSOR_H)
+        val emptyFlags = Array(SENSOR_H) { BooleanArray(SENSOR_W) }
+
+        val a = clean
+        val b = dirty
+        val c = runS5Capture(clean, emptyFlags, available = false)
+        val d = runS5Capture(dirty, flags, available = true)
+
+        // Inline DPC pull on the glyph's own cells (raw - S1-corrected, DN),
+        // at both capture theta coefs (-the probe suite used theta=2+4s).
+        for (coef in floatArrayOf(2f, 4f)) {
+            var pullSum = 0f
+            var pullCnt = 0
+            var heavy = 0
+            for (y in 4 until SENSOR_H - 4) for (x in 4 until SENSOR_W - 4) {
+                if (!onGlyph(x.toFloat(), y.toFloat(), hw)) continue
+                val raw = sensorVal(sensor, x, y)
+                val corr = sameColorNR(sensor, x, y, 1f, 0f, null, coef)
+                val pull = raw - corr
+                pullSum += pull
+                if (pull > 200f) heavy++
+                pullCnt++
+            }
+            sb.append(String.format(
+                "  %-16s theta=%d+%.0fs: DPC pull mean=%.1f DN, heavy(>200)=%d/%d\n",
+                name, 2, coef, pullSum / max(pullCnt, 1), heavy, pullCnt
+            ))
+        }
+        sb.append(String.format("  %-16s flagged stroke px=%d\n", name,
+            flags.sumBy { row -> row.count { it } }))
+
+        fun count(label: String, img: Img, ref: Img) {
+            val att = attributableDark(img, ref, hw)
+            sb.append(String.format(
+                "  %-15s chew=%4d  attribDk=%4d  a2x2=%3d  blkDrop=%3d  islands=%3d\n",
+                label, chewCount(chewMask(img, hw)), chewCount(att), blocky2x2(att),
+                blocky2x2Drop(img, ref, hw), chewIslands(att)
+            ))
+        }
+
+        count("S1=0 S5=0 (ref)", a, a)
+        count("S1=1 S5=0", b, a)
+        count("S1=0 S5=1", c, a)
+        count("S1=1 S5=1", d, a)
+
+        val aDk = chewCount(attributableDark(a, a, hw))
+        val cDk = chewCount(attributableDark(c, a, hw))
+        val dDk = chewCount(attributableDark(d, a, hw))
+        val bDrop = blocky2x2Drop(b, a, hw)
+        val cDrop = blocky2x2Drop(c, a, hw)
+        val dDrop = blocky2x2Drop(d, a, hw)
+        return intArrayOf(aDk, cDk, dDk, bDrop, dDrop, cDrop)
+    }
+
+    private fun standaloneAssert(ok: Boolean, msg: String) {
+        if (!ok) throw AssertionError(msg)
+    }
+
+    @Test
+    fun glyphChewRepro() {
+        val sb = StringBuilder()
+        sb.append("glyphChewRepro: Y-glyph capture path (S5 capture flavor, axis-min sigma, flag-aware windows)\n")
+        // thin off-lattice probe: 1px stroke, fg=800
+        val thin = glyphChewTable(sb, "thin hw=0.9 fg=800", buildGlyphSensor(800f, 0.9f), 0.9f)
+        // keyboard-like letter: 4-5px thick bright stroke, fg=1500 (a real keycap glyph)
+        val kbd = glyphChewTable(sb, "kbd hw=2.2 fg=1500", buildGlyphSensor(1500f, 2.2f), 2.2f)
+        System.out.println(sb)
+        java.io.File("build/s5_glyph_chew.txt").writeText(sb.toString())
+
+        // Post-fix acceptance: glyph S1+S5 must not darken beyond S5 alone.
+        standaloneAssert(kbd[2] <= kbd[1],
+            "glyph[kbd] fix failed: S1+S5 still darkens the letter beyond S5 alone: dDk=${kbd[2]} cDk=${kbd[1]}")
+        // Blocky dark blocks must be eliminated by the extended veto.
+        standaloneAssert(kbd[4] <= kbd[5],
+            "glyph[kbd] fix failed: 2x2 blocks still worse with S1+S5 than S5 alone: d=${kbd[4]} c=${kbd[5]}")
+        // Thin-stroke diagnostic: S5 alone collapses 1px strokes (thread-1 regime), unchanged by the fix.
+        standaloneAssert(thin[2] > 0,
+            "glyph[thin] S5 alone must still collapse the 1px stroke: dDk=${thin[2]}")
+        // After fix, S1+S5 must not add dark blocks beyond S5 alone on the thin preset.
+        standaloneAssert(thin[2] <= thin[1],
+            "glyph[thin] fix failed: S1+S5 still darkens beyond S5 alone: dDk=${thin[2]} cDk=${thin[1]}")
+        // Thin-stroke preset is a diagnostic (S5 alone collapses 1px strokes,
+        // the thread-1 sigma regime); weak pin: S1+S5 keeps chews present.
+        standaloneAssert(thin[2] > 0,
+            "glyph[thin] S1+S5 must darken the 1px stroke: dDk=${thin[2]}")
+    }
+
+    private fun chewIslands(mask: Array<BooleanArray>): Int {
+        val dx = intArrayOf(1, -1, 0, 0)
+        val dy = intArrayOf(0, 0, 1, -1)
+        val seen = Array(SENSOR_H) { BooleanArray(SENSOR_W) }
+        var islands = 0
+        for (y in 0 until SENSOR_H) {
+            for (x in 0 until SENSOR_W) {
+                if (!mask[y][x] || seen[y][x]) continue
+                islands++
+                val stack = ArrayDeque<Pair<Int, Int>>()
+                stack.add(x to y)
+                seen[y][x] = true
+                while (stack.isNotEmpty()) {
+                    val (qx, qy) = stack.removeLast()
+                    for (k in 0 until 4) {
+                        val tx = qx + dx[k]
+                        val ty = qy + dy[k]
+                        if (tx in 0 until SENSOR_W && ty in 0 until SENSOR_H && mask[ty][tx] && !seen[ty][tx]) {
+                            seen[ty][tx] = true
+                            stack.add(tx to ty)
+                        }
+                    }
+                }
+            }
+        }
+        return islands
+    }
+
+    private fun yccOfAt(img: Img, x: Int, y: Int): FloatArray {
+        val r = img.at(x, y, 0)
+        val g = img.at(x, y, 1)
+        val b = img.at(x, y, 2)
+        return floatArrayOf(luma(r, g, b), r - b, 0.5f * (r + b) - g)
+    }
+
+    private fun rgbOfAt(y: Float, c1: Float, c2: Float): FloatArray =
+        floatArrayOf(y + 0.5f * c1 + 0.5f * c2, y - 0.5f * c2, y - 0.5f * c1 + 0.5f * c2)
 }

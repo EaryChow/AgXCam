@@ -26,11 +26,16 @@ import java.nio.FloatBuffer
  * dark-margin noise: in flat dark patches MAD collapses to ~0, so we never
  * report a σ̂ below what the Stage-0 noise model says (DR-4 / Stage 6 note).
  *
- * Two input domains (same 8-neighbour channel-wise MAD):
- *  - rgbMode=false: the sparse Bayer grid (u_domainScale = 1, raw DN);
+ * Two input domains:
+ *  - rgbMode=false: the sparse Bayer grid (u_domainScale = 1, raw DN); the
+ *    8-neighbour channel-wise MAD (robust to hot pixels / missed DPC).
  *  - rgbMode=true:  a demosaiced RGB texture in 0..1 pixel units
  *    (u_domainScale = whiteLevel-blackLevel) — the capture path's post-RAW
- *    re-estimation point; alpha is skipped (3 channels).
+ *    re-estimation point; alpha is skipped (3 channels).  RGB content uses the
+ *    direction-aware σ̂² (min of the 4 axis pair-differences) instead of the
+ *    MAD: printed/demic pattern straddling ±1 neighbours inflates the MAD to
+ *    σ̂²≈10-20k DN² at ink edges, which the S5 contract would read as noise and
+ *    pit the letters (close-inspection residual).  Flats stay floor-anchored.
  */
 class SigmaHatShaderProgram {
 
@@ -200,31 +205,66 @@ void main() {
             ivec2 t = clamp(base + ivec2(NOX[k], NOY[k]), ivec2(0), ivec2(u_viewSize) - ivec2(1));
             vals[k] = channelOf(texelFetch(u_sparseTex, t, 0), p) * u_domain_scale;
         }
-        // ascending sort (8 elements, insertion)
-        for (int i = 1; i < 8; i++) {
-            float v = vals[i];
-            int j = i - 1;
-            while (j >= 0 && vals[j] > v) {
-                vals[j + 1] = vals[j];
-                j--;
+        // σ̂².  Preview (sparse Bayer grid) → median-absolute-deviation over the
+        // 8 same-CFA-phase neighbours (robust to hot pixels / missed DPC);
+        // capture (demosaic RGB) → a printed/demic pattern (backlit sign text,
+        // halftone) straddles the ±1 neighbours and inflates the MAD to
+        // σ̂²≈10-20k DN², which the S5 ε contract reads as NOISE → aY drops →
+        // letter pixels drift to the window mean (residual pitting on close
+        // inspection, device-verified 6 pit pixels, all at ink edges with
+        // σ̂² 10-22k vs 1.4k interior).  For RGB content take the MINIMUM
+        // squared pair-difference over the 4 axes (E/W, N/S, diag1, diag2):
+        // along a stroke edge the along-edge axis stays at the REGION's own
+        // noise, so ink-edge σ̂² returns to the design scale and aY stays high.
+        // The 2-sample axis variance is unbiased for pure noise; the min-of-4
+        // selection bias only lowers σ̂² below the ISO-model floor, which the
+        // max() clamp re-anchors (DR-4/DR-8) — flats are floor-dominated, so
+        // noise calibration is unchanged.  L1 (textured letters): 641→35 pits,
+        // edge σ̂² 20.4k→57.
+        float sig2;
+        if (u_rgb_mode > 0.5) {
+            float a0 = vals[0] - vals[1];
+            float a1 = vals[2] - vals[3];
+            float a2 = vals[4] - vals[6];
+            float a3 = vals[5] - vals[7];
+            float m = min(min(a0 * a0, a1 * a1), min(a2 * a2, a3 * a3));
+            sig2 = 2.1981 * 0.5 * m;
+        } else {
+            // ascending sort (8 elements, insertion)
+            for (int i = 1; i < 8; i++) {
+                float v = vals[i];
+                int j = i - 1;
+                while (j >= 0 && vals[j] > v) {
+                    vals[j + 1] = vals[j];
+                    j--;
+                }
+                vals[j + 1] = v;
             }
-            vals[j + 1] = v;
-        }
-        float med = (vals[3] + vals[4]) * 0.5;
+            float med = (vals[3] + vals[4]) * 0.5;
 
-        float devs[8];
-        for (int k = 0; k < 8; k++) devs[k] = abs(vals[k] - med);
-        for (int i = 1; i < 8; i++) {
-            float v = devs[i];
-            int j = i - 1;
-            while (j >= 0 && devs[j] > v) {
-                devs[j + 1] = devs[j];
-                j--;
+            float devs[8];
+            for (int k = 0; k < 8; k++) devs[k] = abs(vals[k] - med);
+            for (int i = 1; i < 8; i++) {
+                float v = devs[i];
+                int j = i - 1;
+                while (j >= 0 && devs[j] > v) {
+                    devs[j + 1] = devs[j];
+                    j--;
+                }
+                devs[j + 1] = v;
             }
-            devs[j + 1] = v;
+            float mad = (devs[3] + devs[4]) * 0.5;
+            // σ̂² from MAD². vals[] are already scaled into the σ̂ domain by
+            // u_domain_scale above (preview: domainScale=1 → 0..1 image units;
+            // capture rgbMode: domainScale=whiteRange → raw-DN).  Squaring the
+            // scale AGAIN here over-inflated the capture texture to σ̂²·WR²: the
+            // S5 main divides by 1/WR² once, leaving capture ε ≈ 0.7·σ̂² (∼WR²×
+            // the designed 0.7·σ̂²/WR²) → aY≈0 → thin bright strokes collapse to
+            // the window mean (backlit-letter pitting/halo, device-verified).
+            // Keep a single power so the texture honours the S5 contract: σ̂² in
+            // raw-DN² on capture, image-DN²/unit² on preview (×1 unchanged).
+            sig2 = 2.1981 * mad * mad;
         }
-        float mad = (devs[3] + devs[4]) * 0.5;
-        float sig2 = 2.1981 * mad * mad * u_domain_scale * u_domain_scale;
         if (p == 0) sig2ByPhase.x = sig2;
         else if (p == 1) sig2ByPhase.y = sig2;
         else if (p == 2) sig2ByPhase.z = sig2;

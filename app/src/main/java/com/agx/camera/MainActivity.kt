@@ -72,8 +72,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var developerSwitch: DeveloperSwitch
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    private var pendingDebugSave: Runnable? = null
-
     private var currentFlashMode = FlashMode.OFF
     private var currentWbMode = WhiteBalanceMode.AUTO
     private var kelvinState = KelvinState()
@@ -559,12 +557,8 @@ class MainActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.save_debug_log_btn).setOnClickListener {
             // Save the current CrashLogger buffer to Downloads.
             CrashLogger.log("MainActivity", "Debug log save requested")
-            Toast.makeText(this, "Capturing log...", Toast.LENGTH_SHORT).show()
-            pendingDebugSave?.let { mainHandler.removeCallbacks(it) }
-            pendingDebugSave = Runnable {
-                CrashLogger.saveDebugLogToDownloads(this)
-                Toast.makeText(this, "Debug log saved to Downloads", Toast.LENGTH_SHORT).show()
-            }.also { mainHandler.postDelayed(it, 2500) }
+            CrashLogger.saveDebugLogToDownloads(this)
+            Toast.makeText(this, "Debug log saved to Downloads", Toast.LENGTH_SHORT).show()
         }
 
         thermalManager.onStateChanged = { state ->

@@ -53,6 +53,12 @@ android {
     }
     testOptions {
         unitTests.isReturnDefaultValues = true
+        // Forward -Dcapdump.dir into the test JVM so the device-capture replay
+        // tests can be pointed at a local dump via: gradlew ... -Dcapdump.dir=<dir>.
+        // No project-internal default path; when absent the replay tests skip.
+        unitTests.all { t ->
+            (t as Test).systemProperty("capdump.dir", System.getProperty("capdump.dir") ?: "")
+        }
     }
     buildFeatures {
         buildConfig = true
