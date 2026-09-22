@@ -106,6 +106,24 @@
             android:text="This lens does not support tap-to-focus" />
         </FrameLayout>
 
+        <!-- Persistent critical-battery warning: lives on screen with the live
+             temperature until the battery cools back below the critical level -->
+        <TextView
+            android:id="@+id/critical_thermal_overlay"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal"
+            android:layout_marginTop="88dp"
+            android:background="#CC7A0000"
+            android:gravity="center"
+            android:lineSpacingExtra="4dp"
+            android:paddingHorizontal="24dp"
+            android:paddingVertical="14dp"
+            android:text="BATTERY TOO HOT"
+            android:textColor="#FFFFAAAA"
+            android:textSize="14sp"
+            android:visibility="gone" />
+
         <TextView
             android:id="@+id/dev_banner"
         android:layout_width="wrap_content"

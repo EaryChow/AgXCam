@@ -12,6 +12,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
 import android.util.Log
+import android.util.Range
 import android.util.Size
 import android.view.Surface
 import com.agx.camera.CrashLogger
@@ -49,6 +50,7 @@ class Camera2Manager(private val context: Context) {
     private var availableAfModes: IntArray = intArrayOf()
     private var availableAeModes: IntArray = intArrayOf()
     private var availableAwbModes: Set<Int> = emptySet()
+    private var availableFpsRanges: Array<Range<Int>> = arrayOf()
 
     var onFrameAvailable: ((Image) -> Unit)? = null
     var onRawFrameAvailable: ((Image) -> Unit)? = null
@@ -236,7 +238,8 @@ class Camera2Manager(private val context: Context) {
             availableAfModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: intArrayOf()
             availableAeModes = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES) ?: intArrayOf()
             availableAwbModes = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.toSet() ?: emptySet()
-            CrashLogger.log(TAG, "AF modes: ${availableAfModes.toList()}, AE modes: ${availableAeModes.toList()}, AWB modes: $availableAwbModes")
+            availableFpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: arrayOf()
+            CrashLogger.log(TAG, "AF modes: ${availableAfModes.toList()}, AE modes: ${availableAeModes.toList()}, AWB modes: $availableAwbModes, fpsRanges: ${availableFpsRanges.toList()}")
 
             val maxAfRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
             val maxAeRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0
@@ -490,6 +493,65 @@ class Camera2Manager(private val context: Context) {
         applyPreviewRequest()
     }
 
+    // --- Thermal throughput throttle ---
+    // The ONLY thing thermal policy may move is throughput (fps). It never
+    // touches shutter/ISO/EV: in manual (AE OFF) mode we cap via
+    // SENSOR_FRAME_DURATION (clamped so it never fights a long exposure); in
+    // auto (AE ON) mode we prefer a CONTROL_AE_TARGET_FPS_RANGE. Exposure
+    // parameters are left alone either way.
+    @Volatile
+    private var thermalFpsLimit = 0
+
+    fun setThermalFpsLimit(fps: Int) {
+        if (thermalFpsLimit == fps) return
+        thermalFpsLimit = fps
+        applyThermalThrottleNow()
+    }
+
+    private fun applyThermalThrottleNow() {
+        if (captureSession == null) return
+        if (isManualExposure) {
+            setManualExposure(currentManualIso, currentManualExposureNs)
+        } else {
+            applyPreviewRequest(log = false)
+        }
+    }
+
+    /** Preferred frame duration for the thermal cap, never shorter than the user's exposure. */
+    private fun thermalFrameDurationNs(): Long {
+        if (thermalFpsLimit <= 0) return 0L
+        var fd = 1_000_000_000L / thermalFpsLimit
+        if (currentManualExposureNs > 0 && currentManualExposureNs > fd) fd = currentManualExposureNs
+        return fd
+    }
+
+    private fun chooseFpsRange(fps: Int): Range<Int>? {
+        if (availableFpsRanges.isEmpty()) return null
+        // NOTE: on devices whose smallest offered range is well above the cap
+        // (e.g. only (30,30)), the "nearest" fallback means no real throttle —
+        // accepted best effort. SENSOR_FRAME_DURATION is the reliable lever in
+        // manual/RAW (AE OFF) mode, which is this app's primary path.
+        return availableFpsRanges.firstOrNull { it.lower == fps && it.upper == fps }
+            ?: availableFpsRanges.firstOrNull { it.upper == fps }
+            ?: availableFpsRanges.firstOrNull { it.upper <= fps && it.lower <= fps }
+            ?: availableFpsRanges.minByOrNull { kotlin.math.abs(it.upper - fps) }
+    }
+
+    private fun CaptureRequest.Builder.applyThermalFpsLimit(manual: Boolean) {
+        if (thermalFpsLimit <= 0) return
+        if (manual) {
+            set(CaptureRequest.SENSOR_FRAME_DURATION, thermalFrameDurationNs())
+        } else {
+            val chosen = chooseFpsRange(thermalFpsLimit)
+            if (chosen != null) {
+                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, chosen)
+            } else {
+                // No usable AE range: best-effort frame duration (some HALs honor it).
+                set(CaptureRequest.SENSOR_FRAME_DURATION, thermalFrameDurationNs())
+            }
+        }
+    }
+
     fun setWhiteBalanceMode(mode: Int) {
         currentAwbMode = mode
         CrashLogger.log(TAG, "setWhiteBalanceMode: mode=$mode (${awbModeName(mode)}) isManualExposure=$isManualExposure")
@@ -599,6 +661,10 @@ class Camera2Manager(private val context: Context) {
             }
             set(CaptureRequest.SENSOR_SENSITIVITY, iso)
             set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureTimeNs)
+            val thermalFd = thermalFrameDurationNs()
+            if (thermalFd > 0) {
+                set(CaptureRequest.SENSOR_FRAME_DURATION, thermalFd)
+            }
             applyFlashForManualExposure()
             applyPreviewCrop()
             applyLensShadingMapMode()
@@ -1037,6 +1103,7 @@ class Camera2Manager(private val context: Context) {
                 }
                 currentFlashMode.applyToRequest(this, availableAeModes)
             }
+            applyThermalFpsLimit(manual = false)
             applyPreviewCrop()
             applyLensShadingMapMode()
         }

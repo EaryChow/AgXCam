@@ -38,32 +38,33 @@ class ThermalThresholdTest {
     }
 
     @Test
-    fun transition_toWarm_at48C() {
-        val context = createContextWithBatteryTemp(480)
+    fun transition_toWarm_at38C() {
+        val context = createContextWithBatteryTemp(380)
         val tm = ThermalManager(context)
         tm.isCaptureBlocked // triggers evaluateState
         assertEquals(ThermalManager.State.WARM, tm.currentState)
     }
 
     @Test
-    fun transition_toHot_at52C() {
-        val context = createContextWithBatteryTemp(520)
+    fun transition_toHot_at40C() {
+        val context = createContextWithBatteryTemp(400)
         val tm = ThermalManager(context)
         tm.isCaptureBlocked
         assertEquals(ThermalManager.State.HOT, tm.currentState)
     }
 
     @Test
-    fun transition_toCritical_at55C() {
-        val context = createContextWithBatteryTemp(550)
+    fun transition_toCritical_at42C() {
+        val context = createContextWithBatteryTemp(420)
         val tm = ThermalManager(context)
         tm.isCaptureBlocked
         assertEquals(ThermalManager.State.CRITICAL, tm.currentState)
     }
 
+    // Torch no longer shifts the thresholds: 38/40/42 apply regardless.
     @Test
-    fun torchMode_warmThresholdIs42C() {
-        val context = createContextWithBatteryTemp(420)
+    fun torchMode_thresholdsAreNotShifted_warm() {
+        val context = createContextWithBatteryTemp(380)
         val tm = ThermalManager(context)
         tm.isTorchActive = true
         tm.isCaptureBlocked
@@ -71,8 +72,8 @@ class ThermalThresholdTest {
     }
 
     @Test
-    fun torchMode_hotThresholdIs47C() {
-        val context = createContextWithBatteryTemp(470)
+    fun torchMode_thresholdsAreNotShifted_hot() {
+        val context = createContextWithBatteryTemp(400)
         val tm = ThermalManager(context)
         tm.isTorchActive = true
         tm.isCaptureBlocked
@@ -80,8 +81,8 @@ class ThermalThresholdTest {
     }
 
     @Test
-    fun torchMode_criticalThresholdIs50C() {
-        val context = createContextWithBatteryTemp(500)
+    fun torchMode_thresholdsAreNotShifted_critical() {
+        val context = createContextWithBatteryTemp(420)
         val tm = ThermalManager(context)
         tm.isTorchActive = true
         tm.isCaptureBlocked
@@ -98,7 +99,7 @@ class ThermalThresholdTest {
 
     @Test
     fun reset_clearsAllState() {
-        val context = createContextWithBatteryTemp(550)
+        val context = createContextWithBatteryTemp(420)
         val tm = ThermalManager(context)
         tm.isCaptureBlocked
         assertEquals(ThermalManager.State.CRITICAL, tm.currentState)
@@ -110,14 +111,14 @@ class ThermalThresholdTest {
 
     @Test
     fun isCaptureBlocked_criticalState() {
-        val context = createContextWithBatteryTemp(550)
+        val context = createContextWithBatteryTemp(420)
         val tm = ThermalManager(context)
         assertTrue(tm.isCaptureBlocked)
     }
 
     @Test
     fun isCaptureBlocked_hotState() {
-        val context = createContextWithBatteryTemp(520)
+        val context = createContextWithBatteryTemp(400)
         val tm = ThermalManager(context)
         assertFalse(tm.isCaptureBlocked)
     }
@@ -131,7 +132,7 @@ class ThermalThresholdTest {
 
     @Test
     fun isPreviewReduced_criticalState() {
-        val context = createContextWithBatteryTemp(550)
+        val context = createContextWithBatteryTemp(420)
         val tm = ThermalManager(context)
         tm.isCaptureBlocked
         assertTrue(tm.isPreviewReduced)
@@ -139,15 +140,23 @@ class ThermalThresholdTest {
 
     @Test
     fun isPreviewReduced_hotState() {
-        val context = createContextWithBatteryTemp(520)
+        val context = createContextWithBatteryTemp(400)
         val tm = ThermalManager(context)
         tm.isCaptureBlocked
-        assertFalse(tm.isPreviewReduced)
+        assertTrue(tm.isPreviewReduced)
+    }
+
+    @Test
+    fun isPreviewReduced_warmState() {
+        val context = createContextWithBatteryTemp(380)
+        val tm = ThermalManager(context)
+        tm.isCaptureBlocked
+        assertTrue(tm.isPreviewReduced)
     }
 
     @Test
     fun onStateChanged_callback_fires() {
-        val context = createContextWithBatteryTemp(550)
+        val context = createContextWithBatteryTemp(420)
         val tm = ThermalManager(context)
 
         var callbackFired = false
@@ -165,7 +174,7 @@ class ThermalThresholdTest {
 
     @Test
     fun onStateChanged_notFiredWhenNoChange() {
-        val context = createContextWithBatteryTemp(550)
+        val context = createContextWithBatteryTemp(420)
         val tm = ThermalManager(context)
 
         var callCount = 0
@@ -176,5 +185,102 @@ class ThermalThresholdTest {
 
         tm.isCaptureBlocked
         assertEquals(countAfterFirst, callCount)
+    }
+
+    // --- Asymmetric EMA: rise moves much faster than fall for the same step ---
+    @Test
+    fun asymmetricEma_risesFasterThanFalls() {
+        val context = createContextWithBatteryTemp(250)
+        val tm = ThermalManager(context)
+
+        tm.seedSmoothedTemperature(37.0f)
+        val afterRise = tm.smoothTemperature(40.0f) // 3.0° up-step
+        val afterFall = tm.smoothTemperature(37.0f) // same size step down
+
+        val riseMove = afterRise - 37.0f
+        val fallMove = afterRise - afterFall
+
+        assertTrue("rise should be substantial, was $riseMove", riseMove > 0.5f)
+        assertTrue("fall should be much slower than rise", fallMove < riseMove * 0.3f)
+    }
+
+    // --- Display number is the raw reading, not the smoothed judgment value ---
+    @Test
+    fun displayShowsRawNotSmoothed() {
+        val context = createContextWithBatteryTemp(380)
+        val tm = ThermalManager(context)
+
+        tm.seedSmoothedTemperature(42.0f) // force a stale, much higher judged value
+        tm.isCaptureBlocked
+
+        assertEquals(38.0f, tm.displayTemperatureC, 0.001f)
+        assertNotEquals(38.0f, tm.judgedTemperatureC, 0.001f)
+    }
+
+    // --- Torch policy ---
+    @Test
+    fun torchWarmLimit_forcesOffAfter3Min() {
+        val context = createContextWithBatteryTemp(380)
+        val tm = ThermalManager(context)
+        var fired: ThermalManager.TorchShutdownReason? = null
+        tm.onTorchForcedOff = { fired = it }
+
+        var now = 1000L
+        tm.clockMsProvider = { now }
+        tm.isTorchActive = true
+        now += 60_000L // 1 minute still under the limit
+        tm.isCaptureBlocked
+        assertEquals(null, fired)
+
+        now += 180_000L // 4 minutes total: past the 3-minute budget
+        tm.isCaptureBlocked
+        assertEquals(ThermalManager.TorchShutdownReason.DURATION_LIMIT, fired)
+    }
+
+    @Test
+    fun torch_hotState_forcesOffImmediately() {
+        val context = createContextWithBatteryTemp(400)
+        val tm = ThermalManager(context)
+        var fired: ThermalManager.TorchShutdownReason? = null
+        tm.onTorchForcedOff = { fired = it }
+        tm.clockMsProvider = { 1000L }
+
+        tm.isTorchActive = true
+        tm.isCaptureBlocked
+
+        assertEquals(ThermalManager.TorchShutdownReason.HOT, fired)
+    }
+
+    @Test
+    fun torch_criticalState_forcesOffBeforeShuttingDown() {
+        val context = createContextWithBatteryTemp(420)
+        val tm = ThermalManager(context)
+        var fired: ThermalManager.TorchShutdownReason? = null
+        tm.onTorchForcedOff = { fired = it }
+        tm.clockMsProvider = { 1000L }
+
+        tm.isTorchActive = true
+        tm.isCaptureBlocked
+
+        assertEquals(ThermalManager.TorchShutdownReason.CRITICAL, fired)
+    }
+
+    @Test
+    fun torchForcedOff_firesOnlyOnceUntilReEnabled() {
+        val context = createContextWithBatteryTemp(400)
+        val tm = ThermalManager(context)
+        var fireCount = 0
+        tm.onTorchForcedOff = { fireCount++ }
+        tm.clockMsProvider = { 1000L }
+        tm.isTorchActive = true
+
+        tm.isCaptureBlocked
+        tm.isCaptureBlocked
+        assertEquals(1, fireCount)
+
+        tm.isTorchActive = false
+        tm.isTorchActive = true
+        tm.isCaptureBlocked
+        assertEquals(2, fireCount)
     }
 }

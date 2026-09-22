@@ -28,6 +28,20 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var fboWidth = 640
     private var fboHeight = 480
 
+    // Baseline preview size (pre-cap). Set by preparePreviewPipeline; the cap
+    // below shrinks the FBO (and thus the demosaic/output pixel work) when the
+    // battery is warm or hotter. Resolution cap is pure throughput — it never
+    // rewrites exposure parameters.
+    private var basePreviewWidth = 640
+    private var basePreviewHeight = 480
+
+    @Volatile private var previewResCapDim = 0
+    @Volatile private var fboResizePending = false
+
+    // When suppression is active (critical battery), the render loop paints
+    // black instead of the preview and bails before the stale-FBO blit.
+    @Volatile private var previewSuppressed = false
+
     private var captureFboId = 0
     private var captureFboTextureId = 0
     private var captureFboWidth = 0
@@ -239,8 +253,50 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     var exposureEv = 1.5f
 
     fun setPreviewSize(width: Int, height: Int) {
-        fboWidth = width
-        fboHeight = height
+        basePreviewWidth = width
+        basePreviewHeight = height
+        val (w, h) = cappedPreviewSize(width, height)
+        if (w == fboWidth && h == fboHeight) return
+        fboWidth = w
+        fboHeight = h
+        if (glInitialized) fboResizePending = true
+    }
+
+    /** Thermal cap on the longest demosaic/output dimension (0 = no cap). */
+    fun setPreviewResolutionCap(maxDim: Int) {
+        if (previewResCapDim == maxDim) return
+        previewResCapDim = maxDim
+        val (w, h) = cappedPreviewSize(basePreviewWidth, basePreviewHeight)
+        if (w == fboWidth && h == fboHeight) return
+        fboWidth = w
+        fboHeight = h
+        if (glInitialized) fboResizePending = true
+        requestRender()
+    }
+
+    /** Critical-battery blackout: drop any held frame and render black. */
+    fun setPreviewSuppressed(suppressed: Boolean) {
+        if (previewSuppressed == suppressed) return
+        previewSuppressed = suppressed
+        if (suppressed) {
+            yPlane = null
+            uPlane = null
+            vPlane = null
+            bayerBuffer = null
+            yuvWidth = 0
+            yuvHeight = 0
+            bayerWidth = 0
+            bayerHeight = 0
+        }
+        requestRender()
+    }
+
+    private fun cappedPreviewSize(w: Int, h: Int): Pair<Int, Int> {
+        if (previewResCapDim <= 0 || w <= 0 || h <= 0) return Pair(w, h)
+        val longest = maxOf(w, h)
+        if (longest <= previewResCapDim) return Pair(w, h)
+        val scale = previewResCapDim.toFloat() / longest
+        return Pair(maxOf(1, (w * scale).toInt()), maxOf(1, (h * scale).toInt()))
     }
 
     fun setCaptureSize(width: Int, height: Int) {
@@ -1226,6 +1282,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 initGlResources()
             }
 
+            // A thermal resolution cap changed the FBO size at runtime.
+            if (fboResizePending) {
+                fboResizePending = false
+                recreateMainFbo()
+            }
+
             // A lens shading map arrived after GL init: upload it on the render
             // thread (textures can only be mutated with the context current).
             if (lensShadingUploadPending) {
@@ -1528,6 +1590,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 rawCaptureReq.latch.countDown()
             }
 
+            if (previewSuppressed) {
+                clearAndSwap(viewW, viewH)
+                continue
+            }
+
             if (useBayerPath || syntheticTestEnabled) {
                 renderBayerFrame(viewW, viewH)
             } else {
@@ -1755,6 +1822,19 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         Log.d(TAG, "FBO created: ${width}x${height}")
+    }
+
+    private fun recreateMainFbo() {
+        if (fboId != 0) {
+            GLES20.glDeleteFramebuffers(1, intArrayOf(fboId), 0)
+            fboId = 0
+        }
+        if (fboTextureId != 0) {
+            GLES20.glDeleteTextures(1, intArrayOf(fboTextureId), 0)
+            fboTextureId = 0
+        }
+        createFbo(fboWidth, fboHeight)
+        Log.d(TAG, "FBO resized to ${fboWidth}x${fboHeight}")
     }
 
     private fun ensureCaptureFbo() {

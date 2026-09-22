@@ -175,6 +175,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var thumbnailButton: ImageView
     private lateinit var shutterStateLabel: TextView
     private lateinit var thermalIndicator: TextView
+    private lateinit var criticalThermalOverlay: TextView
+    @Volatile private var lastThermalTempC = 0f
+    @Volatile private var lastThermalState = ThermalManager.State.NORMAL
 
     // Focus / WB
     private lateinit var focusIndicator: ImageView
@@ -449,6 +452,7 @@ class MainActivity : AppCompatActivity() {
         thumbnailButton = findViewById(R.id.thumbnail_button)
         shutterStateLabel = findViewById(R.id.shutter_state_label)
         thermalIndicator = findViewById(R.id.thermal_indicator)
+        criticalThermalOverlay = findViewById(R.id.critical_thermal_overlay)
 
         focusIndicator = findViewById(R.id.focus_indicator)
         aeAfLockButton = findViewById(R.id.ae_af_lock_button)
@@ -484,7 +488,12 @@ class MainActivity : AppCompatActivity() {
         presetManager = PresetManager(this)
         presetManager.ensureDefault()
 
-        thermalManager = ThermalManager(this)
+        thermalManager = ThermalManager(this).also { tm ->
+            tm.onStateChanged = { state -> mainHandler.post { onThermalStateChanged(state) } }
+            tm.onTemperatureUpdate = { displayC, _ -> mainHandler.post { onThermalTempUpdate(displayC) } }
+            tm.onTorchForcedOff = { reason -> mainHandler.post { onThermalTorchForcedOff(reason) } }
+            tm.start()
+        }
         shutterController = ShutterController()
         autofocusController = AutofocusController(camera2Manager, mainHandler)
         mediaStoreSaver = MediaStoreSaver(this)
@@ -561,10 +570,6 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Debug log saved to Downloads", Toast.LENGTH_SHORT).show()
         }
 
-        thermalManager.onStateChanged = { state ->
-            mainHandler.post { updateThermalUI(state) }
-        }
-
         orientationListener = object : OrientationEventListener(this) {
             override fun onOrientationChanged(orientation: Int) {
                 if (orientation != ORIENTATION_UNKNOWN) {
@@ -621,6 +626,11 @@ class MainActivity : AppCompatActivity() {
     private fun setupUI() {
         loadWbModePrefs()
         flashButton.setOnClickListener {
+            val thermalState = thermalManager.currentState
+            if (thermalState == ThermalManager.State.HOT || thermalState == ThermalManager.State.CRITICAL) {
+                showWarningForDuration("Flash disabled \u2014 battery too hot", 10_000)
+                return@setOnClickListener
+            }
             currentFlashMode = currentFlashMode.cycle()
             updateFlashUI()
             showModeLabel(flashModeDisplayName(currentFlashMode))
@@ -675,41 +685,14 @@ class MainActivity : AppCompatActivity() {
         shutterButton.setOnClickListener {
             if (shutterController.state != ShutterController.State.IDLE) return@setOnClickListener
             if (thermalManager.isCaptureBlocked) {
-                Toast.makeText(this, "Device too hot — wait for cooldown", Toast.LENGTH_SHORT).show()
+                // Critical: the RAW stream is off, so the capture is a black frame.
+                captureBlackStill()
                 return@setOnClickListener
             }
             shutterController.onCaptureSubmitted()
             isCapturing = true
 
-            val session = CaptureSession(
-                flashMode = camera2Manager.currentFlashModeForExif,
-                jpegQuality = photoOutput.jpegQuality,
-                resolutionWidth = photoOutput.resolutionWidth,
-                resolutionHeight = photoOutput.resolutionHeight,
-                deviceOrientation = currentDeviceOrientation,
-                sensorOrientation = lensManager.activeLens?.let { lensManager.getSensorOrientation(it) } ?: 0,
-                focalLengthMm = lensManager.activeLens?.let {
-                    lensManager.getCharacteristicsForLens(it)
-                        ?.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                        ?.getOrNull(0)
-                } ?: 4.0f,
-                focalLength35mm = lensManager.activeLens?.let { Math.round(it.focalLength35mmEq) } ?: 0,
-                agxSceneLinearTo709 = previewRenderer.agxSceneLinearTo709.copyOf(),
-                agxInsetMat = previewRenderer.agxInsetMat.copyOf(),
-                agxOutsetMat = previewRenderer.agxOutsetMat.copyOf(),
-                agxToRec2020 = previewRenderer.agxToRec2020.copyOf(),
-                agxWhiteLevel = previewRenderer.agxWhiteLevel,
-                agxBlackLevel = previewRenderer.agxBlackLevel,
-                agxLogMin = previewRenderer.agxLogMin,
-                agxLogMax = previewRenderer.agxLogMax,
-                agxLogMidgray = previewRenderer.agxLogMidgray,
-                agxDisplayMidgray = previewRenderer.agxDisplayMidgray,
-                agxContrast = previewRenderer.agxContrast,
-                agxToe = previewRenderer.agxToe,
-                agxShoulder = previewRenderer.agxShoulder,
-                agxVibrance = previewRenderer.agxVibrance,
-                isFrontCamera = previewRenderer.isFrontCamera
-            )
+            val session = buildCaptureSession()
 
             val thumbnailLatch = CountDownLatch(1)
             val thumbnailRef = java.util.concurrent.atomic.AtomicReference<Bitmap?>(null)
@@ -2156,6 +2139,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showLensWarning(message: String) {
+        showWarningForDuration(message, 3_000)
+    }
+
+    private fun showWarningForDuration(message: String, durationMs: Long) {
         warningContainer?.let { container ->
             warningDismissRunnable?.let { container.removeCallbacks(it) }
             container.findViewById<TextView>(R.id.tvWarning).text = message
@@ -2170,7 +2157,7 @@ class MainActivity : AppCompatActivity() {
                     .start()
             }
 
-            container.postDelayed(warningDismissRunnable, 3000)
+            container.postDelayed(warningDismissRunnable, durationMs)
         }
     }
 
@@ -2461,6 +2448,9 @@ class MainActivity : AppCompatActivity() {
         var previewFrameCount = 0
         camera2Manager.onFrameAvailable = frameHandler@{ image ->
             if (!cameraReady) return@frameHandler
+            // Cached-state read (no evaluateState): Cheap volatile only. State
+            // transitions are poll-driven (~1s), so a frame in the gaps is fine.
+            if (thermalManager.currentState == ThermalManager.State.CRITICAL) return@frameHandler
             lastFrameArrivalTime = SystemClock.elapsedRealtime()
             if (previewRenderer.useBayerPath) return@frameHandler
             previewFrameCount++
@@ -2491,6 +2481,9 @@ class MainActivity : AppCompatActivity() {
 
         camera2Manager.onRawFrameAvailable = rawHandler@{ image ->
             if (!cameraReady) return@rawHandler
+            // Cached-state read (no evaluateState): Cheap volatile only. State
+            // transitions are poll-driven (~1s), so a frame in the gaps is fine.
+            if (thermalManager.currentState == ThermalManager.State.CRITICAL) return@rawHandler
             lastFrameArrivalTime = SystemClock.elapsedRealtime()
             if (!previewRenderer.useBayerPath) return@rawHandler
             val rawW = image.width
@@ -3687,31 +3680,122 @@ override fun onResume() {
     override fun onDestroy() {
         focusIndicatorHandler.removeCallbacks(focusIndicatorHideRunnable)
         super.onDestroy()
+        thermalManager.stop()
         performCleanup()
     }
 
-    private fun updateThermalUI(state: ThermalManager.State) {
+    private fun onThermalStateChanged(state: ThermalManager.State) {
+        if (!::previewRenderer.isInitialized) return
+        lastThermalState = state
+        updateThermalIndicatorFor(state)
 
+        when (state) {
+            ThermalManager.State.NORMAL -> {
+                hideCriticalThermalOverlay()
+                previewRenderer.setPreviewSuppressed(false)
+                previewRenderer.setPreviewResolutionCap(0)
+                camera2Manager.setThermalFpsLimit(0)
+            }
+            ThermalManager.State.WARM -> {
+                previewRenderer.setPreviewSuppressed(false)
+                applyThermalThrottle()
+            }
+            ThermalManager.State.HOT -> {
+                // Flash is prohibited entirely while hot: torch on -> off, and
+                // other modes forced back to OFF.
+                forceFlashOffForThermal()
+                previewRenderer.setPreviewSuppressed(false)
+                applyThermalThrottle()
+            }
+            ThermalManager.State.CRITICAL -> {
+                // Torch is torn down FIRST, then the RAW stream shuts down:
+                // frame handlers drop incoming frames and the renderer paints
+                // black, keeping the viewfinder fully dark until cooldown.
+                forceFlashOffForThermal()
+                showCriticalThermalOverlay()
+                previewRenderer.setPreviewSuppressed(true)
+            }
+        }
+    }
+
+    /** WARM/HOT throttle: sensor fps cap + demosaic/output resolution cap <=480p. */
+    private fun applyThermalThrottle() {
+        camera2Manager.setThermalFpsLimit(thermalManager.throttledPreviewFps)
+        previewRenderer.setPreviewResolutionCap(thermalManager.maxPreviewResolutionDim)
+    }
+
+    private fun onThermalTempUpdate(displayC: Float) {
+        // Debounce: temperature backs the on-screen label/overlay numbers, so only
+        // repaint when the reading actually moved or a label still needs showing.
+        val changed = kotlin.math.abs(displayC - lastThermalTempC) >= 0.05f
+        lastThermalTempC = displayC
+        if (!changed && thermalIndicator.visibility != View.VISIBLE && criticalThermalOverlay.visibility != View.VISIBLE) {
+            return
+        }
+        if (lastThermalState != ThermalManager.State.NORMAL && changed) {
+            updateThermalIndicatorFor(lastThermalState)
+        }
+        if (criticalThermalOverlay.visibility == View.VISIBLE) {
+            criticalThermalOverlay.text =
+                String.format("BATTERY TOO HOT \u2014 %.1f\u00B0C\nCapture disabled until battery cools down", displayC)
+        }
+    }
+
+    private fun updateThermalIndicatorFor(state: ThermalManager.State) {
         when (state) {
             ThermalManager.State.NORMAL -> {
                 thermalIndicator.visibility = View.GONE
             }
             ThermalManager.State.WARM -> {
-                thermalIndicator.text = "WARM"
+                thermalIndicator.text = String.format("BATTERY WARM: %.1f\u00B0C", lastThermalTempC)
                 thermalIndicator.setTextColor(0xFFFFAA00.toInt())
                 thermalIndicator.visibility = View.VISIBLE
             }
             ThermalManager.State.HOT -> {
-                thermalIndicator.text = "HOT \u2014 Cooldown"
+                thermalIndicator.text = String.format("BATTERY HOT: %.1f\u00B0C", lastThermalTempC)
                 thermalIndicator.setTextColor(0xFFFF4444.toInt())
                 thermalIndicator.visibility = View.VISIBLE
             }
             ThermalManager.State.CRITICAL -> {
-                thermalIndicator.text = "CRITICAL"
+                thermalIndicator.text = String.format("BATTERY CRITICAL: %.1f\u00B0C", lastThermalTempC)
                 thermalIndicator.setTextColor(0xFFFF0000.toInt())
                 thermalIndicator.visibility = View.VISIBLE
             }
         }
+    }
+
+    private fun showCriticalThermalOverlay() {
+        criticalThermalOverlay.text = String.format(
+            "BATTERY TOO HOT \u2014 %.1f\u00B0C\nCapture disabled until battery cools down",
+            lastThermalTempC
+        )
+        criticalThermalOverlay.visibility = View.VISIBLE
+    }
+
+    private fun hideCriticalThermalOverlay() {
+        criticalThermalOverlay.visibility = View.GONE
+    }
+
+    private fun forceFlashOffForThermal() {
+        if (currentFlashMode == FlashMode.OFF && !thermalManager.isTorchActive) return
+        currentFlashMode = FlashMode.OFF
+        thermalManager.isTorchActive = false
+        updateFlashUI()
+        if (cameraReady) camera2Manager.setFlashMode(FlashMode.OFF)
+    }
+
+    private fun onThermalTorchForcedOff(reason: ThermalManager.TorchShutdownReason) {
+        // Torch off FIRST (before any RAW stream shutdown on critical).
+        forceFlashOffForThermal()
+        val message = when (reason) {
+            ThermalManager.TorchShutdownReason.DURATION_LIMIT ->
+                "Battery warm \u2014 torch duration is limited, torch off"
+            ThermalManager.TorchShutdownReason.HOT ->
+                "Battery hot \u2014 torch off"
+            ThermalManager.TorchShutdownReason.CRITICAL ->
+                "Battery too hot \u2014 torch off"
+        }
+        showWarningForDuration(message, 10_000)
     }
 
     private fun updateShutterUI(state: ShutterController.State) {
@@ -3728,6 +3812,79 @@ override fun onResume() {
             }
             else -> {}
         }
+    }
+
+    /** Photo-session snapshot used for every capture path (RAW, GPU, black). */
+    private fun buildCaptureSession(): CaptureSession {
+        return CaptureSession(
+            flashMode = camera2Manager.currentFlashModeForExif,
+            jpegQuality = photoOutput.jpegQuality,
+            resolutionWidth = photoOutput.resolutionWidth,
+            resolutionHeight = photoOutput.resolutionHeight,
+            deviceOrientation = currentDeviceOrientation,
+            sensorOrientation = lensManager.activeLens?.let { lensManager.getSensorOrientation(it) } ?: 0,
+            focalLengthMm = lensManager.activeLens?.let {
+                lensManager.getCharacteristicsForLens(it)
+                    ?.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                    ?.getOrNull(0)
+            } ?: 4.0f,
+            focalLength35mm = lensManager.activeLens?.let { Math.round(it.focalLength35mmEq) } ?: 0,
+            agxSceneLinearTo709 = previewRenderer.agxSceneLinearTo709.copyOf(),
+            agxInsetMat = previewRenderer.agxInsetMat.copyOf(),
+            agxOutsetMat = previewRenderer.agxOutsetMat.copyOf(),
+            agxToRec2020 = previewRenderer.agxToRec2020.copyOf(),
+            agxWhiteLevel = previewRenderer.agxWhiteLevel,
+            agxBlackLevel = previewRenderer.agxBlackLevel,
+            agxLogMin = previewRenderer.agxLogMin,
+            agxLogMax = previewRenderer.agxLogMax,
+            agxLogMidgray = previewRenderer.agxLogMidgray,
+            agxDisplayMidgray = previewRenderer.agxDisplayMidgray,
+            agxContrast = previewRenderer.agxContrast,
+            agxToe = previewRenderer.agxToe,
+            agxShoulder = previewRenderer.agxShoulder,
+            agxVibrance = previewRenderer.agxVibrance,
+            isFrontCamera = previewRenderer.isFrontCamera
+        )
+    }
+
+    /**
+     * Critical-mode capture: the RAW stream is shut down (viewfinder is dark),
+     * so a shutter press still completes but encodes a fully black frame. The
+     * sensor is never engaged — nothing is exposed.
+     */
+    private fun captureBlackStill() {
+        shutterController.onCaptureSubmitted()
+        isCapturing = true
+        finishingCaptureOverlay.visibility = View.VISIBLE
+
+        val session = buildCaptureSession()
+        val targetW = if (session.resolutionWidth > 0) session.resolutionWidth else 640
+        val targetH = if (session.resolutionHeight > 0) session.resolutionHeight else 480
+
+        Thread {
+            try {
+                val bitmap = android.graphics.Bitmap.createBitmap(targetW, targetH, android.graphics.Bitmap.Config.ARGB_8888)
+                bitmap.eraseColor(android.graphics.Color.rgb(0, 0, 0))
+                val (jpegData, metadata) = encodeCaptureBitmap(bitmap, session)
+                bitmap.recycle()
+                saveCaptureJpeg(jpegData, null, session, metadata)
+            } catch (e: Exception) {
+                Log.e(TAG, "Black capture failed", e)
+                mainHandler.post {
+                    Toast.makeText(this, "Capture failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            } finally {
+                mainHandler.post {
+                    isCapturing = false
+                    shutterController.onCaptureComplete()
+                    finishingCaptureOverlay.visibility = View.GONE
+                    if (pendingPauseCleanup) {
+                        pendingPauseCleanup = false
+                        performCleanup()
+                    }
+                }
+            }
+        }.start()
     }
 
     private fun processCapture(
