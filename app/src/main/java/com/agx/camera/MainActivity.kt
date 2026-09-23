@@ -40,6 +40,7 @@ import com.agx.camera.io.CaptureMetadata
 import com.agx.camera.io.ExifWriter
 import com.agx.camera.io.JpegEncoder
 import com.agx.camera.io.MediaStoreSaver
+import com.agx.camera.thermal.CriticalBlinkController
 import com.agx.camera.thermal.ThermalManager
 import com.agx.camera.ui.ScrollingIndexBar
 import com.agx.camera.CrashLogger
@@ -176,8 +177,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var shutterStateLabel: TextView
     private lateinit var thermalIndicator: TextView
     private lateinit var criticalThermalOverlay: TextView
+    private lateinit var thermalProtectionSwitch: android.widget.Switch
+    private lateinit var criticalBlinkWarning: TextView
+    private lateinit var criticalBlinkController: CriticalBlinkController
     @Volatile private var lastThermalTempC = 0f
     @Volatile private var lastThermalState = ThermalManager.State.NORMAL
+    @Volatile private var thermalProtectionEnabled = true
+    // True while the confirm-disable dialog is alive. During that window the
+    // switch is owned by the dialog: extra taps are consumed (and the switch
+    // restored to the still-applied state) instead of applying anything, so the
+    // tracked state and the switch position can never drift apart.
+    @Volatile private var thermalProtectionDialogShowing = false
 
     // Focus / WB
     private lateinit var focusIndicator: ImageView
@@ -453,6 +463,11 @@ class MainActivity : AppCompatActivity() {
         shutterStateLabel = findViewById(R.id.shutter_state_label)
         thermalIndicator = findViewById(R.id.thermal_indicator)
         criticalThermalOverlay = findViewById(R.id.critical_thermal_overlay)
+        thermalProtectionSwitch = findViewById(R.id.thermal_protection_switch)
+        criticalBlinkWarning = findViewById(R.id.critical_blink_warning)
+        criticalBlinkController = CriticalBlinkController(mainHandler) { visible ->
+            criticalBlinkWarning.visibility = if (visible) View.VISIBLE else View.GONE
+        }
 
         focusIndicator = findViewById(R.id.focus_indicator)
         aeAfLockButton = findViewById(R.id.ae_af_lock_button)
@@ -492,6 +507,10 @@ class MainActivity : AppCompatActivity() {
             tm.onStateChanged = { state -> mainHandler.post { onThermalStateChanged(state) } }
             tm.onTemperatureUpdate = { displayC, _ -> mainHandler.post { onThermalTempUpdate(displayC) } }
             tm.onTorchForcedOff = { reason -> mainHandler.post { onThermalTorchForcedOff(reason) } }
+            // Provider reflection is read at actuator time (never cached), so a
+            // toggle takes effect immediately. Default true covers the brief
+            // window before previewResPrefs is read below.
+            tm.thermalProtectionEnabledProvider = { thermalProtectionEnabled }
             tm.start()
         }
         shutterController = ShutterController()
@@ -503,6 +522,7 @@ class MainActivity : AppCompatActivity() {
         previewResCapMaxDim = previewResPrefs.getInt(PREF_PREVIEW_RES_CAP, 1280)
         focusIndicatorTimeoutMs = previewResPrefs.getLong(PREF_FOCUS_TIMEOUT, 0L)
         maxPreviewDimensions = getMaxPreviewDimensions()
+        thermalProtectionEnabled = previewResPrefs.getBoolean(PREF_THERMAL_PROTECTION_ENABLED, true)
         clipAttenFactor = previewResPrefs.getFloat(PREF_CLIP_ATTEN, 0.1f).coerceIn(0f, 1f)
         dpcStrength = previewResPrefs.getFloat(PREF_S1_DPC, 0f).coerceIn(0f, 1f)
         rawNrStrength = previewResPrefs.getFloat(PREF_S3_RAW, 0f).coerceIn(0f, 1f)
@@ -620,6 +640,14 @@ class MainActivity : AppCompatActivity() {
         } else {
             loadPreset(PresetManager.PRESET_DEFAULT)
         }
+        thermalProtectionSwitch.isChecked = thermalProtectionEnabled
+        // Cold start with protection already off and the battery already warm:
+        // derive the tier + render the corner strip immediately instead of
+        // waiting for the next temperature callback (which may be seconds away).
+        if (!thermalProtectionEnabled) {
+            thermalManager.forceEvaluation()
+            handleThermalTier(thermalManager.currentState)
+        }
         checkPermissions()
     }
 
@@ -627,7 +655,8 @@ class MainActivity : AppCompatActivity() {
         loadWbModePrefs()
         flashButton.setOnClickListener {
             val thermalState = thermalManager.currentState
-            if (thermalState == ThermalManager.State.HOT || thermalState == ThermalManager.State.CRITICAL) {
+            if (thermalProtectionEnabled &&
+                (thermalState == ThermalManager.State.HOT || thermalState == ThermalManager.State.CRITICAL)) {
                 showWarningForDuration("Flash disabled \u2014 battery too hot", 10_000)
                 return@setOnClickListener
             }
@@ -636,6 +665,13 @@ class MainActivity : AppCompatActivity() {
             showModeLabel(flashModeDisplayName(currentFlashMode))
             thermalManager.isTorchActive = (currentFlashMode == FlashMode.TORCH)
             if (cameraReady) camera2Manager.setFlashMode(currentFlashMode)
+        }
+
+        // Thermal protection toggle. Click-driven (not a checked-change
+        // listener) so programmatic setChecked leaves it untouched; disabling
+        // asks for confirmation every single time.
+        thermalProtectionSwitch.setOnClickListener {
+            onThermalProtectionToggleRequested(thermalProtectionSwitch.isChecked)
         }
 
         wbButton.setOnClickListener {
@@ -684,7 +720,7 @@ class MainActivity : AppCompatActivity() {
 
         shutterButton.setOnClickListener {
             if (shutterController.state != ShutterController.State.IDLE) return@setOnClickListener
-            if (thermalManager.isCaptureBlocked) {
+            if (thermalProtectionEnabled && thermalManager.isCaptureBlocked) {
                 // Critical: the RAW stream is off, so the capture is a black frame.
                 captureBlackStill()
                 return@setOnClickListener
@@ -2450,7 +2486,7 @@ class MainActivity : AppCompatActivity() {
             if (!cameraReady) return@frameHandler
             // Cached-state read (no evaluateState): Cheap volatile only. State
             // transitions are poll-driven (~1s), so a frame in the gaps is fine.
-            if (thermalManager.currentState == ThermalManager.State.CRITICAL) return@frameHandler
+            if (thermalProtectionEnabled && thermalManager.currentState == ThermalManager.State.CRITICAL) return@frameHandler
             lastFrameArrivalTime = SystemClock.elapsedRealtime()
             if (previewRenderer.useBayerPath) return@frameHandler
             previewFrameCount++
@@ -2483,7 +2519,7 @@ class MainActivity : AppCompatActivity() {
             if (!cameraReady) return@rawHandler
             // Cached-state read (no evaluateState): Cheap volatile only. State
             // transitions are poll-driven (~1s), so a frame in the gaps is fine.
-            if (thermalManager.currentState == ThermalManager.State.CRITICAL) return@rawHandler
+            if (thermalProtectionEnabled && thermalManager.currentState == ThermalManager.State.CRITICAL) return@rawHandler
             lastFrameArrivalTime = SystemClock.elapsedRealtime()
             if (!previewRenderer.useBayerPath) return@rawHandler
             val rawW = image.width
@@ -3679,6 +3715,10 @@ override fun onResume() {
 
     override fun onDestroy() {
         focusIndicatorHandler.removeCallbacks(focusIndicatorHideRunnable)
+        // Stop the blink chain first: its tick runnable lives on the main
+        // handler and would keep posting while holding this Activity (and the
+        // whole GL/preview reference chain) alive after destroy.
+        criticalBlinkController.stop()
         super.onDestroy()
         thermalManager.stop()
         performCleanup()
@@ -3687,7 +3727,32 @@ override fun onResume() {
     private fun onThermalStateChanged(state: ThermalManager.State) {
         if (!::previewRenderer.isInitialized) return
         lastThermalState = state
+        handleThermalTier(state)
+    }
+
+    /**
+     * Applies the tier for [state]. Actuators only run when thermal protection
+     * is enabled (the protected-mode behavior). With protection off the state
+     * machine + UI keep reporting, but every actuator is a no-op: full
+     * fps/resolution stay (restored immediately on disable mid-throttle), the
+     * torch is never forced off, no RAW shutdown, no blackout, and at CRITICAL
+     * only the flashing warning is shown. Called from state transitions, the
+     * protection toggle, and cold start alike.
+     */
+    private fun handleThermalTier(state: ThermalManager.State) {
         updateThermalIndicatorFor(state)
+
+        if (!thermalProtectionEnabled) {
+            // Protection off: restore full throughput immediately (the same
+            // restore path used on the state step-down) and never blackout,
+            // stop the stream, or block capture.
+            previewRenderer.setPreviewSuppressed(false)
+            previewRenderer.setPreviewResolutionCap(0)
+            camera2Manager.setThermalFpsLimit(0)
+            hideCriticalThermalOverlay()
+            updateBlinkWarning(protectionEnabled = false, state)
+            return
+        }
 
         when (state) {
             ThermalManager.State.NORMAL -> {
@@ -3716,6 +3781,7 @@ override fun onResume() {
                 previewRenderer.setPreviewSuppressed(true)
             }
         }
+        updateBlinkWarning(protectionEnabled = true, state)
     }
 
     /** WARM/HOT throttle: sensor fps cap + demosaic/output resolution cap <=480p. */
@@ -3742,6 +3808,13 @@ override fun onResume() {
     }
 
     private fun updateThermalIndicatorFor(state: ThermalManager.State) {
+        if (!thermalProtectionEnabled) {
+            // Persistent corner strip while protection is off.
+            thermalIndicator.text = String.format("THERMAL PROTECTION OFF, current state: %s", state.name)
+            thermalIndicator.setTextColor(0xFFFFAA00.toInt())
+            thermalIndicator.visibility = View.VISIBLE
+            return
+        }
         when (state) {
             ThermalManager.State.NORMAL -> {
                 thermalIndicator.visibility = View.GONE
@@ -3774,6 +3847,66 @@ override fun onResume() {
 
     private fun hideCriticalThermalOverlay() {
         criticalThermalOverlay.visibility = View.GONE
+    }
+
+    /**
+     * User pressed the protection switch. Enabling applies immediately; each
+     * disabling requires fresh confirmation, and the switch reverts on cancel.
+     * While the confirmation is pending every further tap is swallowed (no
+     * second dialog, no apply) so the applied state and the switch position
+     * always agree.
+     */
+    private fun onThermalProtectionToggleRequested(checked: Boolean) {
+        if (thermalProtectionDialogShowing) {
+            // The tap already flipped the switch while the dialog owns the
+            // decision: put the switch back on the still-applied state (ON)
+            // and ignore it.
+            restoreThermalProtectionSwitch()
+            return
+        }
+        if (checked) {
+            applyThermalProtection(true)
+            return
+        }
+        thermalProtectionDialogShowing = true
+        AlertDialog.Builder(this)
+            .setMessage("Disabling thermal protection might cause permanent damage to the device upon heavy use, are you sure?")
+            .setPositiveButton("Turn off protection") { _, _ -> applyThermalProtection(false) }
+            .setNegativeButton("Keep enabled") { _, _ -> restoreThermalProtectionSwitch() }
+            .setOnCancelListener { restoreThermalProtectionSwitch() }
+            .setOnDismissListener { thermalProtectionDialogShowing = false }
+            .show()
+    }
+
+    private fun restoreThermalProtectionSwitch() {
+        thermalProtectionSwitch.isChecked = true
+    }
+
+    /** Persist the new protection state, then immediately re-resolve the tier. */
+    private fun applyThermalProtection(enabled: Boolean) {
+        thermalProtectionEnabled = enabled
+        previewResPrefs.edit().putBoolean(PREF_THERMAL_PROTECTION_ENABLED, enabled).apply()
+        // Single source of truth for the switch: whatever decision the dialog
+        // produced, the toggle comes to rest matching the applied state.
+        thermalProtectionSwitch.isChecked = enabled
+        // Force one evaluation now so the toggle takes effect immediately
+        // rather than on the next ~1s poll tick.
+        thermalManager.forceEvaluation()
+        handleThermalTier(thermalManager.currentState)
+    }
+
+    /**
+     * The flashing full-screen warning only ever appears with protection off
+     * AND critical. start() is idempotent, so repeated transitions and toggle
+     * spam can never double-pace or leak a second tick chain.
+     */
+    private fun updateBlinkWarning(protectionEnabled: Boolean, state: ThermalManager.State) {
+        if (!protectionEnabled && state == ThermalManager.State.CRITICAL) {
+            criticalBlinkController.start()
+        } else {
+            criticalBlinkController.stop()
+            criticalBlinkWarning.visibility = View.GONE
+        }
     }
 
     private fun forceFlashOffForThermal() {
@@ -4585,6 +4718,7 @@ override fun onResume() {
         private const val PREF_PREVIEW_RES_CAP = "preview_res_cap"
         private const val PREF_FOCUS_TIMEOUT = "focus_indicator_timeout"
         private const val PREF_STARTUP_PRESET = "startup_preset"
+        private const val PREF_THERMAL_PROTECTION_ENABLED = "thermal_protection_enabled"
         // White balance is a user preference, not a per-lens one: it persists
         // across lens switches and app restarts (global, like flash mode).
         private const val PREF_WB_MODE = "wb_mode_global"

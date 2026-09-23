@@ -80,6 +80,18 @@ class ThermalManager(context: Context) {
     val maxPreviewResolutionDim = 480
     val warmTorchDurationLimitMs = 3 * 60 * 1000L
 
+    // --- User-facing thermal protection gate ---
+    // Advanced opt-out for power users. When protection is disabled the state
+    // machine keeps running (UI still reports the real state), but every
+    // actuator is a no-op: no fps/resolution clamp, no torch cap/forced-off,
+    // no RAW stream shutdown, no capture blocking. The provider is read at
+    // actuator time (never cached) so a toggle takes effect immediately. The
+    // owner wires this to its persisted preference (default ON).
+    var thermalProtectionEnabledProvider: () -> Boolean = { true }
+
+    val thermalProtectionEnabled: Boolean
+        get() = thermalProtectionEnabledProvider()
+
     private val appContext = context.applicationContext
 
     @Volatile
@@ -227,6 +239,18 @@ class ThermalManager(context: Context) {
         torchShutdownFired = false
     }
 
+    /** Force one state-evaluation NOW. Used on cold start (so the very first
+     *  UI frame reflects an already-hot battery) and after the protection
+     *  toggle (so removal/restoration of actuators happens immediately). */
+    fun forceEvaluation() {
+        evaluateState()
+    }
+
+    /** Test hook: simulate a fresh ACTION_BATTERY_CHANGED temperature reading. */
+    internal fun setSimulatedBatteryTemperature(celsius: Float) {
+        latestBatteryTemperatureC = celsius
+    }
+
     fun onFrameRendered(frameTimeMs: Float) {
         // No-op: frame timing no longer triggers thermal state changes.
     }
@@ -293,6 +317,9 @@ class ThermalManager(context: Context) {
     }
 
     private fun enforceTorchPolicy(state: State) {
+        // Protection off: the torch is the user's to manage — no duration cap
+        // and no forced-off, at any temperature.
+        if (!thermalProtectionEnabled) return
         if (!isTorchActive) return
         when (state) {
             State.WARM -> {

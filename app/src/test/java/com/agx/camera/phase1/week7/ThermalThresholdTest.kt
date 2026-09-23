@@ -283,4 +283,121 @@ class ThermalThresholdTest {
         tm.isCaptureBlocked
         assertEquals(2, fireCount)
     }
+
+    // --- Thermal protection gate (user-facing opt-out) ---
+
+    @Test
+    fun thermalProtectionEnabled_defaultsToTrue() {
+        assertEquals(true, thermalManager.thermalProtectionEnabled)
+    }
+
+    @Test
+    fun protectionPref_roundTripsThroughProvider() {
+        val context = createContextWithBatteryTemp(400)
+        val tm = ThermalManager(context)
+        // Mirrors MainActivity wiring: provider maps the persisted preference
+        // key to a Boolean, read at actuator time (never cached).
+        val stored = mutableMapOf("thermal_protection_enabled" to true)
+        tm.thermalProtectionEnabledProvider = { stored["thermal_protection_enabled"] ?: true }
+
+        assertEquals(true, tm.thermalProtectionEnabled)
+
+        stored["thermal_protection_enabled"] = false
+        assertEquals(false, tm.thermalProtectionEnabled)
+
+        stored["thermal_protection_enabled"] = true
+        assertEquals(true, tm.thermalProtectionEnabled)
+    }
+
+    @Test
+    fun protectionOff_stateMachineAndCallbacksStillDrive() {
+        val context = createContextWithBatteryTemp(250)
+        val tm = ThermalManager(context)
+        var fireCount = 0
+        tm.onTorchForcedOff = { fireCount++ }
+        val observed = ArrayList<ThermalManager.State>()
+        tm.onStateChanged = { observed.add(it) }
+        tm.thermalProtectionEnabledProvider = { false }
+        tm.clockMsProvider = { 1000L }
+        tm.isTorchActive = true
+
+        tm.setSimulatedBatteryTemperature(38.0f)
+        tm.seedSmoothedTemperature(38.0f)
+        tm.forceEvaluation()
+        assertEquals(ThermalManager.State.WARM, tm.currentState)
+
+        tm.setSimulatedBatteryTemperature(40.0f)
+        tm.seedSmoothedTemperature(40.0f)
+        tm.forceEvaluation()
+        assertEquals(ThermalManager.State.HOT, tm.currentState)
+
+        tm.setSimulatedBatteryTemperature(42.0f)
+        tm.seedSmoothedTemperature(42.0f)
+        tm.forceEvaluation()
+        assertEquals(ThermalManager.State.CRITICAL, tm.currentState)
+
+        // The state machine + callbacks kept running the whole time...
+        assertEquals(
+            listOf(
+                ThermalManager.State.WARM,
+                ThermalManager.State.HOT,
+                ThermalManager.State.CRITICAL
+            ),
+            observed
+        )
+        // ...but no torch actuator ever fired.
+        assertEquals(0, fireCount)
+    }
+
+    @Test
+    fun protectionOff_torchNeverForcedOff_andNoDurationCap() {
+        val context = createContextWithBatteryTemp(380)
+        val tm = ThermalManager(context)
+        var fired: ThermalManager.TorchShutdownReason? = null
+        tm.onTorchForcedOff = { fired = it }
+        var now = 1000L
+        tm.clockMsProvider = { now }
+        tm.thermalProtectionEnabledProvider = { false }
+
+        tm.isTorchActive = true
+        tm.forceEvaluation()
+        // 10 minutes warm: far past the 3-minute cap if protection were on.
+        now += 600_000L
+        tm.forceEvaluation()
+        assertEquals(ThermalManager.State.WARM, tm.currentState)
+        assertEquals(null, fired)
+
+        tm.setSimulatedBatteryTemperature(40.0f)
+        tm.seedSmoothedTemperature(40.0f)
+        tm.forceEvaluation() // HOT: would YANK the torch if protection were on.
+        assertEquals(ThermalManager.State.HOT, tm.currentState)
+        assertEquals(null, fired)
+
+        tm.setSimulatedBatteryTemperature(42.0f)
+        tm.seedSmoothedTemperature(42.0f)
+        tm.forceEvaluation()
+        assertEquals(ThermalManager.State.CRITICAL, tm.currentState)
+        assertEquals(null, fired)
+    }
+
+    @Test
+    fun protectionOff_toggleOnWhileHot_reappliesHotPolicy() {
+        val context = createContextWithBatteryTemp(400)
+        val tm = ThermalManager(context)
+        var fired: ThermalManager.TorchShutdownReason? = null
+        tm.onTorchForcedOff = { fired = it }
+        tm.clockMsProvider = { 1000L }
+
+        tm.thermalProtectionEnabledProvider = { false }
+        tm.isTorchActive = true
+        tm.forceEvaluation()
+        assertEquals(ThermalManager.State.HOT, tm.currentState)
+        assertEquals(null, fired)
+
+        // Toggle protection back on: the forced evaluation must re-apply the
+        // HOT actuator (torch off) immediately, not on the next poll.
+        tm.thermalProtectionEnabledProvider = { true }
+        tm.forceEvaluation()
+        assertEquals(ThermalManager.TorchShutdownReason.HOT, fired)
+    }
 }
