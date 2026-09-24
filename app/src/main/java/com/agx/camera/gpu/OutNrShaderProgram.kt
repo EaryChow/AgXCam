@@ -7,26 +7,26 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 /**
- * Stage 5 — output-domain denoise (plan §3 Stage 5): weighted YC1C2 + SWGF
+ * Stage 5 - output-domain denoise: weighted YC1C2 + SWGF
  * self-guided filter (I=p, 8 side windows, min-variance window chosen) with a
  * Fast-GF style separable box-statistic prefilter. The pass runs twice with a
- * β=0.3 noise return; round 2 raises the ε multiplier to 1.96 = (κ×1.4)² —
- * the plan's "κ×1.4 on round 2" scales σ, and ε ∝ σ̂² so the variance-domain
+ * beta=0.3 noise return; round 2 raises the epsilon multiplier to 1.96 = (kappa x 1.4)^2 -
+ * "kappa x 1.4 on round 2" scales sigma, and epsilon proportional to sigma_hat^2 so the variance-domain
  * multiplier is the square.  Host side (PreviewRenderer.runStage5) runs both
  * iterations at full strength; slider 0 skips the pass entirely (bit-exact
  * bypass).
  *
  * Passes (all one texel per output pixel, same resolution as the demosaic FBO):
- *  statsH : horizontal 5-tap box of Y (and Y²) of the (possibly β-blended)
+ *  statsH : horizontal 5-tap box of Y (and Y^2) of the (possibly beta-blended)
  *           iteration input.
- *  statsV : vertical 5-tap box of the statsH output → full 5x5 box stats.
- *  main   : YC1C2 → per-pixel ε = scale·(σ̂² + σ_dm²), pick the min-variance side
+ *  statsV : vertical 5-tap box of the statsH output -> full 5x5 box stats.
+ *  main   : YC1C2 -> per-pixel epsilon = scale*(sigma_hat^2 + sigma_dm^2), pick the min-variance side
  *           window (sampling statsV at 8 window centres), filter Y and C1/C2
  *           with luma-driven coefficients, invert back to RGB.
  *
- * ε for luma (Y) uses a small scale so texture is preserved; ε for chroma
- * (C1/C2) uses an independent large scale (plan: ×6~16) because C1/C2
- * variance is compressed but strongly spatially correlated → chroma bends to
+ * epsilon for luma (Y) uses a small scale so texture is preserved; epsilon for chroma
+ * (C1/C2) uses an independent large scale (x6~16) because C1/C2
+ * variance is compressed but strongly spatially correlated -> chroma bends to
  * the dense chroma box at the pixel to kill low-frequency chromatic blotches.
  * The host-side S5 slider is a final linear blend between the (beta-composed)
  * input and this filtered result: `mix(rgbIn, outRgb, u_strength)`, so 0..100
@@ -290,8 +290,8 @@ uniform float u_win_scale;
 float lumaOf(vec3 rgb) { return dot(u_yWeights, rgb); }
 
 // Defect mask convention: a texel is flagged if ANY channel magnitude exceeds
-// 0.5.  The preview's DPC flag map stores ±1 in the owning phase channel(s)
-// (hot/cold), the capture map writes 0/1 to all four channels — one test
+// 0.5.  The preview's DPC flag map stores +-1 in the owning phase channel(s)
+// (hot/cold), the capture map writes 0/1 to all four channels - one test
 // covers both, with no second indexing scheme.
 float flagOf(ivec2 t) {
     vec4 f = texelFetch(u_flagTex, t, 0);
@@ -401,14 +401,14 @@ uniform float u_sigma_dm2;
 uniform float u_inverse_range2;
 uniform float u_epsScale;
 // Resolution alignment: S5 geometry lives in output-pixel space, so at
-// capture resolution (up to 3-4x the preview FBO) the fixed ±2 px windows
+// capture resolution (up to 3-4x the preview FBO) the fixed +-2 px windows
 // cover only a 3-4x smaller image footprint than on the preview, weakening
 // the low-frequency chroma collapse.  u_win_scale scales both the 8 SWGF
 // window centres and the dense chroma-mean half-width so the box covers the
-// same relative image region at any resolution (preview R=2 → the exact 5x5
+// same relative image region at any resolution (preview R=2 -> the exact 5x5
 // box).  u_eps_boost is the capture-only epsilon multiplier: the preview
-// sees the S3 + 4x4 boxAA-denoised residual (σ̂²/32), but a 1:1 capture has
-// no boxAA, so its per-pixel residual is ~boxAA² ≈ 16x larger; boosting ε
+// sees the S3 + 4x4 boxAA-denoised residual (sigma_hat^2/32), but a 1:1 capture has
+// no boxAA, so its per-pixel residual is ~boxAA^2 ~ 16x larger; boosting epsilon
 // restores aC/aY parity so the still collapses blotches as hard as the
 // preview does.
 uniform float u_win_scale;
@@ -438,17 +438,17 @@ vec3 statsAt(ivec2 base, ivec2 winCentre) {
 }
 
 // Defect mask convention: a texel is flagged if ANY channel magnitude exceeds
-// 0.5 (preview ±1 per-phase DPC map and capture 0/1 map share this test).
+// 0.5 (preview +-1 per-phase DPC map and capture 0/1 map share this test).
 float flagOf(ivec2 t) {
     vec4 f = texelFetch(u_flagTex, t, 0);
     return (abs(f.r) + abs(f.g) + abs(f.b) + abs(f.a) > 0.5) ? 1.0 : 0.0;
 }
 
 // mean chroma over a DENSE box of half-width R = max(2, round(2*u_win_scale))
-// (preview R=2 → 5x5) centred at base+winCentre, from the composed input.
-// The earlier strided 5x5 lattice (offsets ∓2·step at u_chroma_step=3, 13x13
+// (preview R=2 -> 5x5) centred at base+winCentre, from the composed input.
+// The earlier strided 5x5 lattice (offsets +-2*step at u_chroma_step=3, 13x13
 // support) quantized the mean into stair blocks wherever the window crossed
-// the highlight rim or the demosaic's boxAA moiré; the synthetic-Bayer repro
+// the highlight rim or the demosaic's boxAA moire; the synthetic-Bayer repro
 // projects exactly those stairs as blocky seams along with amplification
 // (14 big seams / RMS 0.00437 vs 6 / 0.00300 with the plain argmin).  A
 // dense box varies continuously with position while still collapsing
@@ -458,7 +458,7 @@ float flagOf(ivec2 t) {
 // and the bayer-chain average jump to the lowest of any variant (0.00131).
 // R scales with u_win_scale so the capture path keeps the same relative
 // footprint without re-introducing stride quantization.
-// NOTE: deliberately NOT clip-filtered at the tap level — excluding near-clip
+// NOTE: deliberately NOT clip-filtered at the tap level - excluding near-clip
 // taps from the box starves the C-mean right around a clipped region and
 // turns it per-pixel noisy (blocky water-stain patches radiating from
 // highlights).  The active-clip handling lives in the demosaic's
@@ -517,21 +517,21 @@ void main() {
     vec3 rgbIn = mix(a, b, u_beta);
     vec3 yccIn = yccOf(rgbIn);
 
-    // u_sigmaTex R holds σ̂² in raw-DN² (10-bit sensor units). Stage-5 input
+    // u_sigmaTex R holds sigma_hat^2 in raw-DN^2 (10-bit sensor units). Stage-5 input
     // (demosaic FBO) is normalized to 0..1 by /(whiteLevel-blackLevel), so the
-    // variance must be converted to the same domain: multiply BOTH σ̂² and the
-    // demosaic residual variance by 1/(whiteLevel-blackLevel)² before feeding ε.
-    // u_epsScale then rescales the raw-DN² noise floor to the actual S3+boxAA
-    // residual that this pass sees (S5D: measured var ≈2-6e-6 image units vs
-    // σ̂²≈113 DN² → ε was ~30-100× the true residual → aY≈0.02 → output collapsed
-    // to the window mean, brightening + flat 5x5 blocks. Scale brings ε to the
+    // variance must be converted to the same domain: multiply BOTH sigma_hat^2 and the
+    // demosaic residual variance by 1/(whiteLevel-blackLevel)^2 before feeding epsilon.
+    // u_epsScale then rescales the raw-DN^2 noise floor to the actual S3+boxAA
+    // residual that this pass sees (S5D: measured var ~2-6e-6 image units vs
+    // sigma_hat^2~113 DN^2 -> epsilon was ~30-100x the true residual -> aY~0.02 -> output collapsed
+    // to the window mean, brightening + flat 5x5 blocks. Scale brings epsilon to the
     // real residual so aY lands in a denoising-friendly range, not a mean-sink.)
     //
-    // LIVE-PREVIEW path: when the S2 σ̂ grid is gated off (Stage-1/2/3 are
+    // LIVE-PREVIEW path: when the S2 sigma_hat grid is gated off (Stage-1/2/3 are
     // capture-only), u_use_iso_sigma=1 substitutes the Stage-0 ISO model
-    // σ̂² = a·signal + b with signal sampled at the owning output texel's luma.
+    // sigma_hat^2 = a*signal + b with signal sampled at the owning output texel's luma.
     // The luma here is yccIn.x normalized to 0..1 (relative to whiteRange), so
-    // signal is luma·whiteRange and whiteRange = 1/sqrt(u_inverse_range2).
+    // signal is luma*whiteRange and whiteRange = 1/sqrt(u_inverse_range2).
     float sigma2 = 0.0;
     if (u_use_iso_sigma > 0.5) {
         float whiteRangeI = 1.0 / sqrt(max(u_inverse_range2, 1e-6));
@@ -542,9 +542,9 @@ void main() {
         sb = clamp(sb, ivec2(0), ivec2(u_sigmaSize) - ivec2(1));
         sigma2 = max(texelFetch(u_sigmaTex, sb, 0).r, 0.0);
     }
-    // Luma keeps its texture: ε_Y uses a moderate scale (≈1.0-1.4) so aY stays
+    // Luma keeps its texture: epsilon_Y uses a moderate scale (~1.0-1.4) so aY stays
     // high and luminance is only lightly smoothed.  Chroma gets a very large
-    // independent scale (≈16-64) so aC → 0: C1/C2 are pulled to the dense
+    // independent scale (~16-64) so aC -> 0: C1/C2 are pulled to the dense
     // chroma box at the pixel, collapsing the dark-region chromatic blotches.
     float epsY = u_lumaEpsScale * (sigma2 + u_sigma_dm2) * u_inverse_range2 * u_epsScale * u_eps_boost;
     float epsC = u_chromaEpsScale * (sigma2 + u_sigma_dm2) * u_inverse_range2 * u_epsScale * u_eps_boost;
@@ -552,12 +552,12 @@ void main() {
     // SWGF (Yin 2019 Alg.1) window selection, softened.  A hard argmin among
     // the 8 discrete side windows maps every output pixel to exactly one mean;
     // at a sharp luma edge (clipped highlight rim) the winner map becomes an
-    // 8-ray starburst — adjacent pixels whose best window differs land on
+    // 8-ray starburst - adjacent pixels whose best window differs land on
     // different window means and the seams read as blocky stain patches
     // radiating from the bright region.  Instead fuse the two closest windows
-    // with weights ∝ 1/score², so the mixture is continuous across seams.  The
+    // with weights proportional to 1/score^2, so the mixture is continuous across seams.  The
     // distance-based weight is unchanged in spirit: a dark pixel still keeps
-    // out of bright windows (their 1/score² weight is ~0), no brighten/collapse.
+    // out of bright windows (their 1/score^2 weight is ~0), no brighten/collapse.
     float bestScore = 1.0e30;
     float sndScore = 1.0e30;
     vec2 bestStat = vec2(0.0);
@@ -630,7 +630,7 @@ void main() {
     // per-pixel winner jumps were the blocky stain seams radiating from bright
     // clipped regions (repro: RMS 0.0080/3 big seams -> 0.0053/0 with base).
     // The box at base keeps the low-frequency collapse for the dark blotches
-    // but varies continuously — no winner-dependent seams, no stride steps.
+    // but varies continuously - no winner-dependent seams, no stride steps.
     vec2 cm = chromaMean(base, ivec2(0, 0));
     float aC = varY / (varY + epsC);
     float outC1 = aC * yccIn.y + (1.0 - aC) * cm.x;

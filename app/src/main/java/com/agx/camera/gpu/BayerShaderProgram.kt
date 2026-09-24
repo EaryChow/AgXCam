@@ -414,8 +414,8 @@ class BayerShaderProgram {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, lensShadingTextureId)
         GLES20.glUniform1i(dULensShadingMapLoc, 1)
 
-        // Always bind a float-typed texture on u_denoisedTex's unit — never the
-        // integer R16UI Bayer texture — otherwise the float sampler2D is
+        // Always bind a float-typed texture on u_denoisedTex's unit - never the
+        // integer R16UI Bayer texture - otherwise the float sampler2D is
         // incompatible at draw time (GL_INVALID_OPERATION).
         GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
         val denoisedBindTex = if (denoisedTextureId != 0) denoisedTextureId else fallbackFloatTextureId
@@ -484,7 +484,7 @@ class BayerShaderProgram {
         GLES20.glDisableVertexAttribArray(texHandle)
     }
 
-    // S1/S3 same-colour pack fallback: renders the S3 filter (12-tap α-trimmed
+    // S1/S3 same-colour pack fallback: renders the S3 filter (12-tap alpha-trimmed
     // mean + DPC correction) once per texel and CFA phase into the caller-bound
     // RGBA32F FBO. The demosaic then serves as the cheap reverse-map sampler.
     // Only used when the DPC/GF shaders are unavailable; the normal path runs
@@ -795,7 +795,7 @@ layout(location = 0) out vec4 fragColor;
 // S5 defect-mask attachment (MRT location 1): 1.0 where the inline DPC
 // detected a hot/cold defect inside this output texel's demosaic box, else 0.
 // Written to all four channels so Stage 5 can use a single "any channel
-// non-zero" test for both this map and the preview's ±1 per-phase DPC flag map.
+// non-zero" test for both this map and the preview's +-1 per-phase DPC flag map.
 layout(location = 1) out vec4 fragFlag;
 
 uniform usampler2D u_bayerTex;
@@ -891,7 +891,7 @@ ivec2 mappedOutCoord(ivec2 clampedCoord) {
 // responsive without raising sigma; capture and all box<4 draws keep the full
 // 12-tap form, bit-identical to the shipped filter.
 //   S1 = defect correction: centre outside the neighbour range AND beyond
-//        band -> replaced by the α-trimmed neighbour mean.
+//        band -> replaced by the alpha-trimmed neighbour mean.
 //   S3 = blend toward that same trimmed mean.  The trim (drop 1 max & 1 min)
 //        is what keeps defective neighbour values from inflating the smoothing
 //        average, and the outlier guard below also engages at high S3 so a hot
@@ -903,7 +903,7 @@ ivec2 mappedOutCoord(ivec2 clampedCoord) {
 // p95=1.48 on the monotonicity gate scene), while real texture's cells differ
 // strongly (foliage p50=1.9..3.1).  omega = clamp((coarseDev/maxNb - 1.5), 0, 1)
 // there re-targets the flat-branch pull at the along-feature pair mean iDir; on
-// pure noise omega=0 keeps the α-trim pull bit-identical to the baseline S3
+// pure noise omega=0 keeps the alpha-trim pull bit-identical to the baseline S3
 // (validated by the smooth box walks: mode-3 maxDelta vs shipped == mode-0's,
 // <= 0.00027).
 float coarseCellMeanAt(ivec2 cell) {
@@ -1012,10 +1012,10 @@ float sampleSameColorNRRing(ivec2 coord, int ring, float mCoarse) {
 
     // Bright-pixel guard (clip-safe but mean-stable): the sensor clips in the
     // Bayer domain, so a genuinely chromatic centre must NOT be dragged down
-    // toward the filtered mean — that was the "softening" at hotspots.  The
+    // toward the filtered mean - that was the "softening" at hotspots.  The
     // final S3 blend is therefore skipped when the centre itself sits at/above
     // the clip, keeping a clipped plateau/specular at its measured brightness.
-    // The α-trim mean itself stays the full 12-member form: excluding clipped
+    // The alpha-trim mean itself stays the full 12-member form: excluding clipped
     // members would starve the mean right at the plateau edge, turning it
     // per-pixel noisy (blocky water-stain patches radiating from highlights).
     // S1 (DPC) is unchanged and never skipped.  Non-clip pixels are
@@ -1031,7 +1031,7 @@ float sampleSameColorNRRing(ivec2 coord, int ring, float mCoarse) {
     // follows features, so a dark pixel on a thin line is corrected toward the
     // along-line value instead of the omni-bright iavg, preserving the line
     // while still correcting genuine single-pixel defects (all directions
-    // bright -> I_D ≈ iavg -> no change vs baseline).
+    // bright -> I_D ~ iavg -> no change vs baseline).
     float iDir = iavg;
     // M2-style structure measure (S1 defect gate AND the S3 bilateral window).
     // Each axis neighbour's deviation is
@@ -1098,8 +1098,8 @@ float sampleSameColorNRRing(ivec2 coord, int ring, float mCoarse) {
     // +-4px taps straddle the feature, so pulling the centre toward their mean
     // smears the texture into the "out of focus" look, while flat noise only
     // gets ~1/10 variance.  maxNb is the structure detector: a flat patch
-    // (maxNb <= 6*iso-model sigma) keeps the robust α-trim pull bit-identical
-    // to the baseline S3 — a noisy flat scene (or low-contrast texture) is
+    // (maxNb <= 6*iso-model sigma) keeps the robust alpha-trim pull bit-identical
+    // to the baseline S3 - a noisy flat scene (or low-contrast texture) is
     // denoised exactly as before, so the monotonicity gate cannot pop, which a
     // minDev-keyed window would (minDev collapses to ~0 in its low tail,
     // starving the window).  A real edge/line (maxNb > 6*sigma) switches to a
@@ -1109,9 +1109,9 @@ float sampleSameColorNRRing(ivec2 coord, int ring, float mCoarse) {
     // by 5*sg), sg = max(iso-model sigma, 6*minDev).  minDev is the SMALLEST of
     // the four axis deviations; on a feature at least one axis runs ALONG it and
     // stays at the noise level, so sg stays small and the cross-line taps
-    // (full-contrast away) land outside the window — the line survives the S3
+    // (full-contrast away) land outside the window - the line survives the S3
     // pull.  bavg is the centre-exclusive weighted mean (the centre is blended
-    // back in only by the final mix) and the pull stays at 0.98*s3 — the
+    // back in only by the final mix) and the pull stays at 0.98*s3 - the
     // weights alone carry the edge protection.  The 4-tap path keeps the
     // original blend.
     float bavg = iavg;
@@ -1122,7 +1122,7 @@ float sampleSameColorNRRing(ivec2 coord, int ring, float mCoarse) {
             // bavg=iavg, bit-identical to the baseline S3; omega>0 (texture)
             // pulls toward the along-feature iDir instead of the omni-mean.
             // mCoarse is the per-fragment coarse dev threaded from
-            // demosaicBilinear (computed once), NOT re-read per sample — the
+            // demosaicBilinear (computed once), NOT re-read per sample - the
             // per-sample 3x3 cell ring was the S3 performance regression.
             float coarseRatio = (maxNb > 1e-6) ? mCoarse / maxNb : 2.0;
             float omega = clamp((coarseRatio - 1.5) * 1.0, 0.0, 1.0);
@@ -1160,7 +1160,7 @@ float sampleSameColorNRRing(ivec2 coord, int ring, float mCoarse) {
 // take the denoised value for the requested CFA phase.  The denoiser writes
 // one spatial estimate per phase into r/g/b/a of every output texel (which is
 // the whole 4-phase mosaic cell), so the colour plane is selected by channel
-// index — correct at every zoom AND in 1:1 stills, with no guard arithmetic.
+// index - correct at every zoom AND in 1:1 stills, with no guard arithmetic.
 // GLSL requires the ring variant be declared before use, so the wrapper is
 // omitted (dead) and callers invoke the ring form directly.
 float denoisedSampleRawRing(ivec2 sensorCoord, int ring, float mCoarse) {
@@ -1179,11 +1179,11 @@ float denoisedSampleRawRing(ivec2 sensorCoord, int ring, float mCoarse) {
         // per-texel steps the instant S1/S3 turn on.  Sample bilinearly
         // instead: at 1:1 the read falls exactly on a texel centre
         // (bit-identical), and at any other zoom it smoothly blends the four
-        // surrounding per-phase estimates — continuous like the raw box-AA
+        // surrounding per-phase estimates - continuous like the raw box-AA
         // demosaic (see the boxed plain phase means in the pack at k>=3.5),
         // but lower-noise and artifact-free.
         // (GL_LINEAR itself is illegal on RGBA32F in ES 3.0, so the blend is
-        // done with 4 texelFetch + linear weights — matches the model 1:1 and
+        // done with 4 texelFetch + linear weights - matches the model 1:1 and
         // works on any float format including the RGBA16F capture mosaic.)
         vec2 inv = (vec2(clampedCoord) - u_cropOrigin) / u_cropSize;
         vec4 frag = u_inverseTransformMatrix * vec4(inv, 0.0, 1.0);
@@ -1512,7 +1512,7 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
     // One coarse dev per output fragment, read once at the box centre
     // (base + bx/2); every box-AA ring sample shares it.  The old per-sample
     // coarse read re-fetched the whole 3x3 coarse cell ring per ring sample
-    // (~10x the texel fetches in the smooth box path — the S3 regression).
+    // (~10x the texel fetches in the smooth box path - the S3 regression).
     float mCoarse = coarseDevAt(ivec2(base) + ivec2(bx / 2, bx / 2));
     // Smooth box-AA step (preview k>2): instead of stepping 4x4+nr2 -> 2x2+nr4
     // at s3>=0.7, blend the two box means by u_box_blend (host =
@@ -1523,7 +1523,7 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
     if (blendW > 0.0) {
         // Fused smooth blend: the 2x2 ring-4 box sits exactly on the middle
         // four cells of the 4x4 ring-2 box (base2 = base + mOff), so those four
-        // positions are evaluated ONCE via demosaicAtDual — one read set yields
+        // positions are evaluated ONCE via demosaicAtDual - one read set yields
         // both box sides, bit-identical to the two standalone 20-evaluation
         // loops but without re-running 4 of them per fragment (the only
         // provably-redundant work in the inline k>2 path).
@@ -1533,7 +1533,7 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
         if (blendW >= 1.0) {
             // S3 endpoint (>= 0.75): the 4x4 side is weighted by (1-blendW)=0,
             // so only the pure 2x2 ring-4 box survives.  Skip the 12 outer
-            // ring-2 evaluations entirely — 4 demosaicAtDual calls instead of
+            // ring-2 evaluations entirely - 4 demosaicAtDual calls instead of
             // 16 demosaic evaluations per texel.  sum4*0 + sum2*0.25 ==
             // sum2*0.25, so this is bit-identical to the fused loop below.
             for (int dy = 0; dy < 2; dy++) {
@@ -1594,7 +1594,7 @@ vec3 compensateNegatives(vec3 rgb) {
 // arithmetic (alpha-trim neighbour mean, band, min/max guard) is listed
 // verbatim from that function; it runs no correction itself, so the S1/S3
 // algorithm and its output are unchanged.  Gated on u_dp_strength so the mask
-// reflects DPC (S1) detections only — an S3-only draw emits no mask.
+// reflects DPC (S1) detections only - an S3-only draw emits no mask.
 float inlineDefectFlagAt(ivec2 coord, int ring) {
     if (u_dp_strength <= 0.0) return 0.0;
     float c = sampleBayerRaw(coord);
@@ -1638,7 +1638,7 @@ float inlineDefectFlagAt(ivec2 coord, int ring) {
     // H2 extended-isolation veto: a centre that is hot/cold only counts as a
     // defect when it is truly isolated.  Fold the same-colour directional
     // devs (devN..devW) and the +-1 cross-colour structure devs into maxNb
-    // and require abs(c - iavg) > 6*maxNb — identical to the S1 correction
+    // and require abs(c - iavg) > 6*maxNb - identical to the S1 correction
     // gate, so the flag map covers exactly what S1 would actually correct.
     // Without this, the un-gated hot||cold flag fires across a whole
     // continuous bright letter, S5 then drops the letter's own taps from its
@@ -1738,12 +1738,12 @@ void main() {
 }
 """
 
-        // S1/S3 same-colour pack fallback: precomputes sampleSameColorNR (12-tap α-
+        // S1/S3 same-colour pack fallback: precomputes sampleSameColorNR (12-tap alpha-
         // trimmed same-colour mean + DPC outlier correction, identical GLSL to
         // the demosaic's inline filter) once per output texel and CFA phase.
         // The phase is derived from the texel's own sensor cell parity so the
         // demosaic's per-phase channel lookup (safePhase of the reverse-mapped
-        // coordinate) returns exactly the value computed for that position —
+        // coordinate) returns exactly the value computed for that position -
         // phase correctness is guaranteed at pack time, never by rewiring
         // stored channels.  Renders to the caller-bound RGBA32F target, where
         // the demosaic reverse-maps it as a fallback when the DPC/GF chain is
@@ -1796,9 +1796,9 @@ float sampleBayerRaw(ivec2 coord) {
     return max(val, 0.0);
 }
 
-// Regional directional flat pull — identical arithmetic to the demosaic copy
+// Regional directional flat pull - identical arithmetic to the demosaic copy
 // (u_box_blend aside): omega = clamp(coarseDev/maxNb - 1.5, 0, 1) blends the
-// flat-branch α-trim target toward the along-feature iDir.  Pure noise keeps
+// flat-branch alpha-trim target toward the along-feature iDir.  Pure noise keeps
 // omega=0 (bit-identical to the baseline S3 pull), foliage texture (coarse/
 // fine ratio p50 = 1.9..3.1) keeps omega>0 and is preserved.
 float coarseCellMeanAt(ivec2 cell) {
@@ -1823,7 +1823,7 @@ float coarseDevAt(ivec2 coord) {
     return m;
 }
 
-// M2-style cross-colour structure dev (H2 extended veto) — the unrolled form
+// M2-style cross-colour structure dev (H2 extended veto) - the unrolled form
 // from the demosaic copy.  See there for the full rationale.
 float l1DefectDev(ivec2 s) {
     float se2 = sampleBayerRaw(s + ivec2( 2, 0));
@@ -1840,7 +1840,7 @@ float l1DefectDev(ivec2 s) {
     return abs(sampleBayerRaw(s) - mean6);
 }
 
-// H2 extended isolation veto as an early-exit predicate — see demosaic copy.
+// H2 extended isolation veto as an early-exit predicate - see demosaic copy.
 // The constant-array loop (not a flattened if-chain) so the 12-tap S3_PACK
 // fragment stays small enough for the on-device GLSL compiler.
 bool l1IsolatedAt(ivec2 coord, float d) {
@@ -1875,10 +1875,10 @@ float sampleSameColorNR(ivec2 coord, float mCoarse) {
 
     // Bright-pixel guard (clip-safe but mean-stable): the sensor clips in the
     // Bayer domain, so a genuinely clipped centre must NOT be dragged down
-    // toward the filtered mean — that was the "softening" at hotspots.  The
+    // toward the filtered mean - that was the "softening" at hotspots.  The
     // final S3 blend is therefore skipped when the centre itself sits at/above
     // the clip, keeping a clipped plateau/specular at its measured brightness.
-    // The α-trim mean itself stays the full 12-member form: excluding clipped
+    // The alpha-trim mean itself stays the full 12-member form: excluding clipped
     // members would starve the mean right at the plateau edge, turning it
     // per-pixel noisy (blocky water-stain patches radiating from highlights).
     // S1 (DPC) is unchanged and never skipped.  Non-clip pixels are
@@ -1893,11 +1893,10 @@ float sampleSameColorNR(ivec2 coord, float mCoarse) {
     float iavg = (sumN - mn - mx) * (1.0 / 10.0);
 
     // S3_PACK fallback theta mapping = 2+4s, unified with the active DPC grid
-    // chain (PreviewRenderer thetav) and the doc's full-strength theta=6.  The
+    // chain (PreviewRenderer thetav) and the full-strength theta=6.  The
     // demosaic inline DPC (DEMOSAIC_FRAGMENT_SHADER's sampleSameColorNRRing)
     // intentionally keeps 2+2s: it is the shipped single-frame precision path
-    // where the tighter theta ceiling is coherent with no temporal averaging
-    // (see additions doc §5).
+    // where the tighter theta ceiling is coherent with no temporal averaging.
     float sigma = sqrt(max(u_iso_model_a * max(iavg, 0.0) + u_iso_model_b, 1.0));
     float band = max((0.1 + 0.3 * u_dp_strength) * max(iavg, 0.0),
                      (2.0 + 4.0 * u_dp_strength) * sigma);
@@ -1907,7 +1906,7 @@ float sampleSameColorNR(ivec2 coord, float mCoarse) {
     // follows features, so a dark pixel on a thin line is corrected toward the
     // along-line value instead of the omni-bright iavg, preserving the line
     // while still correcting genuine single-pixel defects (all directions
-    // bright -> I_D ≈ iavg -> no change vs baseline).
+    // bright -> I_D ~ iavg -> no change vs baseline).
     float iDir = iavg;
     // M2-style structure measure (S1 defect gate only; the S3 blend uses its
     // own bilateral weight below).  Each axis neighbour's deviation is
@@ -1967,11 +1966,11 @@ float sampleSameColorNR(ivec2 coord, float mCoarse) {
         }
     }
 
-    // Similarity-weighted (bilateral) S3 blend — same 12-tap structure as the
+    // Similarity-weighted (bilateral) S3 blend - same 12-tap structure as the
     // demosaic copy, unconditional here (S3_PACK never runs the 4-tap path).
     // See the demosaic copy for the full design rationale: maxNb gates the
-    // window (flat <= 6*iso-model sigma keeps the robust α-trim pull, exactly
-    // like the baseline — so the noisier-than-model monotonicity scene cannot
+    // window (flat <= 6*iso-model sigma keeps the robust alpha-trim pull, exactly
+    // like the baseline - so the noisier-than-model monotonicity scene cannot
     // pop the gate), while a structure > 6*sigma uses the minDev-keyed window
     // that protects lines.
     float bavg = iavg;
@@ -2018,14 +2017,14 @@ float sampleSameColorNR(ivec2 coord, float mCoarse) {
 // CFA phase BEFORE any noise correction (box-average-before-filter).  At wide
 // zoom a phase box holds many cells and is averaged to a single estimate per
 // phase (plain = already phase-targeted noise-free samples, so the mean is
-// lower-noise than inline per-sample filtering) — the interpolated read keeps
+// lower-noise than inline per-sample filtering) - the interpolated read keeps
 // it continuous.  At 1:1 the box covers exactly one 2x2 cell and the anchored
 // per-phase path is preserved (bit-identical capture).  Only a whole filter
 // footprint smaller than one output texel (k>=16, extreme resize capture)
 // skips the pack in favour of the inline filter (see denoisedSampleRaw).
 vec4 boxedBlend(vec4 b) {
     // Cross-phase trim/drag must operate in photometrically NEUTRAL space: the
-    // four per-phase box means sit at each CFA base (R < G ≈ G > B on a real
+    // four per-phase box means sit at each CFA base (R < G ~ G > B on a real
     // sensor under neutral light), so a raw-space iavg pulls the R/B means
     // toward the green phases and the demosaic WB gains later magnify that
     // residual into a magenta cast.  Normalizing each phase by its WB gain
@@ -2071,7 +2070,7 @@ void main() {
     // This pass renders into the demosaic-sized FBO, so gl_FragCoord.xy-0.5 is
     // the output texel index.  The footprint must use the SAME mapping the
     // demosaic inverts (u_inverseTransformMatrix on normalized crop coords), so
-    // the box is derived through the forward view transform — otherwise any
+    // the box is derived through the forward view transform - otherwise any
     // mirror/rotation in the preview matches a horizontally flipped footprint
     // (magenta channel-mix overlay on mirrored/rotated sensors).
     vec2 texelIdx = gl_FragCoord.xy - vec2(0.5);
@@ -2135,7 +2134,7 @@ void main() {
     // A small footprint whose every present phase box-mean sits at clip is an
     // all-hot cluster (or a sub-quad highlight): the mn==mx degenerate makes
     // boxedBlend a no-op, so DPC each phase cell individually through the
-    // anchored per-phase filter (same as the 1-cell path) instead — removes
+    // anchored per-phase filter (same as the 1-cell path) instead - removes
     // the cluster exactly as the inline path would.
     float clipLo = max(u_white_level - u_black_level, 1.0);
     bool allClip = true;

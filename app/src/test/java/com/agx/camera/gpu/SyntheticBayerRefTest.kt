@@ -22,7 +22,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Host-side desk check of the CPU reference (SyntheticBayerTest) — runs on the
+ * Host-side desk check of the CPU reference (SyntheticBayerTest) - runs on the
  * JVM before any device install. The oracle's geometry/phase/detector must
  * behave as designed on the fixed-seed scene so later on-device GPU/CPU diffs
  * can only be GPU bugs, not reference bugs.
@@ -49,7 +49,7 @@ class SyntheticBayerRefTest {
     @Test
     fun sceneDefectPhaseConvention() {
         // phase() = |x%2| + 2*|y%2|; with this convention (62,61) and (62,65)
-        // are BOTH phase2 (x even, y odd) — there is no phase1 defect in the scene.
+        // are BOTH phase2 (x even, y odd) - there is no phase1 defect in the scene.
         assertEquals(0, SyntheticBayerTest.phase(60, 60))
         assertEquals(2, SyntheticBayerTest.phase(62, 61))
         assertEquals(3, SyntheticBayerTest.phase(65, 63))
@@ -63,8 +63,8 @@ class SyntheticBayerRefTest {
 
     @Test
     fun interiorMarkerCellsHonourPhaseConvention() {
-        // Interior marker cell (84,68): the ±2 lattice window stays inside the
-        // marker (x∈[80,128), y∈[64,112)), so avg == black-subtracted phase DN.
+        // Interior marker cell (84,68): the +-2 lattice window stays inside the
+        // marker (x in [80,128), y in [64,112)), so avg == black-subtracted phase DN.
         val (tx, ty) = cellTexelFor(84, 68, viewW, viewH)
         val avg = avgCell(sensor, tx, ty, viewW, viewH)
         val raw = rawPackCell(sensor, tx, ty, viewW, viewH)
@@ -101,7 +101,7 @@ class SyntheticBayerRefTest {
         //  - the final pass-COUPLET that feeds the sparse grid re-runs
         //    correction for texels whose OWN cell or 8-neighbourhood contains a
         //    flagged cell (flagged neighbours excluded from the candidates), so
-        //    an isolated defect must come out corrected — NOT raw.  Only truly
+        //    an isolated defect must come out corrected - NOT raw.  Only truly
         //    clean texels pass through.  (This used to leak single flagged
         //    cells raw; the pass-through was tightened to fix that.)
         class Spec(val sx: Int, val sy: Int, val phase: Int, val hot: Boolean)
@@ -140,23 +140,23 @@ class SyntheticBayerRefTest {
         val refs = SyntheticBayerTest.CpuRefs(sensor, params).compute()
         for (r in refs) {
             val s2 = r.sigma[0]
-            assertTrue("sigma² NaN at (${r.sx},${r.sy})", !s2.isNaN())
-            assertTrue("sigma² infinite at (${r.sx},${r.sy})", s2.isFinite())
-            assertEquals("sigma² == sqrt channel at (${r.sx},${r.sy})",
+            assertTrue("sigma^2 NaN at (${r.sx},${r.sy})", !s2.isNaN())
+            assertTrue("sigma^2 infinite at (${r.sx},${r.sy})", s2.isFinite())
+            assertEquals("sigma^2 == sqrt channel at (${r.sx},${r.sy})",
                 kotlin.math.sqrt(maxOf(s2, 1e-6f)), r.sigma[1], 1e-4f)
             // The floor uses the cell's OWN mean signal, not the probe coords.
             val meanSig = (r.grid[0] + r.grid[1] + r.grid[2] + r.grid[3]) * 0.25f
             val floorAtCell = isoSigma(meanSig, params.isoA, params.isoB)
-            assertTrue("sigma² < per-cell floor at (${r.sx},${r.sy}): $s2 < $floorAtCell", s2 >= floorAtCell - 1e-4f)
+            assertTrue("sigma^2 < per-cell floor at (${r.sx},${r.sy}): $s2 < $floorAtCell", s2 >= floorAtCell - 1e-4f)
         }
     }
 
     @Test
     fun sigmaCellDarkFlatEqualsIsoFloor() {
         // A perfectly flat dark cell (zero residual in every CFA phase) must
-        // collapse the MAD to ~0 and clamp σ̂² to the Stage-0 ISO model floor —
+        // collapse the MAD to ~0 and clamp sigma_hat^2 to the Stage-0 ISO model floor -
         // the exact contract the Stage-6 dark AgX development relies on, and
-        // now live on the real preview + capture σ̂ texture (after S1 in the
+        // now live on the real preview + capture sigma_hat texture (after S1 in the
         // demosaic chain, S1 itself leaves flat regions untouched).
         fun check(dn: Float) {
             val flat: (Int, Int) -> FloatArray = { _, _ -> floatArrayOf(dn, dn, dn, dn) }
@@ -165,9 +165,9 @@ class SyntheticBayerRefTest {
                 params.isoA, params.isoB)
             val meanSignal = dn
             val floorSq = isoSigmaSq(meanSignal, params.isoA, params.isoB)
-            assertEquals("flat dark σ̂² must equal the ISO floor (not exceed it), dn=$dn",
+            assertEquals("flat dark sigma_hat^2 must equal the ISO floor (not exceed it), dn=$dn",
                 floorSq, out[0], 1e-4f)
-            assertEquals("σ̂ must be sqrt(floor) at dn=$dn",
+            assertEquals("sigma_hat must be sqrt(floor) at dn=$dn",
                 kotlin.math.sqrt(maxOf(floorSq, 1e-6f)), out[1], 1e-4f)
         }
         check(64f)   // at black level
@@ -183,9 +183,9 @@ class SyntheticBayerRefTest {
             val (tx, _) = cellTexelFor(sx, 0, viewW, viewH)
             assertEquals("originX at sensor col $sx", sx, cellOriginX(tx, viewW))
         }
-        // Y axis: the GPU feeds previewTransform into every sparse pass —
-        // centre-crop to output aspect (scaleY≈0.9 for 192x160 -> 960x720) then
-        // a Y flip — so cellOriginY is NOT the inverse of cellTexelFor's row.
+        // Y axis: the GPU feeds previewTransform into every sparse pass -
+        // centre-crop to output aspect (scaleY~0.9 for 192x160 -> 960x720) then
+        // a Y flip - so cellOriginY is NOT the inverse of cellTexelFor's row.
         // Pin the exact GPU contract per truncated row.
         val sourceAspect = SENSOR_W.toFloat() / SENSOR_H.toFloat()
         val viewAspect = viewW.toFloat() / viewH.toFloat()
@@ -239,7 +239,7 @@ class SyntheticBayerRefTest {
             System.out.println(
                 "defect (${sx},${sy}) phase$phase i=$i iavg=$iavg dev=$dev " +
                     "band=$band m2*maxNb=${params.m2 * maxNb} (maxNb=$maxNb) " +
-                    "verdict=${if (abs(dev) > band && abs(dev) > params.m2 * maxNb) "FLAG" else "miss"}"
+                    "flag=${if (abs(dev) > band && abs(dev) > params.m2 * maxNb) "yes" else "no"}"
             )
         }
         assertTrue("probe sensor out of bounds", refs.all { it.sx in 0 until SENSOR_W && it.sy in 0 until SENSOR_H })

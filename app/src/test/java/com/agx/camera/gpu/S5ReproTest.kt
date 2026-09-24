@@ -15,7 +15,7 @@ import org.junit.Test
  *
  * Two scenes:
  *  1. A warm, near-clipped disc (r=24) on a cool mid-gray field + small noise
- *     (fabricated RGB — models a clipped specular with the WB/colour-matrix
+ *     (fabricated RGB - models a clipped specular with the WB/colour-matrix
  *     cast seeping into the surround).
  *  2. A full synthetic-Bayer chain: 192x160 RGGB sensor with the same warm
  *     near-clipped disc + cool surround, demosaiced exactly like the preview
@@ -98,7 +98,7 @@ class S5ReproTest {
         return floatArrayOf(s1 / 25f, s2 / 25f)
     }
 
-    /** Dense 13x13 (step 1, radius 6) chroma box at the pixel — separable in GLSL (2x13 taps). */
+    /** Dense 13x13 (step 1, radius 6) chroma box at the pixel - separable in GLSL (2x13 taps). */
     private fun chromaMean13(img: Img, cx: Int, cy: Int, stUnit: Int): FloatArray {
         val st = max(stUnit, 1)
         var s1 = 0f
@@ -159,7 +159,7 @@ class S5ReproTest {
     private fun runS5(img: Img, stats: Stats, mode: Mode): Img {
         val isoA = 0.0067f * iso / 100f
         val isoB = (0.33f * iso / 100f) * (0.33f * iso / 100f)
-        // Soft clip weight: 1 below 0.78 luma, smooth 1→0 between 0.78 and 1.0.
+        // Soft clip weight: 1 below 0.78 luma, smooth 1->0 between 0.78 and 1.0.
         // Continuous (not a hard exclusion) so the lattice mean can't starve
         // into per-pixel noise at the plateau edge.
         fun clipW(y: Float): Float = (1.0f - ((y - 0.78f) / 0.22f).coerceIn(0f, 1f))
@@ -359,8 +359,8 @@ class S5ReproTest {
             }
         }
         sb.append(
-            "annulus C1-delta RMS=$rms max=$maxC  avg|Δ|= $" + String.format("%.5f", seams / max(seN, 1f)) +
-                "  |Δ|>0.03 count=$bigSeams\n\n"
+            "annulus C1-delta RMS=$rms max=$maxC  avg|delta|= $" + String.format("%.5f", seams / max(seN, 1f)) +
+                "  |delta|>0.03 count=$bigSeams\n\n"
         )
         return Metrics(rms, maxC, seams / max(seN, 1f), bigSeams)
     }
@@ -421,7 +421,7 @@ class S5ReproTest {
                 val n = 3.0f
                 // Deep-coloured clipped specular (R clips in-bayer, G strong,
                 // B weak = magenta-ish cast, like a real specular on a cool
-                // field) — a big discrete chroma step for the S5 strided
+                // field) - a big discrete chroma step for the S5 strided
                 // lattice to quantise into block.
                 var r = if (inside) 1023f else 240f
                 var g = if (inside) 820f else 240f
@@ -482,10 +482,10 @@ class S5ReproTest {
         return m
     }
 
-    /** Mirror of GLSL sampleSameColorNR (S1 DPC + S3 α-trim blend + directional I_D).
+    /** Mirror of GLSL sampleSameColorNR (S1 DPC + S3 alpha-trim blend + directional I_D).
      *  `dpThetaCoef` selects the theta interpolation: 2f (default) mirrors the
      *  demosaic inline DPC's 2+2s, 4f mirrors the unified S3_PACK fallback /
-     *  active grid chain 2+4s (see additions doc §5). */
+     *  active grid chain 2+4s. */
     private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float, mCoarse: Float? = null, dpThetaCoef: Float = 2f): Float {
         if (s1 <= 0f && s3 <= 0f) return sensorVal(v, sx, sy)
         val c = sensorVal(v, sx, sy)
@@ -556,9 +556,9 @@ class S5ReproTest {
             }
         }
         val clipLo = (SENSOR_CLIP - SENSOR_BLACK).toFloat()
-        // Similarity-weighted (bilateral) S3 blend — mirror of the GLSL.
+        // Similarity-weighted (bilateral) S3 blend - mirror of the GLSL.
         // maxNb gates the window (flat <= 6*iso-model sigma keeps the robust
-        // α-trim pull, bit-identical to the baseline S3, so the noisy scene
+        // alpha-trim pull, bit-identical to the baseline S3, so the noisy scene
         // cannot pop the monotonicity gate); a structure > 6*sigma uses the
         // minDev-keyed window that protects lines.  See the GLSL for the
         // full rationale.
@@ -602,7 +602,7 @@ class S5ReproTest {
             val phase = sensorPhase(cx, cy)
             val color = BA_COLOR_MAP[phase]
             // 1:1 capture: one coarse dev per output pixel (centre), shared by
-            // all 9 taps — mirrors the GLSL per-fragment mCoarse threading.
+            // all 9 taps - mirrors the GLSL per-fragment mCoarse threading.
             val mc = coarseDev(sensor, cx, cy)
             val nN = sameColorNR(sensor, cx, cy - 1, s1, s3, mc)
             val nS = sameColorNR(sensor, cx, cy + 1, s1, s3, mc)
@@ -663,7 +663,7 @@ class S5ReproTest {
                 }
                 val inv = 1f / (n * n)
                 r *= inv; g *= inv; b *= inv
-                // WB gains (1,1,1) — identity for the synthetic path.
+                // WB gains (1,1,1) - identity for the synthetic path.
                 // Clipping neutralization (factor 0.1 -> pow(inverted, 0.5)).
                 var nr = r / clipScalar
                 var ng = g / clipScalar
@@ -799,7 +799,7 @@ class S5ReproTest {
     // s1=s3=0, so the output-vs-ref error is exactly the residual noise the
     // (noisy-input) pipeline leaves.  If a non-zero slider configuration has
     // HIGHER error than the (0,0) baseline at any level, the filter is
-    // adding noise, not removing it — reproduce + fix, before/after.
+    // adding noise, not removing it - a configuration that does so is a regression.
     // ------------------------------------------------------------------
 
     private val S13_BANDS = arrayOf(
@@ -885,7 +885,7 @@ class S5ReproTest {
         }
     }
 
-    /** σ of the RAW-domain filter output per band (filter alone, no demosaic). */
+    /** sigma of the RAW-domain filter output per band (filter alone, no demosaic). */
     private fun rawFilterSigma(sensor: ShortArray, s1: Float, s3: Float): FloatArray {
         val out = FloatArray(S13_BANDS.size)
         for (bi in S13_BANDS.indices) {
@@ -950,7 +950,7 @@ class S5ReproTest {
             sb.append('\n')
         }
         // Delta heat-map over the mid band for baseline vs s1=s3=0.3, to see
-        // the noise pattern directly (channel-averaged err, span ±2x baseline σ).
+        // the noise pattern directly (channel-averaged err, span +-2x baseline sigma).
         val baseImg = demosaicImage(noisy, dW, dH, 4, 0f, 0f)
         val s3Img = demosaicImage(noisy, dW, dH, 4, 0.3f, 0.3f)
         val band = S13_BANDS[2]
@@ -994,16 +994,16 @@ class S5ReproTest {
     }
 
     // ------------------------------------------------------------------
-    // S1/S3 probe for texture + mottling.  A flat field can't expose it —
+    // S1/S3 probe for texture + mottling.  A flat field can't expose it -
     // on flat content the filter only removes noise.  The failure mode to
     // reproduce is the filter's residual being CORRELATED (low-freq blobs /
     // mottling) or DPC sparkle near texture, which reads as "more noise" on a
     // dark scene.  Metrics per brightness band:
-    //   pixelσ : σ of per-pixel err vs clean ref  (channels pooled)
-    //   blockσ : σ of 8x8 block-mean err           (low-freq residual)
-    //   spikes : N pixels with |err| > 6 * baseline.pixelσ  (DPC/edge pops)
+    //   pixel sigma : sigma of per-pixel err vs clean ref  (channels pooled)
+    //   block sigma : sigma of 8x8 block-mean err           (low-freq residual)
+    //   spikes : N pixels with |err| > 6 * baseline.pixel sigma  (DPC/edge pops)
     // The fix must not let any config exceed the (0,0) baseline on BOTH
-    // pixelσ and blockσ in the flat bands, and must not inflate spikes.
+    // pixel sigma and block sigma in the flat bands, and must not inflate spikes.
     // ------------------------------------------------------------------
 
     private var probeIsoA = 0.0067f * 800f / 100f
@@ -1199,8 +1199,8 @@ class S5ReproTest {
                 if (nCells >= 16) {
                     // Strong zoom-out: the box already averages most of the
                     // sensor texture; further trim-blending only re-introduces
-                    // phase-subset aliasing (stripe/window moiré).  Store the
-                    // plain phase area means — this degenerates to the raw
+                    // phase-subset aliasing (stripe/window moire).  Store the
+                    // plain phase area means - this degenerates to the raw
                     // box-AA baseline look, colour intact, no added noise.
                     out[base + 0] = b0; out[base + 1] = b1; out[base + 2] = b2; out[base + 3] = b3
                     continue
@@ -1325,8 +1325,8 @@ class S5ReproTest {
 
     /** Cheap zoom-out (k>=3.5) path: a 2x2-tap inline demosaic.  Four same-colour
      *  filters at the pixel's own 2x2 cell corner (one per CFA phase) feed a
-     *  direct RGB reconstruction — no box-AA loop, no 3x3 tap grid — so the cost
-     *  is 4 filters/pixel (~52 fetches) ≈ the anchored mosaic pack, while every
+     *  direct RGB reconstruction - no box-AA loop, no 3x3 tap grid - so the cost
+     *  is 4 filters/pixel (~52 fetches) ~ the anchored mosaic pack, while every
      *  pixel uses its OWN filter values (no per-texel quantization, alias-free). */
     private fun renderPreviewInline2x2(
         v: ShortArray, resX: Int, resY: Int, s1: Float, s3: Float
@@ -1503,8 +1503,8 @@ class S5ReproTest {
         return md
     }
 
-    /** Per-band pixel residual σ at preview scale (works even when a band maps
-     *  to very few output rows — returns null when there are too few samples). */
+    /** Per-band pixel residual sigma at preview scale (works even when a band maps
+     *  to very few output rows - returns null when there are too few samples). */
     private fun bandPixelSigma(out: Img, ref: Img, dW: Int, dH: Int, bi: Int): Float? {
         val b = S13_BANDS[bi]
         var sum = 0f
@@ -1530,7 +1530,7 @@ class S5ReproTest {
         return kotlin.math.sqrt(max(varD, 0f)).toFloat()
     }
 
-    /** Interior-only residual σ: same as bandPixelSigma but restricted to the
+    /** Interior-only residual sigma: same as bandPixelSigma but restricted to the
      *  band MINUS its filter-window edges so texel/window boundary effects are
      *  excluded (those live at band edges, not in the area a user inspects). */
     private fun bandPixelSigmaInterior(out: Img, ref: Img, dW: Int, dH: Int, bi: Int, marginCells: Int): Float? {
@@ -1569,7 +1569,7 @@ class S5ReproTest {
         )
         sb.append("=== S1/S3 preview mosaic probe (iso=$iso, sensor 192x160) ===\n")
         val fixReports = mutableListOf<String>()
-        // Diagnostic: 1:1 residual σ to cross-check the model against the inline path.
+        // Diagnostic: 1:1 residual sigma to cross-check the model against the inline path.
         val d0 = buildProbeScene(true, false, 0)
         val ref1 = demosaicImage(buildProbeScene(false, false, 0), SENSOR_W, SENSOR_H, 0, 0f, 0f)
         val raw1 = demosaicImage(d0, SENSOR_W, SENSOR_H, 0, 0f, 0f)
@@ -1596,11 +1596,11 @@ class S5ReproTest {
             }
         }
         sb.append(
-            "diag DN flat rawσ=%.2f filterσ=%.2f (n=$nD)\n".format(
+            "diag DN flat rawSig=%.2f filterSig=%.2f (n=$nD)\n".format(
                 kotlin.math.sqrt(sRaw / nD), kotlin.math.sqrt(sFilt / nD)
             )
         )
-        // Mosaic value σ per channel at 1:1 vs zoom-out, on the flat mid band.
+        // Mosaic value sigma per channel at 1:1 vs zoom-out, on the flat mid band.
         for (res in intArrayOf(192, 96, 48)) {
             val resY = (SENSOR_H.toFloat() / (SENSOR_W.toFloat() / res)).toInt()
             val mos = buildS13Mosaic(d0, res, resY, 0.3f, 0.3f)
@@ -1621,7 +1621,7 @@ class S5ReproTest {
                     nC++
                 }
             }
-            val sb2 = StringBuilder("mosaicσ @${res}x")
+            val sb2 = StringBuilder("mosaicSig @${res}x")
             for (p in 0..3) {
                 val m = acc[p] / nC
                 val sd = kotlin.math.sqrt(acc2[p] / nC - m * m)
@@ -1691,7 +1691,7 @@ class S5ReproTest {
                     val rawImg = demosaicImage(noisy, dW, dH, 4, 0f, 0f)
                     val refImg = ref
                     val cl = (SENSOR_CLIP - SENSOR_BLACK).toFloat()
-                    val sbRow = StringBuilder("row residual σ  (near inl raw):")
+                    val sbRow = StringBuilder("row residual sigma  (near inl raw):")
                     for (yy2 in 0 until dH) {
                         var sN = 0.0; var sI = 0.0; var sR = 0.0
                         var n2 = 0L
@@ -1737,7 +1737,7 @@ class S5ReproTest {
                     val baseInt = bandPixelSigmaInterior(demosaicImage(noisy, dW, dH, 4, 0f, 0f), ref, dW, dH, 2, 6)!!
                     if (k >= 3.5f) {
                         // K>=3.5 shipped path: 2x2-tap inline (4 filters/pixel,
-                        // ~52 fetches ≈ the pack).  Fair no-added-noise base is the
+                        // ~52 fetches ~ the pack).  Fair no-added-noise base is the
                         // SAME 2x2-tap structure with filters off.
                         val base2 = renderPreviewInline2x2(noisy, dW, dH, 0f, 0f)
                         val fix2 = renderPreviewInline2x2(noisy, dW, dH, cfg[0], cfg[1])
@@ -1821,14 +1821,14 @@ class S5ReproTest {
      * paper appears at different x-positions per CFA phase.  For phases where
      * the line pixel is isolated (all 12 same-color 2px-lattice neighbours on
      * bright paper), the inline sampleSameColorNR's cold correction fires and
-     * pulls the dark pixel toward the bright iavg — erasing the line in that
+     * pulls the dark pixel toward the bright iavg - erasing the line in that
      * channel.  Other phases see aligned dark neighbours along the line and
-     * are preserved → chromatic artefact.
+     * are preserved -> chromatic artefact.
      *
      * The directional I_D fix corrects toward the smoothest direction's
      * average.  For phases where the line aligns with a lattice direction,
-     * I_D lands on the line (dark) → inside [mn, mx] → correction blocked.
-     * For all-bright phases, I_D is also bright (same as baseline) → line
+     * I_D lands on the line (dark) -> inside [mn, mx] -> correction blocked.
+     * For all-bright phases, I_D is also bright (same as baseline) -> line
      * partially preserved via reduced correction target.
      */
     @Test
@@ -1922,8 +1922,8 @@ class S5ReproTest {
         println("Chroma spread: ${"%.1f".format(chromaSpread * 100)}%")
 
         // The directional fix must reduce chromatic spread vs omni-iavg baseline.
-        // Pre-fix: R gets erased (shifted line) while G/B partially preserved →
-        // chroma spread ~20-50%.  Post-fix: all channels similarly preserved →
+        // Pre-fix: R gets erased (shifted line) while G/B partially preserved ->
+        // chroma spread ~20-50%.  Post-fix: all channels similarly preserved ->
         // spread should be <10%.
         assertTrue(
             "s1 must not create excessive chromatic artefact on thin line " +
@@ -2190,7 +2190,7 @@ class S5ReproTest {
             }
         }
 
-        // All-windows-flagged fallback: a centre defect sits in every ±2 box,
+        // All-windows-flagged fallback: a centre defect sits in every +-2 box,
         // so the gate must fall back to the renormalized stats, not return none.
         val flags2 = Array(9) { BooleanArray(9) }
         flags2[4][4] = true
@@ -2360,7 +2360,7 @@ class S5ReproTest {
     }
 
     // ==================================================================
-    // End-to-end L1: stroke Bayer sensor -> S1 DPC -> demosaic -> S5,
+    // End-to-end: stroke Bayer sensor -> S1 DPC -> demosaic -> S5,
     // scanned over both sliders. Quantifies how much of the stroke loss is
     // S1 vs S5 and the interaction.
     // ==================================================================
@@ -2395,7 +2395,7 @@ class S5ReproTest {
     @Test
     fun thinStrokeFullChainProbe() {
         val sb = StringBuilder()
-        sb.append("=== L1 full chain: S1 -> demosaic -> S5 stroke retention (fg=800/bg=8 DN) ===\n")
+        sb.append("=== End-to-end chain: S1 -> demosaic -> S5 stroke retention (fg=800/bg=8 DN) ===\n")
         sb.append("retention = output (peak-bg)/(fg-bg); demosaic 1:1 (192x160), S5 = final linear blend\n")
         val labels = mapOf(0 to "V", 90 to "H", 45 to "45", 99 to "26deg")
         for (angle in intArrayOf(0, 90, 45, 99)) {
@@ -2600,7 +2600,7 @@ class S5ReproTest {
         return sqrt(dx * dx + dy * dy)
     }
 
-    /** Thin bright "Y": vertical stem + two off-lattice diagonals (slope ±0.5). */
+    /** Thin bright "Y": vertical stem + two off-lattice diagonals (slope +-0.5). */
     private fun onGlyph(x: Float, y: Float, hw: Float = 0.9f): Boolean {
         val stem = segDist(x, y, 95.5f, 80f, 96.5f, 104f)
         val left = segDist(x, y, 95.5f, 80f, 79.5f, 72f)
@@ -2622,7 +2622,7 @@ class S5ReproTest {
     }
 
     /** Shipped inline defect mask (GLSL asdf inlineDefectFlagAt): hot||cold,
-     *  band from the 12-tap alpha-trim iavg, theta coef = 2 — no isolation
+     *  band from the 12-tap alpha-trim iavg, theta coef = 2 - no isolation
      *  cut.  This is exactly what the capture flag texture feeds Stage 5. */
     private fun inlineSceneFlags(sensor: ShortArray, s1: Float): Array<BooleanArray> {
         val flags = Array(SENSOR_H) { BooleanArray(SENSOR_W) }
@@ -2687,7 +2687,7 @@ class S5ReproTest {
 
     /** Capture sigma-hat (axis-min variant, rgbMode=true): min over the 4 axes
      *  of the squared pair-difference /2, times 2.1981, per channel mean, onto
-     *  the ISO-model floor — mirror of SigmaHatShaderProgram (capture branch). */
+     *  the ISO-model floor - mirror of SigmaHatShaderProgram (capture branch). */
     private fun madSigma2DnAxisCapture(img: Img, whiteRange: Float): Array<FloatArray> {
         val w = img.w
         val h = img.h
@@ -2803,7 +2803,7 @@ class S5ReproTest {
             CAPTURE_WIN_SCALE, CAPTURE_EPS_BOOST, ROUND2_EPS_MULT)
     }
 
-    /** Glyph pixels (output lattice) that fell dark — the chew/invasion set. */
+    /** Glyph pixels (output lattice) that fell dark - the chew/invasion set. */
     private fun chewMask(img: Img, hw: Float): Array<BooleanArray> {
         val m = Array(SENSOR_H) { BooleanArray(SENSOR_W) }
         for (y in 0 until SENSOR_H) for (x in 0 until SENSOR_W) {
@@ -2840,7 +2840,7 @@ class S5ReproTest {
     }
 
     /** Grid-aligned 2x2 glyph cells whose mean luma drop vs the reference
-     *  exceeds a threshold — the contiguous "dark block" the user reports,
+     *  exceeds a threshold - the contiguous "dark block" the user reports,
      *  robust to the hard-dark threshold boundary. */
     private fun blocky2x2Drop(img: Img, ref: Img, hw: Float, thresh: Float = 0.15f): Int {
         var n = 0

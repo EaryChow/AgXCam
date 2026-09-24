@@ -6,7 +6,7 @@ package com.agx.camera.gpu
  * All passes operate on the demosaic output grid ("sparse Bayer grid"): each
  * output texel covers one 2x2 sensor cell and carries the four CFA phases in
  * R/G/B/A. This is the SAME indexing contract the placeholder denoiser used
- * (C3 constraint) — no second indexing system is introduced anywhere.
+ * - no second indexing system is introduced anywhere.
  */
 object DenoiseGlsl {
 

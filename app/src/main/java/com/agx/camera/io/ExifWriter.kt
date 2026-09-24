@@ -39,7 +39,7 @@ object ExifWriter {
         if (jpegData.size < 2 ||
             (jpegData[0].toInt() and 0xFF) != 0xFF ||
             (jpegData[1].toInt() and 0xFF) != 0xD8) {
-            Log.e(TAG, "Not a valid JPEG — cannot write EXIF")
+            Log.e(TAG, "Not a valid JPEG - cannot write EXIF")
             return
         }
 

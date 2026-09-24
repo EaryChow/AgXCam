@@ -85,7 +85,7 @@ class CriticalBlinkControllerTest {
         }
         controller.start()
         controller.stop()
-        // start shows (true), stop hides (false) — exactly those two flips.
+        // start shows (true), stop hides (false) - exactly those two flips.
         assertEquals(listOf(true, false), visibilityChanges)
         assertFalse(visibility)
 

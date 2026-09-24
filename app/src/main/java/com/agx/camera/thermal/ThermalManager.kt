@@ -15,11 +15,11 @@ import kotlin.math.exp
  * Thermal gatekeeper for the camera app.
  *
  * Fixed thresholds (Celsius): WARM = 38, HOT = 40, CRITICAL = 42. These are
- * no longer shifted by the torch — high temperature is dangerous for the
+ * no longer shifted by the torch - high temperature is dangerous for the
  * battery regardless of what the camera is doing.
  *
  * ---------------------------------------------------------------------------
- * FUTURE VIDEO MODE (not yet implemented — this comment is a contract, not a
+ * FUTURE VIDEO MODE (not yet implemented - this comment is a contract, not a
  * promise that the code below handles video):
  *  - Starting a recording while in WARM: the session is capped at 720p30.
  *  - Recording started in NORMAL that warms up mid-recording: drop the
@@ -41,7 +41,7 @@ import kotlin.math.exp
  *
  * Two values are tracked:
  *  - the RAW battery temperature is what the UI displays ("right now it is
- *    38.4°C" — the user wants the honest current number);
+ *    38.4 deg C" - the user wants the honest current number);
  *  - the SMOOTHED value is what drives state transitions (stable level).
  *
  * The smoothing window must never be smaller than the real sample cadence of
@@ -72,7 +72,7 @@ class ThermalManager(context: Context) {
     // --- Throughput throttling knobs consumed by the camera/render layers ---
     // These are the ONLY knobs thermal policy may move: frame rate and output
     // resolution. Exposure semantics (shutter, ISO, compensation) are never
-    // touched — in manual mode the user's exposure settings always win.
+    // touched - in manual mode the user's exposure settings always win.
     // Thermal policy only moves throughput (fps, resolution), never imaging
     // semantics: when it gets hot the viewfinder gets laggy/blurry, but the
     // exposure always obeys the user.
@@ -307,7 +307,7 @@ class ThermalManager(context: Context) {
         if (resolved != currentState) {
             val prev = currentState
             currentState = resolved
-            Log.d(TAG, "Thermal state: $prev -> $currentState (battery=${judged}°C raw=${raw}°C torch=$isTorchActive)")
+            Log.d(TAG, "Thermal state: $prev -> $currentState (battery=${judged}C raw=${raw}C torch=$isTorchActive)")
             onStateChanged?.invoke(currentState)
         }
 
@@ -317,7 +317,7 @@ class ThermalManager(context: Context) {
     }
 
     private fun enforceTorchPolicy(state: State) {
-        // Protection off: the torch is the user's to manage — no duration cap
+        // Protection off: the torch is the user's to manage - no duration cap
         // and no forced-off, at any temperature.
         if (!thermalProtectionEnabled) return
         if (!isTorchActive) return

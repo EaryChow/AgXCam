@@ -7,9 +7,9 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 /**
- * Stage 3 — RAW-domain pre-denoise (ISO-driven), green-guided guided filter on
- * the sparse Bayer grid (plan §3 Stage 3). Replaces the placeholder Gaussian
- * kernel; retains the placeholder's shell + C3 indexing contract (one output
+ * Stage 3 - RAW-domain pre-denoise (ISO-driven), green-guided guided filter on
+ * the sparse Bayer grid (Stage 3). Replaces the placeholder Gaussian
+ * kernel; retains the placeholder's shell + indexing contract (one output
  * texel per 2x2 sensor cell, four phases in RGBA, RGBA32F).
  *
  * Input:  sparse grid RGBA32F (black level already subtracted, clamped >= 0).
@@ -21,7 +21,7 @@ import java.nio.FloatBuffer
  * The guide is the green channel (highest sampling / SNR): guide value at every
  * texel = mean of the two green phases of that texel. A guided-filter window
  * (5x5 same-CFA lattice, radius 2) per phase produces coefficients
- * a = cov(I,G)/(var(G)+ε), b = meanI − a·meanG, output = a·g0 + b with g0 the
+ * a = cov(I,G)/(var(G)+epsilon), b = meanI - a*meanG, output = a*g0 + b with g0 the
  * guide at the centre.
  */
 class RawDenoiseShaderProgram {

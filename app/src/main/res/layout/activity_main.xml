@@ -325,7 +325,7 @@
         android:textSize="13sp"
         android:visibility="gone" />
 
-    <!-- Bottom Controls — compact, no overlap -->
+    <!-- Bottom Controls - compact, no overlap -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -525,7 +525,7 @@
         android:clickable="true"
         android:focusable="true" />
 
-    <!-- ISO Popup — fixed center dot + scrolling number strip, positioned dynamically above label -->
+    <!-- ISO Popup - fixed center dot + scrolling number strip, positioned dynamically above label -->
     <FrameLayout
         android:id="@+id/iso_popup"
         android:layout_width="88dp"
@@ -546,7 +546,7 @@
             android:layout_gravity="center" />
     </FrameLayout>
 
-    <!-- Shutter Popup — fixed center dot + scrolling number strip, positioned dynamically above label -->
+    <!-- Shutter Popup - fixed center dot + scrolling number strip, positioned dynamically above label -->
     <FrameLayout
         android:id="@+id/shutter_popup"
         android:layout_width="88dp"
@@ -567,7 +567,7 @@
             android:layout_gravity="center" />
     </FrameLayout>
 
-    <!-- Post-Processing EV Popup — fixed center dot + scrolling number strip, sibling of ISO/shutter -->
+    <!-- Post-Processing EV Popup - fixed center dot + scrolling number strip, sibling of ISO/shutter -->
     <FrameLayout
         android:id="@+id/ev_pp_popup"
         android:layout_width="88dp"
@@ -588,7 +588,7 @@
             android:layout_gravity="center" />
     </FrameLayout>
 
-    <!-- Focus Popup (MF) — fixed center dot + scrolling focus-distance strip, same style as ISO -->
+    <!-- Focus Popup (MF) - fixed center dot + scrolling focus-distance strip, same style as ISO -->
     <FrameLayout
         android:id="@+id/focus_popup"
         android:layout_width="88dp"

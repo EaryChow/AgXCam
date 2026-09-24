@@ -50,7 +50,7 @@ class RawMetadataParser(
         val pattern = characteristics.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN)
             ?: throw IllegalStateException("SENSOR_BLACK_LEVEL_PATTERN unavailable")
         // phase = (x%2)+(y%2)*2 maps directly to spatial indices [TL,TR,BL,BR],
-        // matching the Android API's row-major order. No CFA reordering needed (§6).
+        // matching the Android API's row-major order. No CFA reordering needed.
         blackLevelPattern = IntArray(4) { pattern.getOffsetForIndex(it % 2, it / 2) }
 
         val cfa = characteristics.get(CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT)
@@ -98,7 +98,7 @@ class RawMetadataParser(
             null
         } ?: return null
 
-        // Dimensions come from the map object itself — the informational
+        // Dimensions come from the map object itself - the informational
         // LENS_INFO_SHADING_MAP_SIZE characteristic is absent on some OEM
         // devices even when the per-frame map is delivered.
         val rows = map.getRowCount()

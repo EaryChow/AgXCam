@@ -69,7 +69,7 @@ class Camera2Manager(private val context: Context) {
     private var ccLogCount = 0
 
     // Lens shading (vignette) correction. The HAL is asked to compute the
-    // per-frame lens-shading map statistic on every request (§15.1); the first
+    // per-frame lens-shading map statistic on every request; the first
     // valid non-identity map is pushed to the renderer, and refreshed at a low
     // rate in case the HAL updates it with focus distance. The callback carries
     // RGBA16F half-float pixels already permuted per CFA and Y-flipped, ready
@@ -80,7 +80,7 @@ class Camera2Manager(private val context: Context) {
     private var lsmFrameCount = 0
     private var lsmLogCount = 0
     // The static SENSOR_INFO_LENS_SHADING_APPLIED characteristic: TRUE means
-    // this HAL bakes shading into RAW by default — which is why the per-frame
+    // this HAL bakes shading into RAW by default - which is why the per-frame
     // map is null/identity unless we also request applied=FALSE on each request
     // (see applyLensShadingMapMode). Informational/logging only.
     private var staticLensShadingApplied = false
@@ -528,7 +528,7 @@ class Camera2Manager(private val context: Context) {
     private fun chooseFpsRange(fps: Int): Range<Int>? {
         if (availableFpsRanges.isEmpty()) return null
         // NOTE: on devices whose smallest offered range is well above the cap
-        // (e.g. only (30,30)), the "nearest" fallback means no real throttle —
+        // (e.g. only (30,30)), the "nearest" fallback means no real throttle -
         // accepted best effort. SENSOR_FRAME_DURATION is the reliable lever in
         // manual/RAW (AE OFF) mode, which is this app's primary path.
         return availableFpsRanges.firstOrNull { it.lower == fps && it.upper == fps }
@@ -680,7 +680,7 @@ class Camera2Manager(private val context: Context) {
     // --- SCALER_CROP_REGION zoom ---
     //
     // The HAL never receives SCALER_CROP_REGION on the repeating preview
-    // request — zoom is applied purely in the RAW/DNG pipeline while the HAL
+    // request - zoom is applied purely in the RAW/DNG pipeline while the HAL
     // always stays full-frame. On this device, an active crop on the repeating
     // request makes the HAL ignore tap AF regions and lock the full-frame
     // dominant (near) subject. Our GL preview already zooms the RAW itself, so
@@ -718,7 +718,7 @@ class Camera2Manager(private val context: Context) {
 
     /** Ask the HAL to (a) run ISP shading so it emits a stats map, and
      *  (b) leave the RAW uncorrected and hand back the real per-frame map,
-     *  which we apply ourselves (§15.1).
+     *  which we apply ourselves.
      *
      *  Most OEM HALs (incl. this Xiaomi) bake lens shading into RAW by default
      *  (SENSOR_INFO_LENS_SHADING_APPLIED=true) and then report a null/identity
@@ -886,7 +886,7 @@ class Camera2Manager(private val context: Context) {
      *
      * No stopRepeating and no one-shot continuation chain: those serialized
      * captures dropped preview frames (~130 ms gaps, choppy) and this HAL never
-     * reported a terminal state inside the one-shot chain — it stayed
+     * reported a terminal state inside the one-shot chain - it stayed
      * ACTIVE_SCAN through all continuations, so every tap hit the timeout path.
      * The in-flight scan only settles once the AUTO + region + TRIGGER_IDLE
      * repeating request is re-armed, so the repeating stream is the right home
@@ -896,7 +896,7 @@ class Camera2Manager(private val context: Context) {
      * TRIGGER_START is present (one-shot, first frame only), so it cannot
      * autonomously re-sweep like CONTINUOUS + regions did (the frame-stall
      * regression). TRIGGER_IDLE holds the settle without aborting an in-flight
-     * scan — the HAL finishes the current sweep and then locks.
+     * scan - the HAL finishes the current sweep and then locks.
      */
     private fun triggerRegionFocus(rect: MeteringRectangle) {
         if (isManualExposure || focusLocked) return
@@ -1551,10 +1551,10 @@ CaptureRequest.CONTROL_AWB_MODE_SHADE -> "SHADE"
             }
 
             // Lens shading map: the map arrives as a per-frame statistic. Parse
-            // it as soon as the HAL produces one, then refresh at a low rate —
+            // it as soon as the HAL produces one, then refresh at a low rate -
             // it is static per lens on most devices, but some HALs update it
             // with focus distance. A non-identity map is pushed to the renderer
-            // (identity maps are treated as "unavailable" per §15.1).
+            // (identity maps are treated as "unavailable").
             lsmFrameCount++
             if (lsmParser == null) {
                 cameraCharacteristics?.let { chars ->

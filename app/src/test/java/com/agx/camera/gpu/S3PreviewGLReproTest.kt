@@ -26,14 +26,14 @@ private val SENSOR_H2 = 96
  *     sparse mosaic feeds the demosaic only at k<=2.  Within that range the
  *     DPC+GF chain (runDpcAndGfChain, spec-accurate S1/S3) produces the mosaic
  *     when the DPC shaders are ready, else the S3_PACK fallback (drawS3Pack)
- *     when they are not — this mirror models exactly that fallback.  At k>2
+ *     when they are not - this mirror models exactly that fallback.  At k>2
  *     the mosaic is NOT used at all: drawDemosaic runs the inline per-sample
  *     sampleSameColorNR (which reads raw sensor values at any zoom and catches
  *     hot pixels), with dpStrength/rawNrStrength passed through.  The mosaic
  *     read is a manual 4-tap texelFetch bilinear (GL_LINEAR is ILLEGAL on
  *     RGBA32F in ES 3.0; the device silently fell back to NEAREST, so the
  *     per-texel quantized phase estimates showed up as the "magenta mosaic"
- *     (zoom-in) and "more noise" (zoom-out) — the read is now format-safe).
+ *     (zoom-in) and "more noise" (zoom-out) - the read is now format-safe).
  *     The shader-side k>=16 inline defer is subsumed by the k>2 gate in the
  *     live path and is modelled for completeness only.
  *
@@ -43,8 +43,8 @@ private val SENSOR_H2 = 96
  *       - DEMOSAIC inline mirrors (denoisedDualRing, and demosaicAtRGB /
  *         demosaicSample -> sameColorNR default dpThetaCoef=2f) keep theta=2+2s,
  *         matching the deployed DEMOSAIC_FRAGMENT_SHADER.
- *     S5ReproTest's demosaicImage is the other inline-demosaic mirror; see
- *     additions doc §5.1.
+ *     S5ReproTest's demosaicImage is the other inline-demosaic mirror;
+ *     it is a standalone full-image mirror of the same inline path.
  *
  * Asserts the two user-visible invariants headlessly before any APK handover:
  *   (a) a non-zero slider NEVER adds noise (gNoise(s1|s3) <= gNoise(0) );
@@ -61,13 +61,13 @@ class S3PreviewGLReproTest {
     private val BA_COLOR_MAP = intArrayOf(0, 1, 1, 2)
     private val CLIP_SCALAR = (SENSOR_CLIP - SENSOR_BLACK).toFloat()
 
-    /** Mask knee: flat-branch "structure vs measured σ̂" threshold multiple (probe-only). */
+    /** Mask knee: flat-branch "structure vs measured sigma_hat" threshold multiple. */
     private var maskK = 3.0f
 
-    /** Mode-3 regional flat-pull ω band: ω = clamp((ratio-lo)/(hi-lo),0,1).
-     *  lo=1.5 sits at the pure-noise p95 (1.48) so noise keeps ω≈0 (bit-identical
-     *  iavg pull); hi=2.5 is past the bulk of both foliage and line ratios.
-     *  See the module comment. */
+/** Mode-3 regional flat-pull omega band: omega = clamp((ratio-lo)/(hi-lo),0,1).
+ *  lo=1.5 sits at the pure-noise p95 (1.48) so noise keeps omega~0 (bit-identical
+ *  iavg pull); hi=2.5 is past the bulk of both foliage and line ratios.
+ *  See the module comment. */
     private var omegaLo = 1.5f
     private var omegaHi = 2.5f
 
@@ -100,12 +100,12 @@ class S3PreviewGLReproTest {
         return m
     }
 
-    /** Mirror of the Stage-2 σ̂ pass (SigmaHatShaderProgram FRAGMENT_SHADER),
-     *  evaluated from the RAW sensor values: per-CFA-phase MAD over the 8
-     *  same-phase neighbouring cells (grid offsets ±1, clamped), mean over
-     *  phases, floored at the ISO-model signal curve.  A masked S3 experiment
-     *  re-keys the flat/structure decision on this measured noise instead of
-     *  the under-reporting model σ. */
+/** Mirror of the Stage-2 sigma_hat pass (SigmaHatShaderProgram FRAGMENT_SHADER),
+ *  evaluated from the RAW sensor values: per-CFA-phase MAD over the 8
+ *  same-phase neighbouring cells (grid offsets +-1, clamped), mean over
+ *  phases, floored at the ISO-model signal curve.  The masked S3 mode
+ *  re-keys the flat/structure decision on this measured noise instead of
+ *  the under-reporting model sigma. */
     private fun sigmaHatAt(v: ShortArray, sx: Int, sy: Int): Float {
         val cellsW = SW / 2
         val cellsH = SH / 2
@@ -138,10 +138,10 @@ class S3PreviewGLReproTest {
         return sqrt(max(out2, 1.0e-6f))
     }
 
-    /** max |mean(nb cell) − mean(center cell)| over the 8 surrounding cells —
-     *  a coarse (region-level) structure measure: on pure noise it collapses as
-     *  σ/√N and its max-over-8 tail is bounded, on texture it tracks the
-     *  structure that spans blocks. */
+/** max |mean(nb cell) - mean(center cell)| over the 8 surrounding cells -
+ *  a coarse (region-level) structure measure: on pure noise it collapses as
+ *  sigma/sqrt N and its max-over-8 tail is bounded, on texture it tracks the
+ *  structure that spans blocks. */
     private fun coarseDevAt(v: ShortArray, sx: Int, sy: Int): Float {
         val cellsW = SW / 2
         val cellsH = SH / 2
@@ -162,15 +162,15 @@ class S3PreviewGLReproTest {
         return m
     }
 
-    /** Literal GL sampleSameColorNR (12-tap a-trim + DPC guard + S3 clip blend + directional I_D).
-     *  At nrRadius<4 mirrors the preview-only 4-tap (step-2 axis neighbours)
-     *  used when the demosaic box stays 4x4; capture/box<4 keep the 12-tap.
-     *  maskSigma (measurement only, not shipped) re-keys the flat/structure
-     *  threshold on the measured σ̂ so the "noisy region" mask can be probed.
-     *  `dpThetaCoef` selects the DPC threshold interpolation: 2f (default)
-     *  mirrors the DEMOSAIC inline forms (sampleSameColorNRRing / the 4-tap
-     *  inline branch, θ=2+2s), 4f mirrors the S3_PACK sampleSameColorNR
-     *  (θ=2+4s, the unified grid/pack mapping); see additions doc §5. */
+/** Literal GL sampleSameColorNR (12-tap a-trim + DPC guard + S3 clip blend + directional I_D).
+ *  At nrRadius<4 mirrors the preview-only 4-tap (step-2 axis neighbours)
+ *  used when the demosaic box stays 4x4; capture/box<4 keep the 12-tap.
+ *  maskSigma (measurement only, not shipped) re-keys the flat/structure
+ *  threshold on the measured sigma_hat so the "noisy region" mask can be probed.
+ *  `dpThetaCoef` selects the DPC threshold interpolation: 2f (default)
+ *  mirrors the DEMOSAIC inline forms (sampleSameColorNRRing / the 4-tap
+ *  inline branch, theta=2+2s), 4f mirrors the S3_PACK sampleSameColorNR
+ *  (theta=2+4s, the unified grid/pack mapping). */
     private fun sameColorNR(v: ShortArray, sx: Int, sy: Int, s1: Float, s3: Float, nrRadius: Int = 4, mode: Int = 0, mCoarse: Float? = null, dpThetaCoef: Float = 2f): Float {
         val c = sensorVal(v, sx, sy)
         if (s1 <= 0f && s3 <= 0f) return c
@@ -263,17 +263,17 @@ class S3PreviewGLReproTest {
                 }
             }
         }
-        // Similarity-weighted (bilateral) S3 blend — mirror of the GLSL.
+        // Similarity-weighted (bilateral) S3 blend - mirror of the GLSL.
         // Full weight within 2.5*sigma of the corrected centre, taper to zero
         // by 5*sigma; the pull stays at 0.98*s3 (weights carry the edge protection).
         // See the GLSL for rationale.
         // maxNb is the structure detector: flat noise (maxNb <= 6*sigma_model)
-        // keeps the robust α-trim pull (bit-identical to the baseline S3, so
+        // keeps the robust alpha-trim pull (bit-identical to the baseline S3, so
         // the monotonicity gate can't pop on the noisy flat scene, where the
         // minDev window would collapse to ~0 in its low tail and starve the
         // denoising); a real edge/line (maxNb > 6*sigma_model) switches to the
         // weight window keyed on sg = max(sigma, 6*minDev), the smallest axis
-        // deviation, which stays at the noise floor along a feature — the
+        // deviation, which stays at the noise floor along a feature - the
         // cross-line taps land outside the window and the line is protected.
         var bavg = iavg
         if (nrRadius >= 4) {
@@ -281,32 +281,32 @@ class S3PreviewGLReproTest {
             val flatLimit = if (mode == 1) maskK * sigmaHatAt(v, sx, sy) else 6.0f * sigma
             if (maxNb <= flatLimit) {
                 if (mode == 2) {
-                    // Directional flat target (probe): see the module comment —
-                    // dead end: the noise minDev/maxNb tail overlaps a line's
-                    // band, so any ω>0 bleeds onto noise and pops the boxAA step.
+                    // Directional flat target: see the module comment -
+                    // not pursued: the noise minDev/maxNb tail overlaps a line's
+                    // band, so any omega>0 bleeds onto noise and pops the boxAA step.
                     val r = if (maxNb > 1e-6f) minDev / maxNb else 1f
                     val omega = ((0.95f - r) / (0.95f - 0.75f)).coerceIn(0f, 1f)
                     bavg = iavg + (iDir - iavg) * omega
                 } else if (mode == 3) {
-                    // Regional (coarse/fine) flat target: the ω band slides with
+                    // Regional (coarse/fine) flat target: the omega band slides with
                     // omegaLo/omegaHi so the pure-noise tail (gate p95=1.48) can
-                    // be excluded (ω=0 -> bit-identical iavg pull) while foliage
-                    // texture (80% >= 1.5) keeps ω=1.  See the module comment.
+                    // be excluded (omega=0 -> bit-identical iavg pull) while foliage
+                    // texture (80% >= 1.5) keeps omega=1.  See the module comment.
                     // mCoarse is the per-output-pixel coarse dev threaded from
-                    // renderPreview (one read per fragment); null (probe sites)
-                    // falls back to the per-sample read.
+                    // renderPreview (one read per fragment); null falls back
+                    // to the per-sample read.
                     val ratio = if (maxNb > 1e-6f) (mCoarse ?: coarseDevAt(v, sx, sy)) / maxNb else 2f
                     val omega = ((ratio - omegaLo) / (omegaHi - omegaLo)).coerceIn(0f, 1f)
                     bavg = iavg + (iDir - iavg) * omega
                 } else if (mode == 4) {
-                    // Constant directional flat pull (probe): no discriminator at
-                    // all — the flat branch blends the α-trim target toward the
+                    // Constant directional flat pull: no discriminator at
+                    // all - the flat branch blends the alpha-trim target toward the
                     // along-feature pair mean iDir by a fixed 0.5.  On a line
                     // iDir tracks the feature (pull loses the off-line taps so the
-                    // line is preserved); on isotropic noise iDir ≈ iavg (both are
+                    // line is preserved); on isotropic noise iDir ~ iavg (both are
                     // trimmed means of the same taps) so the pull is nearly a no-op
                     // and the gate margin should hold.  If it does, this is the
-                    // shippable answer: no σ̂, no extra pass, no discriminator.
+                    // selected approach: no sigma_hat, no extra pass, no discriminator.
                     bavg = iavg + (iDir - iavg) * 0.5f
                 } else {
                     // flat patch: bit-identical to the baseline robust pull
@@ -399,7 +399,7 @@ class S3PreviewGLReproTest {
     // only when previewZoomK <= 2.0.  The DPC+GF chain (needSparseGrid) takes
     // priority inside that range; the S3_PACK fallback this test mirrors runs
     // only when the DPC/rawDenoise shaders are not ready.  Beyond k=2 the
-    // device never uses the mosaic — the demosaic's inline per-sample
+    // device never uses the mosaic - the demosaic's inline per-sample
     // sampleSameColorNR carries S1/S3 instead.
     private fun packActive(v: View): Boolean = v.k <= 2f
 
@@ -416,7 +416,7 @@ class S3PreviewGLReproTest {
     }
 
     /** Box-AA base offset: even boxes (2) start at the pixel, odd/large (3,4)
-     *  start at the left/top neighbour — mirrors demosaicBilinear. */
+     *  start at the left/top neighbour - mirrors demosaicBilinear. */
     private fun boxBase(sv: Float, box: Int): Int {
         val baseOff = if (box >= 3) -1 else 0
         return kotlin.math.floor(sv).toInt() + baseOff
@@ -487,9 +487,9 @@ class S3PreviewGLReproTest {
             }
             // A small footprint whose every present phase box-mean sits at clip
             // is an all-hot cluster (or a sub-quad highlight): the mn==mx
-            // degenerate makes boxedBlend a no-op, so DPC each phase cell
+// degenerate makes boxedBlend a no-op, so DPC each phase cell
             // individually through the anchored per-phase filter (same as the
-            // 1-cell path) instead — removes the cluster exactly as the inline
+            // 1-cell path) instead - removes the cluster exactly as the inline
             // path would (mirrors the shader).
             var allClip = true
             for (p in 0..3) if (pN[p] > 0 && pSum[p] / pN[p] < CLIP_SCALAR) allClip = false
@@ -617,7 +617,7 @@ class S3PreviewGLReproTest {
         return acc
     }
 
-    /** Host-side σ-gate mirror of previewNrRadius: the inline neighbourhood
+    /** Host-side sigma-gate mirror of previewNrRadius: the inline neighbourhood
      *  filter drops to the 4-tap ring only where the demosaic box stays 4x4
      *  (the box supplies the steady averaging there); the 2x2 box keeps the
      *  full 12-tap.  Keep in sync with the host. */
@@ -673,18 +673,18 @@ class S3PreviewGLReproTest {
         }
     }
 
-    /** Dual-ring same-colour sample (mirror of the GLSL denoisedDualRing used by
-     *  the fused smooth-box path): computes BOTH the ring-2 sample (lo, the 4x4
-     *  box side) and the ring-4 sample (hi, the 2x2 box side) from one tap set.
-     *  Each result must be bit-identical to a standalone sameColorNR call at its
-     *  ring — the packed 4x4 ring-2 box's middle four cells are exactly the 2x2
-     *  ring-4 box, so the fusion removes those four redundant re-evaluations per
-     *  fragment without touching the output.  Arithmetic is copied verbatim from
-     *  sameColorNR's two ring branches (hi with mode 3 = the shipped regional
-     *  pull), including the DPC θ mapping: the deployed denoisedDualRing lives in
-     *  DEMOSAIC_FRAGMENT_SHADER (the inline fused smooth-box), so both bands keep
-     *  θ=2+2s here — the S3_PACK mirror is the separate boxedBlend/sameColorNR
-     *  (dpThetaCoef=4f) path; see additions doc §5. */
+/** Dual-ring same-colour sample (mirror of the GLSL denoisedDualRing used by
+ *  the fused smooth-box path): computes BOTH the ring-2 sample (lo, the 4x4
+ *  box side) and the ring-4 sample (hi, the 2x2 box side) from one tap set.
+ *  Each result must be bit-identical to a standalone sameColorNR call at its
+ *  ring - the packed 4x4 ring-2 box's middle four cells are exactly the 2x2
+ *  ring-4 box, so the fusion removes those four redundant re-evaluations per
+ *  fragment without touching the output.  Arithmetic is copied verbatim from
+ *  sameColorNR's two ring branches (hi with mode 3 = the shipped regional
+ *  pull), including the DPC theta mapping: the deployed denoisedDualRing lives in
+ *  DEMOSAIC_FRAGMENT_SHADER (the inline fused smooth-box), so both bands keep
+ *  theta=2+2s here - the S3_PACK mirror is the separate boxedBlend/sameColorNR
+ *  (dpThetaCoef=4f) path. */
     private fun denoisedDualRing(
         v: ShortArray, sx: Int, sy: Int,
         s1: Float, s3: Float, mCoarse: Float?
@@ -893,7 +893,7 @@ class S3PreviewGLReproTest {
                 val baseY4 = boxBase(svY, 4)
                 // One coarse dev per output pixel, read once at the box centre
                 // (mirror of demosaicBilinear's per-fragment mCoarse).  Shared
-                // by both smooth sub-boxes — this is the S3 perf fix.
+                // by both smooth sub-boxes - this is the S3 perf fix.
                 val mc = coarseDevAt(scene, (base4 + 2).coerceIn(0, SW - 1), (baseY4 + 2).coerceIn(0, SH - 1))
                 var sum4 = floatArrayOf(0f, 0f, 0f)
                 for (dy in 0 until 4) for (dx in 0 until 4) {
@@ -949,7 +949,7 @@ class S3PreviewGLReproTest {
         return out
     }
 
-    /** Smoothstep 0..1 across s3 in [0.65, 0.75] — the box-2 blend weight. */
+    /** Smoothstep 0..1 across s3 in [0.65, 0.75] - the box-2 blend weight. */
     private fun boxMixW(s3: Float): Float {
         val t = ((s3 - 0.65f) / 0.10f).coerceIn(0f, 1f)
         return t * t * (3f - 2f * t)
@@ -1148,7 +1148,7 @@ class S3PreviewGLReproTest {
 
                 if (scene == "flatNoise") {
                     // Invariant (a): a non-zero slider never adds preview noise.
-                    // Only valid on a noisy flat field — S1/S3 denoise, so any
+                    // Only valid on a noisy flat field - S1/S3 denoise, so any
                     // growth in the green SD is an added-noise regression.
                     assertTrue(
                         "gNoise grew with sliders at grid=${cfg.grid} crop=${cfg.cropW} mirror=${cfg.mirror} " +
@@ -1162,7 +1162,7 @@ class S3PreviewGLReproTest {
                         m[0] <= m0[0] * 1.5f + 0.02f
                     )
                 }
-                // redBlue stays a print-only diagnostic: its colour boundary
+                // redBlue stays a reporting-only diagnostic: its colour boundary
                 // legitimately warps local chroma, so SD/magErr are not
                 // interpretable as artifact metrics there.
             }
@@ -1176,7 +1176,7 @@ class S3PreviewGLReproTest {
      * with the smooth box active (the k>2 inline regime blends the 4x4+nr2
      * mean toward the 2x2+nr4 mean by smoothstep(s3,0.65,0.75)), each output
      * band's sigma must stay AT OR BELOW the zero-slider baseline (boxAA=4).
-     * Any single band above baseline rejects the deployed demosaic — the
+     * Any single band above baseline rejects the deployed demosaic - the
      * effective averaging must never get weaker than baseline at any strength.
      */
     @Test
@@ -1234,7 +1234,7 @@ class S3PreviewGLReproTest {
      * the dual sample must be bit-identical to the two standalone ring-2 /
      * ring-4 demosaicAt calls it replaces, at exactly the mid-box positions
      * the smooth blend visits.  This is what makes the fusion
-     * output-invariant — the redundant 4-of-20 per-fragment re-evaluations of
+     * output-invariant - the redundant 4-of-20 per-fragment re-evaluations of
      * the k>2 smooth path are removed, nothing else changes.
      */
     @Test
@@ -1306,13 +1306,13 @@ class S3PreviewGLReproTest {
         )
     }
 
-    /**
-     * Diagnostic: which box size is safely reachable at every (s1, s3)?
-     * Prints, for each combo, the smallest box whose per-band sigma stays at
-     * or below the zero-slider baseline (the strict gate).  This is the table
-     * that the host previewBoxAA mapping must be derived from — print-only,
-     * no assertion.
-     */
+/**
+ * Which box size is safely reachable at every (s1, s3)?
+ * Prints, for each combo, the smallest box whose per-band sigma stays at
+ * or below the zero-slider baseline (the strict gate).  This is the table
+ * that the host previewBoxAA mapping must be derived from - reporting-only,
+ * no assertion.
+ */
     @Test
     fun probeBoxAAWindow() {
         val scene = buildFlatNoise(17, 460f, 28f)
@@ -1351,16 +1351,16 @@ class S3PreviewGLReproTest {
         }
     }
 
-    /**
-     * Diagnostic: monotonicity of per-band sigma as each slider rises, at
-     * every zoom level (pack regime k<=2 AND inline regime k>2).  Walks s3 at
-     * fixed s1 and flags any band that pops above the previous (weaker)
-     * slider value.  Silently also home the first step (s3 from baseline, so
-     * the origin bound is covered too).  `variant`: "shipped" uses the host
-     * mapping; "box4" forces boxAA=4 + 4-tap ring at every strength (the box
-     * keeps carrying the averaging, so sigma should move strictly down).
-     * Print-only.
-     */
+/**
+ * Monotonicity of per-band sigma as each slider rises, at
+ * every zoom level (pack regime k<=2 AND inline regime k>2).  Walks s3 at
+ * fixed s1 and flags any band that pops above the previous (weaker)
+ * slider value.  Silently also home the first step (s3 from baseline, so
+ * the origin bound is covered too).  `variant`: "shipped" uses the host
+ * mapping; "box4" forces boxAA=4 + 4-tap ring at every strength (the box
+ * keeps carrying the averaging, so sigma should move strictly down).
+ * Reporting-only.
+ */
     @Test
     fun probeSliderMonotonicity() {
         val scene = buildFlatNoise(29, 460f, 28f)
@@ -1393,7 +1393,7 @@ class S3PreviewGLReproTest {
                     else -> 0
                 }
                 val smooth = variant == "smooth0" || variant == "smooth3"
-                var maxDelta = 0f   // max |band sigma(mode) − band sigma(shipped)| over the walk
+                var maxDelta = 0f   // max |band sigma(mode) - band sigma(shipped)| over the walk
                 println("-- variant=$variant")
                 for (s1 in s1s) {
                     var prev = sd0.copyOf()
@@ -1479,20 +1479,20 @@ class S3PreviewGLReproTest {
         runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("smooth3"), mirror = true, gateTol = 0.0004f)
     }
 
-    /**
-     * Experiment: re-key the S3 flat/structure threshold on the MEASURED σ̂
-     * (the "only denoise noisy regions" mask) instead of the under-reporting
-     * model σ.  On the gate scene σ̂ measures the real noise (~16), so with
-     * K chosen above the pure-noise maxNb tail the flat branch keeps the full
-     * α-trim pull and the gate must hold identically to "shipped".  Prints σ̂
-     * stats so the tail landing can be checked.
-     */
+/**
+ * Probe: re-key the S3 flat/structure threshold on the MEASURED sigma_hat
+ * (the "only denoise noisy regions" mask) instead of the under-reporting
+ * model sigma.  On the gate scene sigma_hat measures the real noise (~16),
+ * so with K chosen above the pure-noise maxNb tail the flat branch keeps
+ * the full alpha-trim pull and the gate must hold identically to "shipped".
+ * Prints sigma_hat stats so the tail landing can be checked.
+ */
     @Test
     fun probeNoiseMaskMonotonicity() {
         val scene = buildFlatNoise(29, 460f, 28f)
         val s1s = listOf(0f, 0.3f, 0.6f)
         val s3s = listOf(0f, 0.1f, 0.15f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f)
-        // σ̂ stats over the gate scene, once, for knee calibration.
+        // sigma_hat stats over the gate scene, once, for knee calibration.
         val shs = FloatArray(2000)
         var n = 0
         for (y in 8 until SH - 8) for (x in 8 until SW - 8) { if (n < 2000) shs[n++] = sigmaHatAt(scene, x, y) }
@@ -1511,8 +1511,8 @@ class S3PreviewGLReproTest {
         println("minDev/maxNb gate scene: p50=%.3f p90=%.3f p95=%.3f p99=%.3f".format(
             rs[rn / 2], rs[rn * 9 / 10], rs[rn * 95 / 100], rs[rn * 99 / 100]))
         // r2 = coarseDev/maxNb (regional coarse/fine ratio, mode=3): on noise the
-        // block-mean spread collapses below the per-pixel max dev (σ/√N), so the
-        // ratio should sit BELOW the 0.6..1.0 ω band leaving the flat pull
+        // block-mean spread collapses below the per-pixel max dev (sigma/sqrt N), so the
+        // ratio should sit BELOW the 0.6..1.0 omega band leaving the flat pull
         // bit-identical; texture raised blocks push it over.
         val r2s = FloatArray(4096)
         var r2n = 0
@@ -1525,35 +1525,35 @@ class S3PreviewGLReproTest {
         java.util.Arrays.sort(r2s, 0, r2n)
         println("coarseDev/maxNb gate scene: p50=%.3f p90=%.3f p95=%.3f p99=%.3f max=%.3f".format(
             r2s[r2n / 2], r2s[r2n * 9 / 10], r2s[r2n * 95 / 100], r2s[r2n * 99 / 100], r2s[r2n - 1]))
-        coarseRatioCov(scene, "coarse/fine gate scene (бand coverage)")
-        // mode=1 (σ̂-keyed flat gate) is the recorded negative result: gate-safe
-        // but a no-op on lines (σ̂ MAD self-inflates where the line sits), so it
+        coarseRatioCov(scene, "coarse/fine gate scene (band coverage)")
+        // mode=1 (sigma_hat-keyed flat gate) is not used: gate-safe
+        // but a no-op on lines (sigma_hat MAD self-inflates where the line sits), so it
         // must KEEP the monotonicity gate.  mode=2 (directional flat target)
         // preserves lines on paper (46.9%->20% s3Lift) but the noise r tail
         // overlaps the line's band (p50=0.179), so it pops the boxAA 4->2 step
-        // at s3>=0.7 — printed, not asserted, to record the dead end.  mode=3
-        // (regional coarse/fine blend) is the current candidate, printed first so
-        // the ω band can be calibrated to the measured noise-ratio tail before
+        // at s3>=0.7 - printed for reference, not pursued.  mode=3
+        // (regional coarse/fine blend) is the selected approach, printed first so
+        // the omega band can be calibrated to the measured noise-ratio tail before
         // asserting the gate.
         runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("mask"), mirror = false, gateTol = 0.0004f)
         runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("mask"), mirror = true, gateTol = 0.0004f)
         runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("dir"), mirror = false, gateTol = null)
         runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("region"), mirror = false, gateTol = null)
         runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("region"), mirror = true, gateTol = null)
-        // mode=4 (constant directional flat pull): recorded negative result.  It
+        // mode=4 (constant directional flat pull): not used.  It
         // preserves the thin line (46.9% -> 30.4% s3Lift) but FAILS the production
         // gate at the boxAA 4->2 step (k=3.00 back s1=0.3 s3=0.7 box=2 nr=4:
-        // R 0.0054>0.0052, G 0.0040>0.0036, B 0.0056>0.0052) — the flat-branch
+        // R 0.0054>0.0052, G 0.0040>0.0036, B 0.0056>0.0052) - the flat-branch
         // pull target must stay bit-identical iavg for the gate to hold, so any
         // iDir blend (masked or constant) is excluded.  maxDelta vs shipped on
-        // noise reaches 0.0013-0.0016 at k>=3.  Printed, not asserted.
+        // noise reaches 0.0013-0.0016 at k>=3.  Printed for reference.
         runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("dirC"), mirror = false, gateTol = null)
         runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("dirC"), mirror = true, gateTol = null)
         // Smooth box-AA prototype: with the box shape blended continuously over
         // s3 there is no 4->2 step for the directional pull to pop.  smooth0 =
         // shipped pull + smooth box (isolates the box change), smooth3 = regional
-        // directional pull + smooth box (the full candidate).  Both must hold the
-        // 0.0004 gate on both configs, or the smooth-box fix is rejected.
+        // directional pull + smooth box (the deployed configuration).  Both must
+        // hold the 0.0004 gate on both configs, or the smooth-box fix is rejected.
         runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("smooth0"), mirror = false, gateTol = 0.0004f)
         runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("smooth0"), mirror = true, gateTol = 0.0004f)
         runMonotoneWalk(scene, 0.001f, s1s, s3s, listOf("smooth3"), mirror = false, gateTol = 0.0004f)
@@ -1567,9 +1567,9 @@ class S3PreviewGLReproTest {
         return if (maxNb > 1e-6f) minDev / maxNb else 1f
     }
 
-    /** coarseDev/maxNb distribution over a scene, with ω-band coverage so the
-     *  mode-3 threshold can be placed between the noise tail and the texture.
-     *  (0.6, 1.0, 1.5, 2.5, 4) are candidate rLo bands. */
+/** coarseDev/maxNb distribution over a scene, with omega-band coverage so the
+ *  mode-3 threshold can be placed between the noise tail and the texture.
+ *  (0.6, 1.0, 1.5, 2.5, 4) are candidate rLo bands. */
     private fun coarseRatioCov(scene: ShortArray, label: String) {
         val rs = FloatArray(16384)
         var n = 0
@@ -1587,7 +1587,7 @@ class S3PreviewGLReproTest {
             return (c * 100f / n).roundToInt()
         }
         val p = { i: Int -> if (i < n) rs[i] else rs[n - 1] }
-        println("%s  p50=%.2f p90=%.2f p95=%.2f p99=%.2f | ω>=0.6:0.6-1.0=%d%% 1.0-1.5=%d%% 1.5-2.5=%d%% 2.5-4=%d%% 4+=%d%%".format(
+        println("%s  p50=%.2f p90=%.2f p95=%.2f p99=%.2f | omega>=0.6:0.6-1.0=%d%% 1.0-1.5=%d%% 1.5-2.5=%d%% 2.5-4=%d%% 4+=%d%%".format(
             label, p(n / 2), p(n * 9 / 10), p(n * 95 / 100), p(n * 99 / 100),
             frac(0.6f, 1.0f), frac(1.0f, 1.5f), frac(1.5f, 2.5f), frac(2.5f, 4f), frac(4f, 1e9f)))
     }
@@ -1644,13 +1644,13 @@ class S3PreviewGLReproTest {
         return minOf(devN, devS, devE, devW)
     }
 
-    /**
-     * Purpose test for the noise-region mask: a thin bright line on noise must
-     * survive S3 (the flat-branch α-trim pull is what smears it).  Measures
-     * the green dip the line holds with S1-only vs S1+S3, mask off (shipped
-     * V3) vs on (σ̂-keyed).  s3Lift is how much S3 dims the line; a working
-     * mask must LOWER s3Lift (line preserved) while keeping the gate.
-     */
+/**
+ * Purpose test for the noise-region mask: a thin bright line on noise must
+ * survive S3 (the flat-branch alpha-trim pull is what smears it).  Measures
+ * the green dip the line holds with S1-only vs S1+S3, mask off (shipped
+ * V3) vs on (sigma_hat-keyed).  s3Lift is how much S3 dims the line; a working
+ * mask must LOWER s3Lift (line preserved) while keeping the gate.
+ */
     @Test
     fun probeNoiseMaskThinLine() {
         // 1px vertical line at sensor col 48, height +24 (~3x the sensor noise
@@ -1665,7 +1665,7 @@ class S3PreviewGLReproTest {
         val s3 = 0.6f
         println("== probeNoiseMaskThinLine (s1=$s1 s3=$s3) green band dip at the line ==")
         // Where does the coarse/fine ratio stand at the line vs off-line?  The
-        // mode-3 ω band must sit between the noise ratio and the texture ratio.
+        // mode-3 omega band must sit between the noise ratio and the texture ratio.
         val onR = FloatArray(64)
         val offR = FloatArray(64)
         var onn = 0
@@ -1687,9 +1687,9 @@ class S3PreviewGLReproTest {
         }
         // Directional flat target (mode 2) must preserve the line materially
         // better than the shipped flat pull (mode 0).  The regional blend
-        // (mode 3) is measured below; its ω band gets calibrated to the
-        // printed ratio stats.  Mode 4 (constant directional pull) is the
-        // shipping candidate — it must beat shipped by the same margin.
+        // (mode 3) is measured below; its omega band gets calibrated to the
+        // printed ratio stats.  Mode 4 (constant directional pull)
+        // must beat shipped by the same margin.
         assertTrue(
             "directional flat target must preserve the line better than shipped V3 " +
                 "(s3Lift ${"%.1f".format(lift[0] * 100)}% -> ${"%.1f".format(lift[2] * 100)}%)",
@@ -1712,12 +1712,12 @@ class S3PreviewGLReproTest {
         return on - off
     }
 
-    /**
-     * Multiscale foliage-like texture: vertical leaf streaks (3 sine harmonics,
-     * per-column contrast ~8-10/px), 4 single-px grass-blade spikes (+30), a
-     * slow vertical undulation, on a mono base 460 (+ noise σ when requested).
-     * The noise-free (σ=0) twin is the witness for PURE structure smearing.
-     */
+/**
+ * Multiscale foliage-like texture: vertical leaf streaks (3 sine harmonics,
+ * per-column contrast ~8-10/px), 4 single-px grass-blade spikes (+30), a
+ * slow vertical undulation, on a mono base 460 (+ noise sigma when requested).
+ * The noise-free (sigma=0) twin isolates pure structure smearing.
+ */
     private fun buildFoliage(seed: Int, base: Float, sigma: Float): ShortArray {
         val rnd = Random(seed)
         val bump = FloatArray(SW)
@@ -1737,7 +1737,7 @@ class S3PreviewGLReproTest {
         return s
     }
 
-    /** Mean |G(gx+1) − G(gx)| over the green band — local texture/noise energy. */
+    /** Mean |G(gx+1) - G(gx)| over the green band - local texture/noise energy. */
     private fun texEnergy(img: Array<FloatArray>, v: View): Float {
         var sum = 0.0
         var n = 0
@@ -1750,19 +1750,19 @@ class S3PreviewGLReproTest {
         return (sum / n).toFloat()
     }
 
-    /**
-     * Real-texture regime probe: on foliage-like texture (contrast ~8-10/px ≫
-     * noise at the moderate σ used here) does the directional flat pull (modes
-     * 2-4) keep the TEXTURE while S3 still removes the NOISE, vs the shipped
-     * flat pull (mode 0)?  Two witnesses:
-     *   - texLift  = 1 − E(clean scene with S3)/E(clean scene without): how much
-     *     of the pure structure S3 flattens (0 = perfect preservation).  The
-     *     clean scene filters out the noise term so this is structure-only.
-     *   - noiseLift = 1 − E(noisy scene with S3)/E(noisy scene without): how
-     *     much TOTAL energy S3 removes (noise + whatever structure it also
-     *     takes).  A working mask keeps noiseLift near shipped while texLift
-     *     drops well below shipped.
-     */
+/**
+ * Real-texture regime probe: on foliage-like texture (contrast ~8-10/px >>
+ * noise at the moderate sigma used here) does the directional flat pull (modes
+ * 2-4) keep the TEXTURE while S3 still removes the NOISE, vs the shipped
+ * flat pull (mode 0)?  Two measurements:
+ *   - texLift  = 1 - E(clean scene with S3)/E(clean scene without): how much
+ *     of the pure structure S3 flattens (0 = perfect preservation).  The
+ *     clean scene filters out the noise term so this is structure-only.
+ *   - noiseLift = 1 - E(noisy scene with S3)/E(noisy scene without): how
+ *     much TOTAL energy S3 removes (noise + whatever structure it also
+ *     takes).  A working mask keeps noiseLift near shipped while texLift
+ *     drops well below shipped.
+ */
     @Test
     fun probeFoliageTextureLift() {
         val clean = buildFoliage(1, 460f, 0f)
@@ -1916,7 +1916,7 @@ class S3PreviewGLReproTest {
     // ------------------------------------------------------------------
     // Device-failure-mode probe: which single deltas actually produce a
     // per-texel magenta mosaic on flat noise?  Not part of the invariant
-    // suite — diagnostic printout only (the CPU model is a fixed point, so a
+    // suite - reporting only (the CPU model is a fixed point, so a
     // probe row that explodes identifies the device-side mechanism to defend
     // against).
     // ------------------------------------------------------------------
@@ -1990,8 +1990,8 @@ class S3PreviewGLReproTest {
     // sensor R/G/B phase bases differ, the boxed mean's cross-phase iavg pulls
     // R or B toward the green phase, and the WB red/blue gains then magnify the
     // residual into a magenta cast.  With the live k<=2 gate, boxedBlend is
-    // only reachable for 2..4-cell boxes (k≈1.2..2.0); the k=3..8 rows below
-    // no longer take the boxed branch on device — they read inline, so their
+    // only reachable for 2..4-cell boxes (k~1.2..2.0); the k=3..8 rows below
+    // no longer take the boxed branch on device - they read inline, so their
     // pack-vs-inline delta is ~0 (kept as diagnostics of the device behaviour).
     // ------------------------------------------------------------------
     private fun magentaAvail(img: Array<FloatArray>, v: View): Float {

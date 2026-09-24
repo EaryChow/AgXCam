@@ -334,7 +334,7 @@ class MainActivity : AppCompatActivity() {
     // NR
     private lateinit var nrLabel: TextView; private lateinit var nrSlider: SeekBar
 
-    // Multi-stage denoise (Plan v1.2 Phase A): independent S1/S3/S5 sliders.
+    // Multi-stage denoise: independent S1/S3/S5 sliders.
     private lateinit var s1Label: TextView; private lateinit var s1Slider: SeekBar
     private lateinit var s3Label: TextView; private lateinit var s3Slider: SeekBar
     private lateinit var s5Label: TextView; private lateinit var s5Slider: SeekBar
@@ -2233,18 +2233,18 @@ class MainActivity : AppCompatActivity() {
             else -> "HW ${lens.hardwareLevel}"
         }
         return buildString {
-            append(facing).append(" · ").append(lens.label)
+            append(facing).append(" | ").append(lens.label)
             if (lens.focalLengthMm > 0f) {
                 val eq35 = lens.focalLength35mmEq
                 if (eq35 > 0f) {
-                    append(String.format(" · %dmm", Math.round(eq35)))
+                    append(String.format(" | %dmm", Math.round(eq35)))
                 } else {
-                    append(String.format(" · %.1fmm", lens.focalLengthMm))
+                    append(String.format(" | %.1fmm", lens.focalLengthMm))
                 }
             }
             append('\n')
-            append(sensor).append(" · ").append(if (lens.hasRawSensor) "RAW" else "YUV")
-            append(" · ").append(hw)
+            append(sensor).append(" | ").append(if (lens.hasRawSensor) "RAW" else "YUV")
+            append(" | ").append(hw)
         }
     }
 
@@ -2665,7 +2665,7 @@ val neutral: FloatArray? = if (gainsOk) {
                     )
                 }
             } else if (currentWbMode == WhiteBalanceMode.KELVIN) {
-                // Manual Kelvin without a profile or HAL gains: stay neutral —
+                // Manual Kelvin without a profile or HAL gains: stay neutral -
                 // the illumination comes from the app's Kelvin CAT. Never run
                 // the scene-adaptive estimator while in manual WB.
                 previewRenderer.wbGainR = 1f
@@ -2753,7 +2753,7 @@ val neutral: FloatArray? = if (gainsOk) {
                 CrashLogger.log(TAG, "onDisconnected")
                 cameraReady = false
                 disconnectBanner.visibility = View.VISIBLE
-                Log.w(TAG, "Camera disconnected — banner shown")
+                Log.w(TAG, "Camera disconnected - banner shown")
             }
         }
 
@@ -3218,9 +3218,9 @@ val neutral: FloatArray? = if (gainsOk) {
             }
         }
         if (!useStockMap) {
-            if (frames > 0) text += " · $frames"
+            if (frames > 0) text += " | $frames"
             val elapsedS = lensShadingEstimator.elapsedMillis / 1000
-            if (elapsedS >= 1 && lensShadingEstimator.currentState != LensShadingState.IDLE) text += " · ${elapsedS}s"
+            if (elapsedS >= 1 && lensShadingEstimator.currentState != LensShadingState.IDLE) text += " | ${elapsedS}s"
         }
         lensShadingStatusPill.text = text
         lensShadingStatusPill.setBackgroundColor(color)
@@ -3331,7 +3331,7 @@ val neutral: FloatArray? = if (gainsOk) {
 
     // Auto-start the sampled estimator when correction is enabled, no map exists
     // yet for this lens, and we are not in stock mode. Strength 0 means "user
-    // turned correction off" — never force it back on at startup.
+    // turned correction off" - never force it back on at startup.
     private fun autoStartSamplingIfNeeded() {
         if (useStockMap) return
         if (lensShadingStrength <= 0f) return
@@ -3483,7 +3483,7 @@ val neutral: FloatArray? = if (gainsOk) {
             disableTapToFocus()
         } else {
             if (!profile.canTapToFocus()) {
-                showLensWarning("Lens lacks autofocus — tap to adjust exposure only")
+                showLensWarning("Lens lacks autofocus - tap to adjust exposure only")
             }
             enableTapToFocus()
         }
@@ -3536,10 +3536,10 @@ val neutral: FloatArray? = if (gainsOk) {
 
         // Defensive: if RAW mode is on but active lens is non-RAW, or no RAW lenses exist, revert
         if (developerSwitch.useRawSensor && (!active.hasRawSensor || lensesForFacing.isEmpty())) {
-            Log.e(TAG, "buildLensSelectorUI: invariant violated — RAW active but active lens ${active.cameraId} hasRaw=${active.hasRawSensor}, rawLenses=${lensesForFacing.size}")
+            Log.e(TAG, "buildLensSelectorUI: invariant violated - RAW active but active lens ${active.cameraId} hasRaw=${active.hasRawSensor}, rawLenses=${lensesForFacing.size}")
             developerSwitch.revertToggle()
             updateFrontRearToggleVisibility(false)
-            // Camera pipeline may still be in RAW mode — force back to YUV and restart
+            // Camera pipeline may still be in RAW mode - force back to YUV and restart
             previewRenderer.disableBayerMode()
             val fallback = lensManager.getLensesForFacing(currentFacing)
             if (fallback.isEmpty()) return
@@ -3581,7 +3581,7 @@ val neutral: FloatArray? = if (gainsOk) {
                 // HAL's WB gains, so input is already balanced exactly like the
                 // preset. Here we only apply the relative chromatic adaptation
                 // (user illuminant -> D65); the default 6300K/-14 is chosen so
-                // userXY == D65, making this matrix identity — which must
+                // userXY == D65, making this matrix identity - which must
                 // therefore not change the Sun/DAYLIGHT visual.
                 val bradford = WhiteBalanceMath.chromaticAdaptationBradford(userXY, d65xy)
                 val m = bradford.m
@@ -3983,7 +3983,7 @@ override fun onResume() {
     /**
      * Critical-mode capture: the RAW stream is shut down (viewfinder is dark),
      * so a shutter press still completes but encodes a fully black frame. The
-     * sensor is never engaged — nothing is exposed.
+     * sensor is never engaged - nothing is exposed.
      */
     private fun captureBlackStill() {
         shutterController.onCaptureSubmitted()
@@ -4318,7 +4318,7 @@ override fun onResume() {
             false
         }
 
-        // Post-processing EV: ±10 EV in 0.5 EV steps (sensitive scrolling for big
+        // Post-processing EV: +-10 EV in 0.5 EV steps (sensitive scrolling for big
         // adjustments), default +1.5. Configure once; never re-apply on session reopens.
         evPpRoller.maxIndex = EV_PP_MAX_INDEX
         evPpRoller.resetIndex = EV_PP_DEFAULT_INDEX
@@ -4727,7 +4727,7 @@ override fun onResume() {
         private const val RAW_BUFFER_POOL = 3
         // Leading factor of the demosaic clipping-neutralization exponent.
         private const val PREF_CLIP_ATTEN = "clip_atten_factor"
-        // Multi-stage denoise strengths (Plan v1.2 Phase A), 0..1 each.
+        // Multi-stage denoise strengths, 0..1 each.
         private const val PREF_S1_DPC = "stage1_dpc_strength"
         private const val PREF_S3_RAW = "stage3_raw_strength"
         private const val PREF_S5_OUT = "stage5_out_strength"
@@ -4741,7 +4741,7 @@ override fun onResume() {
         // After a RAW session opens with no HAL map yet, wait this long before
         // declaring the device incapable of a usable lens shading map.
         private const val HAL_MAP_GRACE_MS = 5_000L
-        // Post-processing EV roller: 0.5 EV per step over the ±10 EV range.
+        // Post-processing EV roller: 0.5 EV per step over the +-10 EV range.
         private const val EV_PP_MAX_INDEX = 40
         private const val EV_PP_MID_INDEX = 20
         private const val EV_PP_DEFAULT_INDEX = 23

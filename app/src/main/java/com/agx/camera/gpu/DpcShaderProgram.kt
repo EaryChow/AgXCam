@@ -7,29 +7,29 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 /**
- * Stage 1 — Defect pixel correction (DPC) on the sparse Bayer grid.
+ * Stage 1 - Defect pixel correction (DPC) on the sparse Bayer grid.
  *
  * Four passes, all at demosaic/output resolution (one texel per 2x2 sensor cell,
- * four CFA phases in RGBA — the placeholder's indexing contract, C3):
+ * four CFA phases in RGBA (the placeholder's indexing contract):
  *
- *  Pass 0 (AVG)     : α-trimmed mean of the 8 same-color neighbours (5x5 same
+ *  Pass 0 (AVG)     : alpha-trimmed mean of the 8 same-color neighbours (5x5 same
  *                     phase lattice, drop 1 largest & 1 smallest) per phase.
- *  Pass 1 (DETECT)  : Condition A (|I−Iavg| > band, band = max(M1·Iavg, θ·σ̂_ISO))
- *                     AND Condition B (center deviation isolated: > M2 × max
- *                     neighbour deviation) → defect flag map (1 hot / −1 cold / 0).
+ *  Pass 1 (DETECT)  : Condition A (|I-Iavg| > band, band = max(M1*Iavg, theta*sigma_hat_ISO))
+ *                     AND Condition B (center deviation isolated: > M2 x max
+ *                     neighbour deviation) -> defect flag map (1 hot / -1 cold / 0).
  *  Pass 2 (CORRECT) : flagged texels replaced by feature-direction estimate I_D
  *                     (smooth direction pair), M3=M1 re-check, fallback to
  *                     non-directional I_ND (hot: 2nd largest / cold: 2nd smallest).
- *  Pass 3 (COUPLET) : second couplet-reinforcement pass — texels whose OWN
+ *  Pass 3 (COUPLET) : second couplet-reinforcement pass - texels whose OWN
  *                     cell or any 8-neighbour cell contains a flagged pixel
  *                     re-run correction, with flagged neighbours excluded from
  *                     the candidate set.  Truly clean texels pass through.
  *
- * σ̂ for the absolute threshold comes from the Stage 0 ISO-calibrated model
- * (uniforms u_iso_model_a/b), NOT the Stage 2 patch estimate (plan R2).
+ * sigma_hat for the absolute threshold comes from the Stage 0 ISO-calibrated model
+ * (uniforms u_iso_model_a/b), NOT the Stage 2 patch estimate.
  *
- * Bypass: u_dpc_enabled = 0 → pass-through copy of raw (black-subtracted,
- * clamped ≥ 0) → output is byte-identical to the placeholder's strength-0 anchor.
+ * Bypass: u_dpc_enabled = 0 -> pass-through copy of raw (black-subtracted,
+ * clamped >= 0) -> output is byte-identical to the placeholder's strength-0 anchor.
  */
 class DpcShaderProgram {
 
@@ -259,7 +259,7 @@ float flagAt(ivec2 sensorPos, int p) {
 const int NDX[8] = int[8]( 2, -2,  0,  0,  2, -2,  2, -2);
 const int NDY[8] = int[8]( 0,  0,  2, -2,  2,  2, -2, -2);
 
-// Condition B: the center deviation must exceed M2 × every neighbour's deviation
+// Condition B: the center deviation must exceed M2 x every neighbour's deviation
 bool codeCheck(float devMag, ivec2 cc, int p) {
     float maxNb = 0.0;
     for (int k = 0; k < 8; k++) {
@@ -277,7 +277,7 @@ void main() {
     int parityY = abs(sc.y % 2);
 
     if (u_pass == 0) {
-        // Pass A: α-trimmed mean of the 8 same-colour neighbours (drop 1 max, 1 min)
+        // Pass A: alpha-trimmed mean of the 8 same-colour neighbours (drop 1 max, 1 min)
         vec4 result = vec4(0.0);
         for (int p = 0; p < 4; p++) {
             int phaseX = p & 1;
@@ -311,7 +311,7 @@ void main() {
     }
 
     if (u_pass == 1) {
-        // Pass B: detection → defect flags
+        // Pass B: detection -> defect flags
         vec4 flags = vec4(0.0);
         if (u_dpc_enabled > 0.5) {
             for (int p = 0; p < 4; p++) {
@@ -325,7 +325,7 @@ void main() {
 
                 float devC = I - Iavg;
                 if (abs(devC) > band) {
-                    // isolation check: center deviation must be M2× every neighbour deviation
+                    // isolation check: center deviation must be M2x every neighbour deviation
                     float maxNb = 0.0;
                     for (int k = 0; k < 8; k++) {
                         ivec2 n = cc + ivec2(NDX[k], NDY[k]);
@@ -410,7 +410,7 @@ void main() {
                 float best = 1.0e30;
                 float bestAvg = 0.0;
                 // use index sums to pair up the NDX/NDY tables:
-                // pairA(k) = k, pairB(k) = 8 - 1 - k  → (0,7)=(E,NW) no.
+                // pairA(k) = k, pairB(k) = 8 - 1 - k  -> (0,7)=(E,NW) no.
                 // explicit pairing below.
                 float e = cands[0]; float w = cands[1];
                 float n = cands[2]; float s = cands[3];
@@ -473,7 +473,7 @@ void main() {
                 if (abs(id - Iavg) <= max(m3 * max(Iavg, 0.0), u_theta * sigma)) {
                     outv = max(id, 0.0);
                 } else {
-                    // fallback I_ND: hot → 2nd largest clean candidate, cold → 2nd smallest
+                    // fallback I_ND: hot -> 2nd largest clean candidate, cold -> 2nd smallest
                     float lo1 = 1.0e30, lo2 = 1.0e30;
                     float hi1 = -1.0e30, hi2 = -1.0e30;
                     for (int k = 0; k < 8; k++) {
@@ -489,7 +489,7 @@ void main() {
             }
         }
 
-        // strength blend (0 at bypass → raw).  Once a texel is flagged it is
+        // strength blend (0 at bypass -> raw).  Once a texel is flagged it is
         // applied (near-)fully, exactly like the S3_PACK/inline soak-through:
         // the DPC/gain sliders gate detection, not the blend, so a corrected
         // defect can't re-leak a partial spike.

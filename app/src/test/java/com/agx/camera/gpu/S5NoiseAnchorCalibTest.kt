@@ -25,50 +25,50 @@ private const val WY = 0.25f
 private const val WG = 0.5f
 private const val WB = 0.25f
 
-// Host defaults (PreviewRenderer.runStage5) — the calibration targets.
+// Host defaults (PreviewRenderer.runStage5) - the calibration targets.
 private const val LUMA_EPS_SCALE = 1.4f
 private const val CHROMA_EPS_SCALE = 64.0f
 private const val BETA = 0.3f
 private const val SIGMA_DM2 = 10f
 private const val SIGMA_SCALE = 1f / 32f
-private const val ROUND2_EPS_MULT = 1.96f // (κ×1.4)², ε ∝ σ̂²
+private const val ROUND2_EPS_MULT = 1.96f // (kappa x 1.4)^2, epsilon proportional to sigma_hat^2
 
 /**
- * Pure-noise-block anchor calibration for the Stage-5 double pass (plan §5 T1)
- * plus the double-pass regression guarantees (§4 acceptance).
+ * Pure-noise-block anchor calibration for the Stage-5 double pass
+ * plus the double-pass regression guarantees (requirements).
  *
  * This is a headless JVM mirror of the Stage-5 GLSL (OutNrShaderProgram
- * STATS_H/STATS_V/MAIN_FRAGMENT) — the same approach as S5ReproTest — extended
- * to (a) run BOTH SWGF iterations with β noise-return, (b) control every host
- * parameter (lumaEpsScale/chromaEpsScale, round-2 ε multiplier, β, winScale,
+ * STATS_H/STATS_V/MAIN_FRAGMENT) - the same approach as S5ReproTest - extended
+ * to (a) run BOTH SWGF iterations with beta noise-return, (b) control every host
+ * parameter (lumaEpsScale/chromaEpsScale, round-2 epsilon multiplier, beta, winScale,
  * epsBoost, evGain2 fold, ISO model A/B), and (c) read out noise attenuation on
  * flat pure-noise blocks.
  *
- * Two measurement families (mirroring doc §3 Stage 5 + §5 T1):
- *  1. ANCHOR identity: on a flat block whose variance σ² is known exactly,
- *     set ε = κ²·σ² and check measured single-pass attenuation against the
- *     theory table  a = 1/(1+κ²), att = σ√(a²+(1−a²)/|ω|), |ω|=25 —
- *     at κ = 1.0 / 1.2 / 1.5, plus the round-2 κ×1.4 tier and the two-round
- *     cascade product (the doc's ideal lower bound), with and without the
- *     β=0.3 noise return.
- *  2. PIPELINE config: real host epsilon math (ISO model · evGain2 ·
- *     sigmaScale · epsBoost · (σ̂²+σ_dm²)/whiteRange²) run on flat blocks at
- *     representative σ truth tiers, across ISO × signal × path (preview,
+ * Two measurement families (Stage 5 and the double pass):
+ *  1. ANCHOR identity: on a flat block whose variance sigma^2 is known exactly,
+ *     set epsilon = kappa^2*sigma^2 and check measured single-pass attenuation against the
+ *     theory table  a = 1/(1+kappa^2), att = sigma*sqrt(a^2+(1-a^2)/|omega|), |omega|=25 -
+ *     at kappa = 1.0 / 1.2 / 1.5, plus the round-2 kappa x 1.4 tier and the two-round
+ *     cascade product (the theoretical ideal lower bound), with and without the
+ *     beta=0.3 noise return.
+ *  2. PIPELINE config: real host epsilon math (ISO model * evGain2 *
+ *     sigmaScale * epsBoost * (sigma_hat^2+sigma_dm^2)/whiteRange^2) run on flat blocks at
+ *     representative sigma truth tiers, across ISO x signal x path (preview,
  *     capture 1:1 boxAA-off, capture reduced boxAA-on, EV-comp low end).
- *     Reports the effective κ = √(ε/σ²_truth) and the measured cascade
- *     attenuation so the model→truth ratio is visible per tier.
+ *     Reports the effective kappa = sqrt(epsilon/sigma^2_truth) and the measured cascade
+ *     attenuation so the model->truth ratio is visible per tier.
  *
- * Acceptance (plan §4 Phase A + this task):
+ * Requirements:
  *  (a) highlight-texture/fine-edge preservation is not over-smoothed by the
  *      second pass (grating-modulation retention + edge rise-width floors);
  *  (b) the two-round cascade attenuation is measured and tabled by
- *      κ = 1.0/1.2/1.5 including the β-return's actual effect;
+ *      kappa = 1.0/1.2/1.5 including the beta-return's actual effect;
  *  (c) slider strength 0 stays bit-exact bypass (host returns the input);
  *  (d) S5ReproTest's bigSeams==0 guarantee carries over to the double pass.
  *
  * Note on "measured": all numbers here are computed with the faithful JVM
  * mirror (deterministic fixed seeds), i.e. the offline digital-calibration
- * leg of T1; on-device flat-field confirmation is T6/T1-device follow-up.
+ * leg; on-device flat-field confirmation is follow-up work.
  */
 class S5NoiseAnchorCalibTest {
 
@@ -133,7 +133,7 @@ class S5NoiseAnchorCalibTest {
         return sqrt(-2f * kotlin.math.ln(u1)) * cos(2f * PI.toFloat() * u2)
     }
 
-    /** Flat-field block, neutral RGB, per-channel IID Gaussian noise σ_px. */
+    /** Flat-field block, neutral RGB, per-channel IID Gaussian noise sigma_px. */
     private fun noiseBlock(size: Int, signal: Float, sigmaPx: Float, seed: Long): Pln {
         val rnd = Random(seed)
         val c = Array(size) { FloatArray(size * 3) }
@@ -219,7 +219,7 @@ class S5NoiseAnchorCalibTest {
     // Faithful SWGF mirror (one full iteration).
     // ------------------------------------------------------------------
 
-    /** Separable 5-tap (win-scaled) box stats of the β-composed luma: (mean, 2nd moment). */
+    /** Separable 5-tap (win-scaled) box stats of the beta-composed luma: (mean, 2nd moment). */
     private fun statsOf(inImg: Pln, baseImg: Pln, beta: Float, winScale: Float): Pair<Array<FloatArray>, Array<FloatArray>> {
         val w = inImg.w
         val h = inImg.h
@@ -259,7 +259,7 @@ class S5NoiseAnchorCalibTest {
         return mean to sq
     }
 
-    /** Dense chroma box mean of the β-composed input at the pixel (base-centric). */
+    /** Dense chroma box mean of the beta-composed input at the pixel (base-centric). */
     private fun chromaMeanAt(inImg: Pln, baseImg: Pln, beta: Float, x: Int, y: Int, r: Int): FloatArray {
         var s1 = 0f
         var s2 = 0f
@@ -275,7 +275,7 @@ class S5NoiseAnchorCalibTest {
         return floatArrayOf(s1 / n, s2 / n)
     }
 
-    /** Host-math ε in image units (PreviewRenderer.runStage5 + MAIN_FRAGMENT). */
+    /** Host-math epsilon in image units (PreviewRenderer.runStage5 + MAIN_FRAGMENT). */
     private fun epsBaseImageUnits(cfg: Cfg, yccY: Float): Float {
         val whiteRangeI = 1f / sqrt(cfg.inverseRange2)
         val signalDN = max(yccY * whiteRangeI, 0f)
@@ -286,13 +286,13 @@ class S5NoiseAnchorCalibTest {
     private fun cfgEpsY(cfg: Cfg, yccY: Float): Float = cfg.lumaEpsScale * epsBaseImageUnits(cfg, yccY)
     private fun cfgEpsC(cfg: Cfg, yccY: Float): Float = cfg.chromaEpsScale * epsBaseImageUnits(cfg, yccY)
 
-    /**
-     * MAD σ̂ mirror of SigmaHatShaderProgram (rgbMode=true domain): per-pixel
-     * σ̂² as the mean over the R/G/B channels of 2.1981·MAD² of the 8 spatial
-     * neighbours (±1 texel), scaled by whiteRange² to raw-DN², then clamped up
-     * to the Stage-0 ISO model floor at the centre luma — i.e. exactly what
-     * Stage 5 consumes as the σ̂ texture when useIsoSigma=false.
-     */
+/**
+ * MAD sigma_hat mirror of SigmaHatShaderProgram (rgbMode=true domain): per-pixel
+ * sigma_hat^2 as the mean over the R/G/B channels of 2.1981*MAD^2 of the 8 spatial
+ * neighbours (+-1 texel), scaled by whiteRange^2 to raw-DN^2, then clamped up
+ * to the Stage-0 ISO model floor at the centre luma - i.e. exactly what
+ * Stage 5 consumes as the sigma_hat texture when useIsoSigma=false.
+ */
     private fun madSigma2Dn(img: Pln, cfg: Cfg): Array<FloatArray> {
         val w = img.w
         val h = img.h
@@ -326,20 +326,20 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         return out
     }
 
-    /**
-     * Direction-aware MAD variant (residual-pit candidate, heads-off of the S5
-     * formula): instead of the median-abs-dev over all 8 neighbours (which the
-     * edge straddling a thin bright stroke inflates to σ̂²≈10-20k DN², ♂ raised
-     * id-ε so SWGF pulls the edge pixel toward the mixed window mean), take the
-     * MINIMUM squared pair-difference over the 4 axes (E/W, N/S, diag1, diag2).
-     * At a straight edge the along-edge axis stays at the REGION's own noise,
-     * so the σ̂² stays small at the ink edge and aY stays high.  On pure noise
-     * each axis is an unbiased σ² estimator (E[(n1-n2)²/2]=σ²); the min of 4
-     * is biased low, which the ISO-model floor (same as madSigma2Dn) anchors
-     * wherever the region is quiet.  Same channels→mean, same 2.1981 constant
-     * and floor so the calibration domain is unchanged.
-     * mode="min" | "med" selects the axis reduction (measure both).
-     */
+/**
+ * Direction-aware MAD variant (residual-pit candidate, heads-off of the S5
+ * formula): instead of the median-abs-dev over all 8 neighbours (which the
+ * edge straddling a thin bright stroke inflates to sigma_hat^2 ~ 10-20k DN^2, which raised
+ * id-epsilon so SWGF pulls the edge pixel toward the mixed window mean), take the
+ * MINIMUM squared pair-difference over the 4 axes (E/W, N/S, diag1, diag2).
+ * At a straight edge the along-edge axis stays at the REGION's own noise,
+ * so the sigma_hat^2 stays small at the ink edge and aY stays high.  On pure noise
+ * each axis is an unbiased sigma^2 estimator (E[(n1-n2)^2/2]=sigma^2); the min of 4
+ * is biased low, which the ISO-model floor (same as madSigma2Dn) anchors
+ * wherever the region is quiet.  Same channels->mean, same 2.1981 constant
+ * and floor so the calibration domain is unchanged.
+ * mode="min" | "med" selects the axis reduction (measure both).
+ */
     private fun madSigma2DnAxis(img: Pln, cfg: Cfg, mode: String): Array<FloatArray> {
         val w = img.w
         val h = img.h
@@ -381,13 +381,13 @@ vals[k] = img.at(nx, ny, p) * whiteRange
     // GLSL round() is half-away-from-zero; Kotlin roundToInt() is half-up.
     private fun glslRound(v: Float): Int = if (v >= 0f) (v + 0.5f).toInt() else (v - 0.5f).toInt()
 
-    /**
-     * One SWGF iteration mirroring MAIN_FRAGMENT:
-     *  - epsY/epsC taken from the host math unless anchor overrides are given
-     *    (anchor mode: ε = κ²·σ² directly, the §3 attenuation identity test);
-     *  - epsMult multiplies both ε (round-2 (κ×1.4)² fold);
-     *  - β composes in/out of stats, chroma box and final strength mix.
-     */
+/**
+ * One SWGF iteration mirroring MAIN_FRAGMENT:
+ *  - epsY/epsC taken from the host math unless anchor overrides are given
+ *    (anchor mode: epsilon = kappa^2*sigma^2 directly, the attenuation identity test);
+ *  - epsMult multiplies both epsilon (round-2 (kappa x 1.4)^2 fold);
+ *  - beta composes in/out of stats, chroma box and final strength mix.
+ */
     private fun s5Pass(
         inImg: Pln, baseImg: Pln, cfg: Cfg, epsMult: Float = 1f,
         epsYAnchor: Float? = null, epsCAnchor: Float? = null,
@@ -413,11 +413,11 @@ vals[k] = img.at(nx, ny, p) * whiteRange
                     epsY = epsYAnchor * epsMult
                     epsC = epsCAnchor * epsMult
                 } else if (sigma2Dn != null) {
-                    // Texture-driven σ̂ (useIsoSigma=false): ε from the per-pixel
-                    // MAD σ̂² (DN²), same σ_dm² base as the formula branch.
-                    // sigmaDoubleDomain reproduces the capture σ-hat bug: the
-                    // texture holds σ̂²·WR² while the main divides by 1/WR² once,
-                    // leaving ε ≈ 0.7·σ̂² instead of the designed 0.7·σ̂²/WR².
+                    // Texture-driven sigma_hat (useIsoSigma=false): epsilon from the per-pixel
+                    // MAD sigma_hat^2 (DN^2), same sigma_dm^2 base as the formula branch.
+                    // sigmaDoubleDomain reproduces the capture sigma-hat bug: the
+                    // texture holds sigma_hat^2*WR^2 while the main divides by 1/WR^2 once,
+                    // leaving epsilon ~ 0.7*sigma_hat^2 instead of the designed 0.7*sigma_hat^2/WR^2.
                     val s2eff = if (sigmaDoubleDomain) sigma2Dn[y][x] * (1f / cfg.inverseRange2) else sigma2Dn[y][x]
                     val base = (s2eff + cfg.sigmaDm2) * cfg.inverseRange2 * cfg.sigmaScale * cfg.epsBoost
                     epsY = cfg.lumaEpsScale * base * epsMult
@@ -428,7 +428,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
                     epsC = cfg.chromaEpsScale * base * epsMult
                 }
 
-                // 8 SWGF side windows, distance ∝ |mean−y|/(var+ε), soft-2 fusion.
+                // 8 SWGF side windows, distance proportional to |mean-y|/(var+epsilon), soft-2 fusion.
                 var bestScore = 1.0e30f
                 var sndScore = 1.0e30f
                 var bestMean = 0f
@@ -482,7 +482,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         return Pln(w, h, out)
     }
 
-    /** Run the double pass as the host does (host skips at strength 0 → bit-exact). */
+    /** Run the double pass as the host does (host skips at strength 0 -> bit-exact). */
     private fun runS5(img: Pln, cfg: Cfg, epsYAnchor: Float? = null, epsCAnchor: Float? = null,
         sigma2Dn: Array<FloatArray>? = null, dbgXY: IntArray? = null,
         sigmaDoubleDomain: Boolean = false): Pln {
@@ -524,7 +524,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         return sqrt(max(s2 / n - m * m, 0.0)).toFloat()
     }
 
-    /** Doc §3 attenuation identity: a = 1/(1+κ²); att = √(a² + (1−a²)/|ω|), |ω|=25. */
+    /** Attenuation identity: a = 1/(1+kappa^2); att = sqrt(a^2 + (1-a^2)/|omega|), |omega|=25. */
     private fun theoryAtt(k: Double): Double {
         val a = 1.0 / (1.0 + k * k)
         return sqrt(a * a + (1.0 - a * a) / 25.0)
@@ -552,7 +552,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         return 2f * sqrt(re * re + im * im) / n
     }
 
-    /** Edge rise-width: number of columns over which a 10%→90% crossing takes place. */
+    /** Edge rise-width: number of columns over which a 10%->90% crossing takes place. */
     private fun edgeRiseWidth(p: Pln, y: Int, x0: Int, x1: Int, lo: Float, hi: Float): Int {
         val raw = (x0..x1).map { x -> lumaOf(p.at(x, y, 0), p.at(x, y, 1), p.at(x, y, 2)) }
         // Box-smooth radius 1 to suppress per-pixel noise in the level crossing.
@@ -561,8 +561,8 @@ vals[k] = img.at(nx, ny, p) * whiteRange
             prof[i] = (raw[max(i - 1, 0)] + raw[i] + raw[min(i + 1, raw.lastIndex)]) / 3f
         }
         // lo/hi are the band LEVELS on the two sides; the transition is the
-        // span of columns inside the 25–75% of the lo→hi step. Grating swings
-        // (±0.04) stay outside this band by construction.
+        // span of columns inside the 25-75% of the lo->hi step. Grating swings
+        // (+-0.04) stay outside this band by construction.
         val tLo = lo + 0.25f * (hi - lo)
         val tHi = hi - 0.25f * (hi - lo)
         val a = prof.indexOfFirst { it >= tLo }
@@ -576,7 +576,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
     private fun f2(v: Double): String = String.format("%.2f", v)
 
     // ------------------------------------------------------------------
-    // 1. ANCHOR identity + cascade (κ = 1.0 / 1.2 / 1.5).
+    // 1. ANCHOR identity + cascade (kappa = 1.0 / 1.2 / 1.5).
     // ------------------------------------------------------------------
 
     @Test
@@ -585,13 +585,13 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         val size = 160
         val lo = 8
         val hi = size - 8
-        val sigmaChPx = 8f / 959f                 // 8 DN noise → image units
+        val sigmaChPx = 8f / 959f                 // 8 DN noise -> image units
         val sigmaLumaInj = 0.61237244f * sigmaChPx // luma noise of neutral RGB
         val my = sigmaLumaInj.toDouble()
         val sb = StringBuilder()
         sb.append("=== S5 double-pass pure-noise anchor (JVM mirror, midpoint signal=${sign}) ===\n\n")
         sb.append(String.format("%-5s %-7s %-7s %-8s %-8s %-8s %-8s %-8s %-8s\n",
-            "κ", "a", "LB1", "meas1", "LB2(κ≥1.4)", "meas2an", "LBcas", "meas-cas(β0)", "meas-cas(β.3)"))
+            "kappa", "a", "LB1", "meas1", "LB2(kappa>=1.4)", "meas2an", "LBcas", "meas-cas(beta0)", "meas-cas(beta.3)"))
         var allOk = true
 
         for (k in doubleArrayOf(1.0, 1.2, 1.5)) {
@@ -600,7 +600,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
             val lb2 = theoryAtt(k2)
             val lbCas = lb1 * lb2
 
-            // ε anchors in image units: ε = κ²·σ².
+            // epsilon anchors in image units: epsilon = kappa^2*sigma^2.
             val epsY = (k * k * my * my).toFloat()
             val epsC = epsY * (CHROMA_EPS_SCALE / LUMA_EPS_SCALE) // keep Y:C design ratio
 
@@ -612,18 +612,18 @@ vals[k] = img.at(nx, ny, p) * whiteRange
                 1f, epsY, epsC)
             val meas1 = lumaStd(r1, lo, hi).toDouble() / sigLumaIn
 
-            // Round 2 anchor on a FRESH white block at κ2 (single-pass identity).
+            // Round 2 anchor on a FRESH white block at kappa2 (single-pass identity).
             val fresh = noiseBlock(size, sign, sigmaChPx, seed = 2001 + (k * 100).toLong())
             val r2fresh = s5Pass(fresh, fresh, Cfg(beta = 0f), 1f,
                 epsY * ROUND2_EPS_MULT, epsC * ROUND2_EPS_MULT)
             val meas2an = lumaStd(r2fresh, lo, hi).toDouble() / lumaStd(fresh, lo, hi).toDouble()
 
-            // Cascade without β (round 2 blends round-1 with itself, ε×1.96).
+            // Cascade without beta (round 2 blends round-1 with itself, epsilon x 1.96).
             val cas0 = runS5(img, Cfg(beta = 0f, lumaEpsScale = 1.4f, chromaEpsScale = 64f),
                 epsY, epsC)
             val measCas0 = lumaStd(cas0, lo, hi).toDouble() / sigLumaIn
 
-            // Cascade with β=0.3 noise return (shipped flavor).
+            // Cascade with beta=0.3 noise return (shipped flavor).
             val casB = runS5(img, Cfg(beta = BETA, lumaEpsScale = 1.4f, chromaEpsScale = 64f),
                 epsY, epsC)
             val measCasB = lumaStd(casB, lo, hi).toDouble() / sigLumaIn
@@ -632,41 +632,41 @@ vals[k] = img.at(nx, ny, p) * whiteRange
                 f3(k), f3(1.0 / (1.0 + k * k)), f4(lb1), f4(meas1), f4(lb2),
                 f4(meas2an), f4(lbCas), f4(measCas0), f4(measCasB)))
 
-            // Doc §5 T1 verdict: measured ≥ theory lower bound; β raises the
-            // residual vs the no-β cascade (noise return), so the β gap matches
+            // Result: measured >= theory lower bound; beta raises the
+            // residual vs the no-beta cascade (noise return), so the beta gap matches
             // the re-injection rather than exceeding the bounds.
-            assertTrue("κ=$k round-1 measured $meas1 must stay at/above LB $lb1 (mirror tol)",
+            assertTrue("kappa=$k round-1 measured $meas1 must stay at/above LB $lb1 (mirror tol)",
                 meas1 >= lb1 * 0.92)
-            assertTrue("κ=$k round-2(×1.4) fresh-block measured $meas2an must stay at/above LB $lb2",
+            assertTrue("kappa=$k round-2(x1.4) fresh-block measured $meas2an must stay at/above LB $lb2",
                 meas2an >= lb2 * 0.88)
-            assertTrue("κ=$k no-β cascade measured $measCas0 must stay at/above LB $lbCas",
+            assertTrue("kappa=$k no-beta cascade measured $measCas0 must stay at/above LB $lbCas",
                 measCas0 >= lbCas * 0.85)
-            assertTrue("κ=$k β cascade measured $measCasB must stay at/above LB $lbCas",
+            assertTrue("kappa=$k beta cascade measured $measCasB must stay at/above LB $lbCas",
                 measCasB >= lbCas * 0.85)
-            // β=0.3 must not DOUBLE-COUNT: the cascade with β must not be much
-            // below the no-β one (the return re-injects noise rather than
-            // adding attenuation) — clamp sanity band instead of a hard sign.
-            assertTrue("κ=$k β=0.3 cascade $measCasB must not drop far below no-β $measCas0",
+            // beta=0.3 must not DOUBLE-COUNT: the cascade with beta must not be much
+            // below the no-beta one (the return re-injects noise rather than
+            // adding attenuation) - clamp sanity band instead of a hard sign.
+            assertTrue("kappa=$k beta=0.3 cascade $measCasB must not drop far below no-beta $measCas0",
                 measCasB >= measCas0 - 0.03)
             if (meas1 < lb1 * 0.92 || meas2an < lb2 * 0.88 || measCas0 < lbCas * 0.85 ||
                 measCasB < lbCas * 0.85 || measCasB < measCas0 - 0.03
             ) allOk = false
         }
-        sb.append("\nANCHOR VERDICT: all κ tiers measured ≥ theory LB (tolerances above) → ")
+        sb.append("\nAnchor result: all kappa tiers measured >= theory LB (tolerances above) -> ")
         sb.append(if (allOk) "PASS\n\n" else "FAIL\n\n")
 
         java.io.File("build/s5noise_anchor.txt").let { f ->
             val current = if (f.exists()) f.readText() else ""
             f.writeText(current + sb.toString())
         }
-        assertTrue("anchor identity: all tiers within tolerance of the doc theory lower bounds", allOk)
+        assertTrue("noise-anchor identity: all tiers within tolerance of the theory lower bounds", allOk)
     }
 
     // ------------------------------------------------------------------
-    // 3. MAD σ̂ texture vs ISO-formula σ̂ (DR-8 re-calibration check).
-    //    Re-runs the three anchor tiers with ε built from the MAD σ̂² texture
-    //    instead of ε=κ²·σ²; deviation vs the formula-driven (item-1)
-    //    attenuation must stay within ±10% on flat noise, else only the
+    // 3. MAD sigma_hat texture vs ISO-formula sigma_hat (re-calibration check).
+    //    Re-runs the three anchor tiers with epsilon built from the MAD sigma_hat^2 texture
+    //    instead of epsilon=kappa^2*sigma^2; deviation vs the formula-driven
+    //    attenuation must stay within +-10% on flat noise, else only the
     //    sigmaScale term may be retuned (as opposed to touching S5 math).
     // ------------------------------------------------------------------
 
@@ -677,9 +677,9 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         val lo = 10
         val hi = size - 10
         val sb = StringBuilder()
-        sb.append("=== MAD-σ̂ texture vs ISO-formula σ̂, three anchor tiers (mid signal=0.5) ===\n\n")
-        sb.append(String.format("%-8s %-8s %-9s %-10s %-11s %-12s %-10s %-10s\n",
-            "ISO", "σDN", "att_form", "att_mad", "rel-diff", "MAD σ̂²/DN²", "model σ̂²/DN²", "verdict"))
+        sb.append("=== MAD sigma_hat texture vs ISO-formula sigma_hat, three anchor tiers (mid signal=0.5) ===\n\n")
+        sb.append(String.format("%-8s %-8s %-9s %-10s %-11s %-14s %-14s %-8s\n",
+            "ISO", "sigmaDN", "att_form", "att_mad", "rel-diff", "MAD SigmaHat2/DN^2", "model SigmaHat2/DN^2", "pass"))
         var allOk = true
         var seed = 7001L
         for (iso in intArrayOf(800, 3200, 12800)) {
@@ -690,13 +690,13 @@ vals[k] = img.at(nx, ny, p) * whiteRange
             val img = noiseBlock(size, sign, sigmaChPx, seed = seed)
             val sigLumaIn = lumaStd(img, lo, hi)
 
-            // Formula-driven (useIsoSigma=true semantics — the item-1 anchor).
+            // Formula-driven (useIsoSigma=true semantics - the theory anchor).
             val outF = runS5(img, cfg)
             val attF = lumaStd(outF, lo, hi) / sigLumaIn
 
-            // Texture-driven (useIsoSigma=false): ε from the σ̂² map.  Capture
-            // rgbMode now uses the direction-aware (axis-min) σ̂ generator (shipped
-            // GLSL); on FLAT noise it is floor-anchored (DR-4/8) and equals the
+            // Texture-driven (useIsoSigma=false): epsilon from the sigma_hat^2 map.  Capture
+            // rgbMode now uses the direction-aware (axis-min) sigma_hat generator (shipped
+            // GLSL); on FLAT noise it is floor-anchored and equals the
             // ISO model up to the measurement, so this invariant must hold here.
             val madMap = madSigma2DnAxis(img, cfg, "min")
             val outT = runS5(img, cfg, sigma2Dn = madMap)
@@ -707,7 +707,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
             val madMid = madMap[mid][mid]
             val rel = (abs(attT - attF) / attF)
 
-            // Acceptance (b): no visible regression vs the item-1 values.
+            // Acceptance (b): no visible regression vs the measured tolerance values.
             val inTol = rel <= 0.10f
             sb.append(String.format("%-8s %-8s %-9s %-10s %-11s %-12s %-10s %-10s\n",
                 "$iso", f3(sqrt(sigma2Ref).toDouble()), f4(attF.toDouble()), f4(attT.toDouble()),
@@ -716,24 +716,24 @@ vals[k] = img.at(nx, ny, p) * whiteRange
             if (!inTol) allOk = false
             seed += 17
         }
-        sb.append("\nDR-8 VERDICT (within ±10% → keep item-1 sigmaScale): " +
+        sb.append("\nSigma-scale check (within +-10% -> keep the current sigmaScale): " +
             if (allOk) "PASS\n\n" else "FAIL (retune sigmaScale only)\n\n")
 
         java.io.File("build/s5noise_anchor.txt").let { f ->
             val current = if (f.exists()) f.readText() else ""
             f.writeText(current + sb.toString())
         }
-        assertTrue("MAD σ̂-driven S5 must stay within ±10% of the ISO-formula attenuation on flat noise", allOk)
+        assertTrue("MAD sigma_hat-driven S5 must stay within +-10% of the ISO-formula attenuation on flat noise", allOk)
     }
 
     // ------------------------------------------------------------------
-    // 2. PIPELINE-config cascade attenuation: ISO × signal × path.
+    // 2. PIPELINE-config cascade attenuation: ISO x signal x path.
     // ------------------------------------------------------------------
 
     @Test
     fun pipelineConfigCascade() {
         val sb = StringBuilder()
-        sb.append("=== Pipeline-config double-pass cascade (ε from ISO model, host math) ===\n\n")
+        sb.append("=== Pipeline-config double-pass cascade (epsilon from ISO model, host math) ===\n\n")
 
         data class Path(val name: String, val winScale: Float, val epsBoost: Float, val evGain2: Float, val size: Int, val lo: Int)
 
@@ -745,7 +745,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         var allOk = true
         val rows = StringBuilder()
         rows.append(String.format("%-9s %-7s %-5s %-6s %-8s %-8s %-8s %-8s %-9s %-9s %-9s\n",
-            "path", "ISO(seg)", "sig", "σDN", "κ_eff", "att1", "att2", "casβ.3", "cas(β0)", "C1att", "C2att"))
+            "path", "ISO(seg)", "sig", "sigmaDN", "kappa_eff", "att1", "att2", "casbeta.3", "cas(beta0)", "C1att", "C2att"))
 
         val sigmaDnTiers = doubleArrayOf(2.0, 4.0, 8.0, 16.0, 24.0)
         val signals = doubleArrayOf(0.16, 0.5, 0.83)
@@ -759,8 +759,8 @@ vals[k] = img.at(nx, ny, p) * whiteRange
             else intArrayOf(800, 3200, 12800)
             for (iso in isos) {
                 for (sig in signals) {
-                    // The pipeline σ̂ model predicts variance on this signal; the
-                    // block injects σ truth = one representative tier (8 DN).
+                    // The pipeline sigma_hat model predicts variance on this signal; the
+                    // block injects sigma truth = one representative tier (8 DN).
                     val sigLumaPxInj = 0.61237244f * (8f / 959f)
                     val img = noiseBlock(path.size, sig.toFloat(), 8f / 959f, seed = 3000L + iso.toLong())
                     val cfg = Cfg(
@@ -783,10 +783,10 @@ vals[k] = img.at(nx, ny, p) * whiteRange
                     rows.append(String.format("%-9s %-7s %-5s %-6s %-8s %-8s %-8s %-8s %-9s %-9s %-9s\n",
                         path.name, "${iso}(${segmentOf(iso)})", f2(sig), "8",
                         f2(kappa), f4(att1), f4(att2), f4(casB), f4(cas0), f4(c1att.toDouble()), f4(c2att.toDouble())))
-                    // The filter must always DENOISE (att ≤ 1) and never collapse
-                    // below the residual floor (att not ≪ 0.05).
-                    assertTrue("${path.name} ISO=$iso sig=$sig cascade β attenuates (≤1) got $casB", casB <= 1.001f)
-                    assertTrue("${path.name} ISO=$iso sig=$sig cascade β not degenerate ($casB)", casB >= 0.04f)
+                    // The filter must always DENOISE (att <= 1) and never collapse
+                    // below the residual floor (att not << 0.05).
+                    assertTrue("${path.name} ISO=$iso sig=$sig cascade beta attenuates (<=1) got $casB", casB <= 1.001f)
+                    assertTrue("${path.name} ISO=$iso sig=$sig cascade beta not degenerate ($casB)", casB >= 0.04f)
                     if (path.name == "capture-1:1" || path.name == "capture-boxAA") {
                         allOk = allOk && casB <= 1.001f && casB >= 0.04f
                     }
@@ -794,10 +794,10 @@ vals[k] = img.at(nx, ny, p) * whiteRange
             }
         }
 
-        // Detailed σ-tier scan at the doc collision ISO (3200, mid signal):
-        // how κ_eff and the cascade vary as the truth dictates.
-        rows.append("\n-- ISO 3200 mid-signal σ-tier scan (preview) --\n")
-        rows.append(String.format("%-6s %-8s %-8s %-8s %-9s\n", "σDN", "κ_eff", "att1", "att2", "casβ.3"))
+        // Detailed sigma-tier scan at the collision ISO (3200, mid signal):
+        // how kappa_eff and the cascade vary as the truth dictates.
+        rows.append("\n-- ISO 3200 mid-signal sigma-tier scan (preview) --\n")
+        rows.append(String.format("%-6s %-8s %-8s %-8s %-9s\n", "sigmaDN", "kappa_eff", "att1", "att2", "casbeta.3"))
         for (sigD in sigmaDnTiers) {
             val img = noiseBlock(152, 0.5f, (sigD / 959f).toFloat(), seed = 9000L + (sigD * 10).toLong())
             val cfg = Cfg(iso = 3200, beta = BETA)
@@ -810,17 +810,17 @@ vals[k] = img.at(nx, ny, p) * whiteRange
             val att2 = lumaStd(r2, 8, 144).toDouble() / lumaStd(r1, 8, 144).toDouble()
             val cas = lumaStd(r2, 8, 144).toDouble() / lumaStd(img, 8, 144).toDouble()
             rows.append(String.format("%-6s %-8s %-8s %-8s %-9s\n", f1(sigD), f2(kappa), f4(att1), f4(att2), f4(cas)))
-            assertTrue("ISO3200 mid σ=${sigD.toInt()} cascade must remain denoising (cas=$cas≤1)", cas <= 1.001f)
-            assertTrue("ISO3200 mid σ=${sigD.toInt()} must not collapse (cas=$cas≥0.04)", cas >= 0.04f)
+            assertTrue("ISO3200 mid sigma=${sigD.toInt()} cascade must remain denoising (cas=$cas<=1)", cas <= 1.001f)
+            assertTrue("ISO3200 mid sigma=${sigD.toInt()} must not collapse (cas=$cas>=0.04)", cas >= 0.04f)
         }
 
         sb.append(rows)
         // The collision case: the S5D evidence showed the post-S3+boxAA residual is
-        // σ̂/√32 (model σ̂ ≈ 32× residual variance). Inject that residual truth
-        // and require κ_eff to land in an engaged-but-bounded window. Note the
-        // measured κ sits above the nominal lumaEpsScale=1.4 coefficient by
-        // the luma-mix fold √(1/0.375)=1.63 (Y=0.25R+0.5G+0.25B → var_Y=
-        // 0.375·var_ch); the appendix-C table records this realization as-is.
+        // sigma_hat/sqrt(32) (model sigma_hat ~ 32x residual variance). Inject that residual truth
+        // and require kappa_eff to land in an engaged-but-bounded window. Note the
+        // measured kappa sits above the nominal lumaEpsScale=1.4 coefficient by
+        // the luma-mix fold sqrt(1/0.375)=1.63 (Y=0.25R+0.5G+0.25B -> var_Y=
+        // 0.375*var_ch); the calibration table records this realization as-is.
         val cfg3200 = Cfg(iso = 3200)
         val sigHatDn = sqrt((cfg3200.isoModelA * 0.5f * 959f + cfg3200.isoModelB).toDouble())
         val sigmaResDn = sigHatDn / sqrt(32.0)
@@ -831,15 +831,15 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         val r1c = s5Pass(img3200, img3200, cfg3200)
         val r2c = s5Pass(r1c, img3200, cfg3200, cfg3200.round2EpsMult)
         val cas3200 = lumaStd(r2c, 8, 144).toDouble() / lumaStd(img3200, 8, 144).toDouble()
-        sb.append("ISO3200 mid-signal σ_res=σ̂/√32=${f2(sigmaResDn)}DN  κ_eff=${f2(kappa3200)}  casβ.3=${f4(cas3200)}\n")
-        sb.append("(coefficient √lumaEpsScale=${f2(sqrt(0.375) * kappa3200)}; Y-mix fold √(1/0.375)=${f2(sqrt(1.0 / 0.375))}×)\n")
+        sb.append("ISO3200 mid-signal sigma_res=sigma_hat/sqrt(32)=${f2(sigmaResDn)}DN  kappa_eff=${f2(kappa3200)}  casbeta.3=${f4(cas3200)}\n")
+        sb.append("(coefficient sqrt(lumaEpsScale)=${f2(sqrt(0.375) * kappa3200)}; Y-mix fold sqrt(1/0.375)=${f2(sqrt(1.0 / 0.375))}x)\n")
         allOk = allOk && kappa3200 in 1.0..2.5 && cas3200 in 0.03..0.75
-        assertTrue("ISO3200 mid-signal σ_res=${f2(sigmaResDn)}DN κ_eff=$kappa3200 must be engaged in [1.0,2.5] (collision anchor)",
+        assertTrue("ISO3200 mid-signal sigma_res=${f2(sigmaResDn)}DN kappa_eff=$kappa3200 must be engaged in [1.0,2.5] (collision anchor)",
             kappa3200 in 1.0..2.5)
         assertTrue("ISO3200 mid-signal collision cascade $cas3200 must denoise (0.03..0.75)",
             cas3200 in 0.03..0.75)
 
-        sb.append("\nPIPELINE VERDICT: $allOk\n")
+        sb.append("\nPIPELINE RESULT: $allOk\n")
         java.io.File("build/s5noise_anchor.txt").let { f ->
             val current = if (f.exists()) f.readText() else ""
             f.writeText(current + sb.toString() + "\n")
@@ -857,9 +857,9 @@ vals[k] = img.at(nx, ny, p) * whiteRange
     fun texturePreservationDoublePass() {
         val size = 176
         val bandXs = intArrayOf(0, 58, 116, size) // shadow | mid | highlight
-        val cfg = Cfg(iso = 3200) // double pass, preview, β=0.3
-        // σ tiers: 10 DN = general mid-scale scene noise; 3 DN ≈ σ̂/√32 =
-        // the post-S3 collision residual (highest realized κ_eff).
+        val cfg = Cfg(iso = 3200) // double pass, preview, beta=0.3
+        // sigma tiers: 10 DN = general mid-scale scene noise; 3 DN ~ sigma_hat/sqrt(32) =
+        // the post-S3 collision residual (highest realized kappa_eff).
         data class Patch(val y0: Int, val y1: Int, val x0: Int, val x1: Int, val period: Int)
         val patches = listOf(
             Patch(8, 20, 62, 112, 16),
@@ -868,14 +868,14 @@ vals[k] = img.at(nx, ny, p) * whiteRange
             Patch(100, 112, 120, 170, 6)
         )
         val sb = StringBuilder()
-        sb.append("=== Texture preservation (ISO 3200, double pass, β=0.3) ===\n")
+        sb.append("=== Texture preservation (ISO 3200, double pass, beta=0.3) ===\n")
 
         for (sigmaDN in intArrayOf(10, 3)) {
             val sigmaPx = sigmaDN.toFloat() / 959f
             val img = textureScene(size, bandXs, sigmaPx, pc = 16, ac = 0.03f, pf = 6, af = 0.04f, seed = 4242L)
             val r1 = s5Pass(img, img, cfg)
             val r2 = s5Pass(r1, img, cfg, cfg.round2EpsMult)
-            sb.append(String.format("-- σ=%d DN --\n", sigmaDN))
+            sb.append(String.format("-- sigma=%d DN --\n", sigmaDN))
             sb.append(String.format("%-24s %-8s %-8s\n", "patch(period)", "ret-r1", "ret-r2"))
 
             for (p in patches) {
@@ -891,7 +891,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
                     f3(ret1.toDouble()), f3(ret2.toDouble())))
                 if (band == "highlight") {
                     val floor = if (period == 16) 0.55f else 0.4f
-                    assertTrue("σ=$sigmaDN highlight $kind: round-2 retention $ret2 must stay ≥ $floor",
+                    assertTrue("sigma=$sigmaDN highlight $kind: round-2 retention $ret2 must stay >= $floor",
                         ret2 >= floor)
                 }
             }
@@ -907,24 +907,24 @@ vals[k] = img.at(nx, ny, p) * whiteRange
                 val inW = edgeRiseWidth(img, edgeY, e.x - 8, e.x + 8, e.lo, e.hi)
                 val r1W = edgeRiseWidth(r1, edgeY, e.x - 8, e.x + 8, e.lo, e.hi)
                 val r2W = edgeRiseWidth(r2, edgeY, e.x - 8, e.x + 8, e.lo, e.hi)
-                sb.append(String.format("σ=%d %-12s %-14s %-6s %-6s\n", sigmaDN, e.label, "$inW px", "$r1W px", "$r2W px"))
-                assertTrue("σ=$sigmaDN ${e.label} edge: r1 must stay sharp (r1=$r1W px)", r1W <= 4)
-                assertTrue("σ=$sigmaDN ${e.label} edge: r2 must stay sharp (r2=$r2W px)", r2W <= 4)
+                sb.append(String.format("sigma=%d %-12s %-14s %-6s %-6s\n", sigmaDN, e.label, "$inW px", "$r1W px", "$r2W px"))
+                assertTrue("sigma=$sigmaDN ${e.label} edge: r1 must stay sharp (r1=$r1W px)", r1W <= 4)
+                assertTrue("sigma=$sigmaDN ${e.label} edge: r2 must stay sharp (r2=$r2W px)", r2W <= 4)
             }
 
             // Cross-check noise: the flat shadow band (no grating) must be
-            // denoised. At the 10 DN tier the realized κ is light (≈0.5), so
+            // denoised. At the 10 DN tier the realized kappa is light (~0.5), so
             // only no-amplification is required; at the collision-residual
-            // tier (σ ≈ σ̂/√32 → κ_eff ≈ 1.9) the cascade must actually clean.
+            // tier (sigma ~ sigma_hat/sqrt(32) -> kappa_eff ~ 1.9) the cascade must actually clean.
             val flatIn2 = lumaStd(img, 88, 152, 6, 52)
             val flatR2 = lumaStd(r2, 88, 152, 6, 52)
-            sb.append(String.format("σ=%d flat-shadow σ: in %.6f → r2 %.6f (att %.3f)\n",
+            sb.append(String.format("sigma=%d flat-shadow sigma: in %.6f -> r2 %.6f (att %.3f)\n",
                 sigmaDN, flatIn2, flatR2, flatR2 / flatIn2))
             if (sigmaDN == 10) {
-                assertTrue("σ=$sigmaDN flat shadow must not amplify (att=${flatR2 / flatIn2})",
+                assertTrue("sigma=$sigmaDN flat shadow must not amplify (att=${flatR2 / flatIn2})",
                     flatR2 <= flatIn2 * 1.02f)
             } else {
-                assertTrue("σ=$sigmaDN flat shadow must be denoised by double pass (att=${flatR2 / flatIn2})",
+                assertTrue("sigma=$sigmaDN flat shadow must be denoised by double pass (att=${flatR2 / flatIn2})",
                     flatR2 < flatIn2 * 0.85f)
             }
         }
@@ -960,7 +960,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         val img = textureScene(size, intArrayOf(0, 32, 64, size), 8f / 959f, 12, 0.02f, 6, 0.03f, seed = 11L)
         val cfg = Cfg(iterations = 2, beta = BETA, strength = 0f)
         val out = runS5(img, cfg)
-        // runS5 short-circuits at strength 0 → out IS img (bit-exact); also
+        // runS5 short-circuits at strength 0 -> out IS img (bit-exact); also
         // assert planes are reference-identical.
         assertTrue("strength=0 must return the input Pln instance (full bypass)", out === img)
         for (y in 0 until size) {
@@ -987,7 +987,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         val r2 = runS5(img, cfg)
 
         // C1-delta neighbor-jump scan on the annulus rows (S5ReproTest metric:
-        // |ΔΔC1| > 0.03 counts as a big seam).
+        // |delta delta C1| > 0.03 counts as a big seam).
         var bigSeams = 0
         var maxJump = 0f
         for (y in cy - 3..cy + 3) {
@@ -1102,7 +1102,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
     }
 
     // ------------------------------------------------------------------
-    // 7. Capture-path L1: winScale>1 (R=8, +-8 offsets) + epsBoost=16 +
+    // 7. Capture-path: winScale>1 (R=8, +-8 offsets) + epsBoost=16 +
     // texture-driven MAD sigma-hat. Spatial metrics blind to peak contrast:
     // interior pitting, halo bleed, edge raggedness. Dose response in strength.
     // ------------------------------------------------------------------
@@ -1187,13 +1187,13 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         val bg = 0.06f
         val fg = 0.95f
         val sb = StringBuilder()
-        sb.append("=== capture-path S5: pits / halo / raggedness (winScale=4, epsBoost=16, axis-min σ̂) ===\n")
+        sb.append("=== capture-path S5: pits / halo / raggedness (winScale=4, epsBoost=16, axis-min sigma_hat) ===\n")
         sb.append(String.format("%-5s %-6s %-10s %-9s %-9s %-9s\n", "w", "strength", "sigmaMode", "pitRate", "halo", "ragStd"))
         for (w in intArrayOf(4, 8, 16, 32)) {
             val scene = captureStrokeScene(size, w, sigmaPx, 909L, bg, fg)
             val cfgBase = Cfg(iso = 800, winScale = 4f, epsBoost = 16f)
-            // Shipped capture GLSL: axis-min σ̂² (F) — the MAD-8 rows below
-            // (sigProd = MAD·WR²) only reproduce the historical double-domain.
+            // Shipped capture GLSL: axis-min sigma_hat^2 (F) - the MAD-8 rows below
+            // (sigProd = MAD*WR^2) only reproduce the historical double-domain.
             val sig = madSigma2DnAxis(scene, cfgBase, "min")
             // Production rgbMode double-scales sig2 by u_domain_scale^2
             // (vals are already x domainScale at line 201): sig2_prod = sig * whiteRange^2.
@@ -1216,7 +1216,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         }
         System.out.println(sb)
         java.io.File("build/s5_capture_pit_halo.txt").writeText(sb.toString())
-        // Diagnostic: σ̂ and output profile across a w=32 stroke at s=1.
+        // Diagnostic: sigma_hat and output profile across a w=32 stroke at s=1.
         run {
             val sc = captureStrokeScene(size, 32, sigmaPx, 909L, bg, fg)
             val cb = Cfg(iso = 800, winScale = 4f, epsBoost = 16f)
@@ -1249,7 +1249,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
     // 8. Device-dump replay + metrics (cap1789706340051).
     //    Replays the real capture through the JVM mirror with the saved MAD
     //    sigma-hat, validates the mirror against the device, then reports
-    //    the spatial artifacts (pits/halo) and the sigma magnitudes — the
+    //    the spatial artifacts (pits/halo) and the sigma magnitudes - the
     //    capture-path ground truth for judging H1/H2.
     // ------------------------------------------------------------------
 
@@ -1269,7 +1269,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         val dir = dumpDir()
         val missing = required.filter { !File(dir, it).exists() }
         assumeTrue(
-            "device capture dump missing — skipping (clone/produce it or set -Dcapdump.dir): " +
+            "device capture dump missing - skipping (clone/produce it or set -Dcapdump.dir): " +
                 "$dir ${missing.joinToString { "[$it]" }}",
             missing.isEmpty()
         )
@@ -1307,7 +1307,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         val cfgDev = Cfg(iso = 1029, winScale = 4.266667f, epsBoost = 16f, strength = 1f)
         sb.append("=== device S5 capture replay (iso=1029 ws=4.27 eb=16 st=1, sigmaTex) ===\n")
 
-        // σ̂² (R) magnitude split by signal.
+        // sigma_hat^2 (R) magnitude split by signal.
         val darkSig = ArrayList<Float>()
         val brightSig = ArrayList<Float>()
         val allSig = ArrayList<Float>()
@@ -1348,14 +1348,14 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         val mirDark = pctSorted(darkMir, 0.5)
         val mirBright = pctSorted(brightMir, 0.5)
         // NOTE: GLSL SigmaHat applies u_domain_scale a second time in the mad term
-        // (:201 vals*scale, :227 sig2=mad^2*scale^2), so R holds σ̂²·WR²; the S5 main
-        // then divides by inverse_range2 (=1/WR²), i.e. the extra scale cancels
-        // except σ_dm²→≈0. Replay must feed R/WR² (μ-an DN² the mirror expects).
+        // (:201 vals*scale, :227 sig2=mad^2*scale^2), so R holds sigma_hat^2*WR^2; the S5 main
+        // then divides by inverse_range2 (=1/WR^2), i.e. the extra scale cancels
+        // except sigma_dm^2 -> ~0. Replay must feed R/WR^2 (a DN^2, which the mirror expects).
         val whiteRangeDev = 959f
         val devWr2 = whiteRangeDev * whiteRangeDev
-        // Domain auto-detect: pre-fix sigma buffer holds σ̂²·WR² (the GLSL
-        // SigmaHat :227 double-scaled mad); post-fix it holds σ̂² raw-DN².
-        // Pick the effective cell that reproduces the mirror medians (x≈1.00).
+        // Domain auto-detect: pre-fix sigma buffer holds sigma_hat^2*WR^2 (the GLSL
+        // SigmaHat :227 double-scaled mad); post-fix it holds sigma_hat^2 raw-DN^2.
+        // Pick the effective cell that reproduces the mirror medians (x~1.00).
         val devDarkR = devDark / devWr2; val devBrightR = devBright / devWr2
         val mDark = max(mirDark, 1e-6f); val mBright = max(mirBright, 1e-6f)
         val rDark = max(devDarkR, 1e-6f); val rBright = max(devBrightR, 1e-6f)
@@ -1363,9 +1363,9 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         val ratioRaw = max(devDark / mDark, mDark / rDark) + max(devBright / mBright, mBright / rBright)
         val devScaleEffective = if (ratioDouble <= ratioRaw) devWr2 else 1f
         sb.append(String.format(
-            "sigma-domain: %s (device σ̂² = R/%s)\n",
-            if (devScaleEffective > 1f) "DOUBLE (pre-fix σ̂²·WR²)" else "SINGLE (post-fix raw-DN²)",
-            if (devScaleEffective > 1f) "WR²" else "1"
+            "sigma-domain: %s (device sigma_hat^2 = R/%s)\n",
+            if (devScaleEffective > 1f) "DOUBLE (pre-fix sigma_hat^2*WR^2)" else "SINGLE (post-fix raw-DN^2)",
+            if (devScaleEffective > 1f) "WR^2" else "1"
         ))
         sb.append(String.format(
             "sigma2 p50  device(R/<scale>) vs mirror(DN2): dark %.1f/%.1f (x%.2f)  bright %.1f/%.1f (x%.2f)\n",
@@ -1373,7 +1373,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
             devBright / devScaleEffective, mirBright, (devBright / devScaleEffective) / mBright
         ))
 
-        // sigma2Dn array from the device R channel (normalized to DN²) → replay.
+        // sigma2Dn array from the device R channel (normalized to DN^2) -> replay.
         val sigma2Dev = Array(h) { y -> FloatArray(w) { x -> sigF[(y * w + x) * 4] / devScaleEffective } }
         val devOut = Pln(w, h, Array(h) { y -> FloatArray(w * 3) { i ->
             val px = i / 3
@@ -1708,7 +1708,7 @@ sb.append(String.format(
         if (unw != null && abs(unw.dd) > 0.1f) {
             val xu = unw.x; val yu = unw.y
             // Dump the 8 device window stats at this pixel to find which one the
-            // device output (≈ its mean) implies it selected.
+            // device output (~ its mean) implies it selected.
             val (sm1u, sq1u) = statsOf(inP, inP, cfgDev.beta, cfgDev.winScale)
             val s2u = sigF[(yu * w + xu) * 4] / devScaleEffective
             val baseU = (s2u + cfgDev.sigmaDm2) * cfgDev.inverseRange2 * cfgDev.sigmaScale * cfgDev.epsBoost
@@ -1781,22 +1781,22 @@ sb.append(String.format(
     }
 
     // ------------------------------------------------------------------
-    // L1 repro: capture σ-hat double-domain (σ̂²·WR² in the texture vs the
-    // main's 1/WR²) inflates the capture ε by ≈ WR², collapsing thin bright
-    // strokes to the SWGF window mean (the photographed letter artifact —
+    // repro: capture sigma-hat double-domain (sigma_hat^2*WR^2 in the texture vs the
+    // main's 1/WR^2) inflates the capture epsilon by ~ WR^2, collapsing thin bright
+    // strokes to the SWGF window mean (the photographed letter artifact -
     // validated against the device dump: (49,954) in=0.705 devOut=0.294).
-    // With the domain fixed (single-domain σ̂²) the strokes survive.
-    // Guard: no S5 formula/iteration/DPC/S3/S4 changes — this only pins the
+    // With the domain fixed (single-domain sigma_hat^2) the strokes survive.
+    // Guard: no S5 formula/iteration/DPC/S3/S4 changes - this only pins the
     // input-domain bug (SigmaHatShaderProgram :227) that the fix removes.
     // ------------------------------------------------------------------
 
     @Test
     fun captureDoubleDomainSigmaLetterCollapse() {
         val sb = StringBuilder()
-        sb.append("=== L1: capture σ-hat double-domain ε collapse (letters) ===\n\n")
+        sb.append("=== capture sigma_hat double-domain epsilon collapse (letters) ===\n\n")
 
         // Dark near-black background + thin bright letter strokes, like the
-        // real backlit-sign capture (bg≈0.02, letters≈0.68, WR=959, iso≈1029).
+        // real backlit-sign capture (bg~0.02, letters~0.68, WR=959, iso~1029).
         val size = 256
         val cfg = Cfg(winScale = 4.0f, epsBoost = 16f, whiteRange = 959f, iso = 1029, evGain2 = 1f)
         val sigmaPx = 1.2f / 959f
@@ -1811,8 +1811,8 @@ sb.append(String.format(
                 if (dx in 0 until size && dy in 0 until size) mask[dy][dx] = true
             }
         }
-        // Column strokes (narrow + medium): [x, y, w, h] — thin like real letters
-        // so even ±1-neighbour MAD straddles the ink (σ̂² ≈ 100s of DN²).
+        // Column strokes (narrow + medium): [x, y, w, h] - thin like real letters
+        // so even +-1-neighbour MAD straddles the ink (sigma_hat^2 ~ 100s of DN^2).
         val bars = arrayOf(
             intArrayOf(lx0, ly0, 4, 96), intArrayOf(lx0 + 16, ly0, 6, 96),
             intArrayOf(lx0 + 34, ly0, 8, 96), intArrayOf(lx0 + 54, ly0, 5, 96),
@@ -1836,11 +1836,11 @@ sb.append(String.format(
         val scene = Pln(size, size, c)
         fun lumaIn(x: Int, y: Int): Float =
             lumaOf(c[y][x * 3], c[y][x * 3 + 1], c[y][x * 3 + 2])
-        // Shipped capture σ̂ generator (axis-min, rgbMode); the double-domain
-        // variant below emulates the historical σ̂²·WR² capture texture.
+        // Shipped capture sigma_hat generator (axis-min, rgbMode); the double-domain
+        // variant below emulates the historical sigma_hat^2*WR^2 capture texture.
         val madMap = madSigma2DnAxis(scene, cfg, "min")
 
-        // All bright pixels (rims included — the real capture's letters are all
+        // All bright pixels (rims included - the real capture's letters are all
         // thin, so every letter pixel sits within a window's straddle reach).
         val lo = 6
         val hi = size - 6
@@ -1852,13 +1852,13 @@ sb.append(String.format(
             }
         }
 
-        // epsY actually seen at bright pixels (σ̂² in the σ-hat texture):
+        // epsY actually seen at bright pixels (sigma_hat^2 in the sigma-hat texture):
         val s2Bright = bright.map { madMap[it[1]][it[0]].toDouble() }.average()
         val baseDev = (s2Bright + cfg.sigmaDm2).toFloat() * (1f / cfg.inverseRange2) * cfg.inverseRange2 * cfg.sigmaScale * cfg.epsBoost
         val epsYDev = cfg.lumaEpsScale * baseDev
         val baseFix = (s2Bright + cfg.sigmaDm2).toFloat() * cfg.inverseRange2 * cfg.sigmaScale * cfg.epsBoost
         val epsYFix = cfg.lumaEpsScale * baseFix
-        sb.append(String.format("bright σ̂²=%.0f DN² (mean) → epsY device=%.2f (double-domain, ≫var → aY≈0) vs fixed=%.2e (design)\n",
+        sb.append(String.format("bright sigma_hat^2=%.0f DN^2 (mean) -> epsY device=%.2f (double-domain, >>var -> aY~0) vs fixed=%.2e (design)\n",
             s2Bright, epsYDev.toDouble(), epsYFix.toDouble()))
 
         fun retention(p: Pln): Double {
@@ -1891,14 +1891,14 @@ sb.append(String.format(
             f.writeText(current + sb.toString())
         }
 
-        // The bug under test is exactly the device's ε-inflation; the fixed
+        // The bug under test is exactly the device's epsilon-inflation; the fixed
         // domain must keep the letters and the inflated domain must crush them.
         assertTrue(
-            "fixed σ̂ domain must keep letter luma (retention=$retFix, want ≥0.85)",
+            "fixed sigma_hat domain must keep letter luma (retention=$retFix, want >=0.85)",
             retFix >= 0.85
         )
         assertTrue(
-            "device double-domain must collapse letter luma (retention=$retDev, want ≤0.65)",
+            "device double-domain must collapse letter luma (retention=$retDev, want <=0.65)",
             retDev <= 0.65
         )
         assertTrue(
@@ -1906,7 +1906,7 @@ sb.append(String.format(
             retDev <= retFix - 0.25
         )
         assertTrue(
-            "wide stroke must survive both modes (wide-dev=$wideDev, want ≥0.9)",
+            "wide stroke must survive both modes (wide-dev=$wideDev, want >=0.9)",
             wideDev >= 0.9
         )
     }
@@ -1914,9 +1914,9 @@ sb.append(String.format(
     // ------------------------------------------------------------------
     // Residual (post-fix, design operating point): the fixed-domain replay
     // still pits a fraction of thin bright pixels (device "visible on close
-    // inspection"). Identify WHICH pixels pit under the design ε and WHY:
-    // per-pixel σ̂²/epsY/varY/aY + window choice, then the same on a thin-stroke
-    // synthetic (L1 parity). This is diagnosis only — no S5 math touched.
+    // inspection"). Identify WHICH pixels pit under the design epsilon and WHY:
+    // per-pixel sigma_hat^2/epsY/varY/aY + window choice, then the same on a thin-stroke
+    // synthetic (parity). Diagnostic only; the S5 math is unchanged.
     // ------------------------------------------------------------------
 
     @Test
@@ -1927,7 +1927,7 @@ sb.append(String.format(
         val w = dumpW; val h = dumpH
         val margin = 48
         val sb = StringBuilder()
-        sb.append("=== residual pit mechanism (fixed domain, design ε, PRE-axis-min dump) ===\n")
+        sb.append("=== residual pit mechanism (fixed domain, design epsilon, PRE-axis-min dump) ===\n")
         val cfgDev = Cfg(iso = 1029, winScale = 4.266667f, epsBoost = 16f, strength = 1f)
 
         val inP = Pln(w, h, Array(h) { y -> FloatArray(w * 3) { i ->
@@ -1935,7 +1935,7 @@ sb.append(String.format(
             inF[(y * w + px) * 4 + (i - px * 3)]
         } })
         val mirrorSig = madSigma2Dn(inP, cfgDev)
-        // Auto-detect the σ-hat domain (pre-fix dump = σ̂²·WR², post-fix = raw).
+        // Auto-detect the sigma-hat domain (pre-fix dump = sigma_hat^2*WR^2, post-fix = raw).
         val wr2 = 959f * 959f
         val darkMir = ArrayList<Float>()
         for (y in margin until h - margin) for (x in margin until w - margin) {
@@ -1949,9 +1949,9 @@ sb.append(String.format(
         val rD = pctSorted(darkSig, 0.5) / wr2
         val scaleDev = if (abs(rD - mirDk) < 0.05f * mirDk) wr2 else 1f
         sb.append(String.format(
-            "sigma-hat domain: %s (device σ̂² = R%s)\n",
+            "sigma-hat domain: %s (device sigma_hat^2 = R%s)\n",
             if (scaleDev > 1f) "DOUBLE (pre-fix)" else "SINGLE (post-fix)",
-            if (scaleDev > 1f) "/WR²" else ""
+            if (scaleDev > 1f) "/WR^2" else ""
         ))
 
         val sigma2Dev = Array(h) { y -> FloatArray(w) { x -> sigF[(y * w + x) * 4] / scaleDev } }
@@ -1974,16 +1974,16 @@ sb.append(String.format(
             pits.size.toFloat() / max(pits.size + kept.size, 1),
             if (pits.isEmpty()) 0f else pits.sumOf { (it.li - it.lp).toDouble() }.toFloat() / pits.size
         ))
-        // Group diagnostics: pit vs kept, σ̂² + epsY + in-luma.
+        // Group diagnostics: pit vs kept, sigma_hat^2 + epsY + in-luma.
         fun s2p50(v: List<Pit>) = pctSorted(v.map { it.s2 }, 0.5)
         fun epsAt(s2: Float) = cfgDev.lumaEpsScale * (s2 + cfgDev.sigmaDm2) * cfgDev.inverseRange2 * cfgDev.sigmaScale * cfgDev.epsBoost
         sb.append(String.format(
-            "pit : n=%4d σ̂²p50=%7.0f epsYp50=%.2e in-mean=%.3f in-p50=%.3f\n",
+            "pit : n=%4d SigmaHat2p50=%7.0f epsYp50=%.2e in-mean=%.3f in-p50=%.3f\n",
             pits.size, s2p50(pits).toDouble(), epsAt(s2p50(pits)).toDouble(),
             if (pits.isEmpty()) -1f else pits.sumOf { it.li.toDouble() }.toFloat() / pits.size, pits.map { it.li }.let { pctSorted(it, 0.5) }
         ))
         sb.append(String.format(
-            "kept: n=%4d σ̂²p50=%7.0f epsYp50=%.2e in-mean=%.3f in-p50=%.3f\n",
+            "kept: n=%4d SigmaHat2p50=%7.0f epsYp50=%.2e in-mean=%.3f in-p50=%.3f\n",
             kept.size, s2p50(kept).toDouble(), epsAt(s2p50(kept)).toDouble(),
             if (kept.isEmpty()) -1f else kept.sumOf { it.li.toDouble() }.toFloat() / kept.size, kept.map { it.li }.let { pctSorted(it, 0.5) }
         ))
@@ -2008,7 +2008,7 @@ sb.append(String.format(
                 val varY = pB * v1 + pS * v2
                 val meanY = pB * wM[b1] + pS * wM[b2]
                 sb.append(String.format(
-                    "  pit(%d,%d) in=%.3f→%.3f sig2=%.0f epsY=%.2e | win1[%d] %s m=%.3f v=%.4f s=%.2f  win2[%d] %s m=%.3f v=%.4f s=%.2f  fusedM=%.3f fusedV=%.4f\n",
+                    "  pit(%d,%d) in=%.3f->%.3f sig2=%.0f epsY=%.2e | win1[%d] %s m=%.3f v=%.4f s=%.2f  win2[%d] %s m=%.3f v=%.4f s=%.2f  fusedM=%.3f fusedV=%.4f\n",
                     p.x, p.y, p.li, p.lp, p.s2, epsY,
                     b1, "off=(" + (WINDOW_CENTERS[b1][0] * cfgDev.winScale.toInt()) + "," + (WINDOW_CENTERS[b1][1] * cfgDev.winScale.toInt()) + ")",
                     wM[b1], v1, wS[b1],
@@ -2018,7 +2018,7 @@ sb.append(String.format(
                 ))
                 varY / (varY + epsY)
             }
-            sb.append(String.format("  → aY=%.3f\n", aY))
+            sb.append(String.format("  -> aY=%.3f\n", aY))
         }
 
         java.io.File("build/s5noise_anchor.txt").let { f ->
@@ -2030,11 +2030,11 @@ sb.append(String.format(
 
     // ------------------------------------------------------------------
     // Residual-pit candidates: the pit pixels are driven by edge-inflated
-    // σ̂² (10-22k DN² vs 1.4k interior) raising the design εY.  The ε/κ/
+    // sigma_hat^2 (10-22k DN^2 vs 1.4k interior) raising the design epsilonY.  The epsilon/kappa/
     // iteration/DPC/S3/S4 levers are frozen, so the only admissible lever is
-    // the σ̂ GENERATOR feeding ε.  Compare the shipped MAD-8 σ̂ against two
+    // the sigma_hat GENERATOR feeding epsilon.  Compare the shipped MAD-8 sigma_hat against two
     // direction-aware variants (min / lower-median over the 4 axes) on the
-    // device capture AND on a synthetic letter scene (L1 parity), measuring
+    // device capture AND on a synthetic letter scene (parity), measuring
     // pit count/depth, kept-region stability and thin-stroke retention.
     // ------------------------------------------------------------------
 
@@ -2063,7 +2063,7 @@ sb.append(String.format(
         val w = dumpW; val h = dumpH
         val margin = 48
         val sb = StringBuilder()
-        sb.append("=== residual pit candidates (σ̂ generator variants; dump predates the axis-min GLSL) ===\n")
+        sb.append("=== residual pit candidates (sigma_hat generator variants; dump predates the axis-min GLSL) ===\n")
         val cfgDev = Cfg(iso = 1029, winScale = 4.266667f, epsBoost = 16f, strength = 1f)
 
         val inP = Pln(w, h, Array(h) { y -> FloatArray(w * 3) { i ->
@@ -2072,11 +2072,11 @@ sb.append(String.format(
         } })
         fun lumaInDev(x: Int, y: Int) = lumaOnDev(inF, x, y)
 
-        // Device dump is pre-fix (R = σ̂²·WR²); align to single domain.
+        // Device dump is pre-fix (R = sigma_hat^2*WR^2); align to single domain.
         val wr2 = 959f * 959f
         val devSigma = Array(h) { y -> FloatArray(w) { x -> sigF[(y * w + x) * 4] / wr2 } }
 
-        // Former pit pixels (from residualPitMechanism) to track σ̂²/epsY/out under each variant.
+        // Former pit pixels (from residualPitMechanism) to track sigma_hat^2/epsY/out under each variant.
         val formerPits = arrayOf(
             intArrayOf(49, 955), intArrayOf(51, 935), intArrayOf(48, 934),
             intArrayOf(50, 935), intArrayOf(51, 954), intArrayOf(52, 935)
@@ -2089,7 +2089,7 @@ sb.append(String.format(
             "axis-min" to madSigma2DnAxis(inP, cfgDev, "min"),
             "axis-med" to madSigma2DnAxis(inP, cfgDev, "med")
         )
-        sb.append(String.format("variant            pits/bright depth  pitσ̂²p50  pit-epsY   formerPit out [+] formerPit σ̂² (device dump = pre-axis-min GLSL)\n"))
+        sb.append(String.format("variant            pits/bright depth  pitSigmaHat2p50  pit-epsY   formerPit out [+] formerPit SigmaHat2 (device dump = pre-axis-min GLSL)\n"))
         for ((name, sig) in variants) {
             val (pc, depth, _) = replayPitStats(inP, sig, cfgDev, margin, null) { x, y -> lumaInDev(x, y) } as Triple<IntArray, Float, Float>
             val out = runS5(inP, cfgDev, sigma2Dn = sig)
@@ -2111,11 +2111,11 @@ sb.append(String.format(
             ))
         }
 
-        // ---- Synthetic letter scene (L1 parity) ----
-        // Flat fills give σ̂²≈56 at the rim only: the REAL printed letters carry
-        // pattern/halftone (σ̂² 10-22k DN² on the capture); a faithful headless
+        // ---- Synthetic letter scene (parity) ----
+        // Flat fills give sigma_hat^2 ~ 56 at the rim only: the REAL printed letters carry
+        // pattern/halftone (sigma_hat^2 10-22k DN^2 on the capture); a faithful headless
         // repro needs textured ink. Two texture levels: "tex" (grain+2px checker,
-        // tuned so edge σ̂²≈10k) reproduces the rounded dot; "flat" shows the
+        // tuned so edge sigma_hat^2 ~ 10k) reproduces the rounded dot; "flat" shows the
         // texture-free baseline.
         val size = 256
         val cfgSyn = Cfg(winScale = 4.0f, epsBoost = 16f, whiteRange = 959f, iso = 1029, evGain2 = 1f)
@@ -2176,7 +2176,7 @@ sb.append(String.format(
                 } else if (lp > li) { bgDrift += lp - li; bgN++ }
             }
             sb.append(String.format(
-                "%-13s thinPit/bright=%3d/%-6d depth=%.3f wideRet=%.3f bgDrift=%.1e thinσ̂²p50=%7.0f edgeσ̂²p50=%7.0f keptBright=%.4f\n",
+                "%-13s thinPit/bright=%3d/%-6d depth=%.3f wideRet=%.3f bgDrift=%.1e thinSigmaHat2p50=%7.0f edgeSigmaHat2p50=%7.0f keptBright=%.4f\n",
                 name, tPit, tN, if (tPit == 0) 0f else (tDepth / tPit).toFloat(),
                 if (wideN == 0) -1f else (wideSum / wideN).toFloat(),
                 if (bgN == 0) -1f else (bgDrift / bgN).toFloat(),
@@ -2185,8 +2185,8 @@ sb.append(String.format(
                 lumaOf(out.at(0, 0, 0), out.at(0, 0, 1), out.at(0, 0, 2))
             ))
         }
-        sb.append(String.format("\nsynthetic letter scene (L1 parity; texture reproduces capture-like edge σ̂²):\n"))
-        sb.append(String.format("scene          σ̂-generator   thinPit/bright  depth   wideRet  bgDrift   thinσ̂²p50 edgeσ̂²p50   keptBright(0,0)\n"))
+        sb.append(String.format("\nsynthetic letter scene (parity; texture reproduces capture-like edge sigma_hat^2):\n"))
+        sb.append(String.format("scene          sigmaHat-gen   thinPit/bright  depth   wideRet  bgDrift   thinSigmaHat2p50 edgeSigmaHat2p50   keptBright(0,0)\n"))
         for (fgTex in floatArrayOf(0.05f, 0.0f)) {
             val (scene, bright) = buildLetterScene(fgTex, 0.035f)
             val label = if (fgTex > 0f) "tex (grain .05+.035ck)" else "flat (no texture)  "
@@ -2205,12 +2205,12 @@ sb.append(String.format(
     }
 
     // ------------------------------------------------------------------
-    // Acceptance for the capture σ̂ generator change (axis-min, rgbMode only):
-    //  (a) L1 repro — textured letter strokes pit ≥300 pixels under the MAD-8
+    // Requirements for the capture sigma_hat generator change (axis-min, rgbMode only):
+    //  (a) repro - textured letter strokes pit >=300 pixels under the MAD-8
     //      generator (the close-inspection residual), and axis-min drops that to
-    //      15% or fewer (device headless-equivalent: 6→2 on the real dump).
-    //  (b) no calibration regression — on FLAT noise axis-min is floor-anchored
-    //      and must stay within DR-8 tolerance of the MAD-8 measured σ̂ (the
+    //      15% or fewer (device headless-equivalent: 6->2 on the real dump).
+    //  (b) no calibration regression - on FLAT noise axis-min is floor-anchored
+    //      and must stay within +-10% of the MAD-8 measured sigma_hat (the
     //      ISO-model floor dominates both on flats).
     //  (c) wide strokes and dark background must not drift either way.
     // ------------------------------------------------------------------
@@ -2270,7 +2270,7 @@ sb.append(String.format(
         val cfg = Cfg(winScale = 4.0f, epsBoost = 16f, whiteRange = 959f, iso = 1029, evGain2 = 1f)
         val (scene, bright) = texturedLetterScene(size, 0.05f, 0.035f)
         val sb = StringBuilder()
-        sb.append("=== sigmaHat axis-min: L1 residual + calibration guard ===\n")
+        sb.append("=== sigmaHat axis-min: residual + calibration guard ===\n")
         val sigMad = madSigma2Dn(scene, cfg)
         val sigAx = madSigma2DnAxis(scene, cfg, "min")
         val m = letterPitAndWide(scene, sigMad, cfg, bright, 64, 88)
@@ -2281,9 +2281,9 @@ sb.append(String.format(
         ))
 
         // (a) reproduction must be real, and axis-min must crush it.
-        assertTrue("repro needs ≥300 pits under MAD-8 (got ${m[0].toInt()})", m[0] >= 300f)
+        assertTrue("repro needs >=300 pits under MAD-8 (got ${m[0].toInt()})", m[0] >= 300f)
         assertTrue(
-            "axis-min must cut pits to ≤15% of MAD-8 (mad=${m[0].toInt()} ax=${a[0].toInt()})",
+            "axis-min must cut pits to <=15% of MAD-8 (mad=${m[0].toInt()} ax=${a[0].toInt()})",
             a[0] <= m[0] * 0.15f
         )
         assertTrue(
@@ -2295,7 +2295,7 @@ sb.append(String.format(
             a[3] <= m[3] + 0.01f
         )
 
-        // (b) flat-noise calibration: axis-min vs MAD-8 within DR-8 ±10%.
+        // (b) flat-noise calibration: axis-min vs MAD-8 within +-10%.
         val flatCfg = Cfg(iso = 3200, evGain2 = 1f)
         val sign = 0.5f
         val signalDN = sign * (1f / sqrt(flatCfg.inverseRange2))
@@ -2310,10 +2310,10 @@ sb.append(String.format(
         val madP50 = pctSorted(madVals, 0.5); val axP50 = pctSorted(axVals, 0.5)
         val rel = abs(axP50 - madP50) / max(madP50, 1e-6f)
         sb.append(String.format(
-            "flat noise (iso=3200): MAD σ̂²p50=%.1f axis-min σ̂²p50=%.1f rel=%.3f (model=%.1f)\n",
+            "flat noise (iso=3200): MAD SigmaHat2p50=%.1f axis-min SigmaHat2p50=%.1f rel=%.3f (model=%.1f)\n",
             madP50.toDouble(), axP50.toDouble(), rel.toDouble(), sigma2Ref.toDouble()
         ))
-        assertTrue("flat-noise σ̂² must stay within ±10% of MAD-8 (rel=$rel)", rel <= 0.10f)
+        assertTrue("flat-noise SigmaHat2 must stay within +-10% of MAD-8 (rel=$rel)", rel <= 0.10f)
 
         java.io.File("build/s5noise_anchor.txt").let { f ->
             val current = if (f.exists()) f.readText() else ""

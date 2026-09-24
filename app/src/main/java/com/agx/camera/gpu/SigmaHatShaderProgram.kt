@@ -7,34 +7,34 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 /**
- * Stage 2 — robust per-texel sigma-hat re-estimation (MAD).
+ * Stage 2 - robust per-texel sigma-hat re-estimation (MAD).
  *
  * Reads the sparse Bayer grid (RGBA32F, one texel per 2x2 sensor cell, black
- * level subtracted and clamped >= 0 — the same C3 indexing contract the whole
- * pipeline uses) and estimates σ̂ per texel with median-absolute-deviation
- * statistics on the 8 same-CFA-phase neighbours (±1 grid texel), so
- * residual hot pixels / missed DPC defects cannot inflate the estimate
- * (plan §3 Stage 2, DR-8).
+ * level subtracted and clamped >= 0 - the same C3 indexing contract the whole
+ * pipeline uses) and estimates sigma_hat per texel with median-absolute-deviation
+ * statistics on the 8 same-CFA-phase neighbours (+-1 grid texel), so
+ * residual hot pixels / missed DPC defects cannot inflate the estimate;
+ * the MAD over same-phase neighbours ignores such sparse outlier taps.
  *
  * Output RGBA32F:
- *   R = σ̂²  (MAD-based variance, clamped to the Stage-0 ISO model floor)
- *   G = σ̂
- *   B = σ̂² of phase 0 (debug)
- *   A = σ̂² of phase 3 (debug)
+ *   R = sigma_hat^2  (MAD-based variance, clamped to the Stage-0 ISO model floor)
+ *   G = sigma_hat
+ *   B = sigma_hat^2 of phase 0 (debug)
+ *   A = sigma_hat^2 of phase 3 (debug)
  *
  * The ISO model floor (clamp lower bound) keeps AgX from "developing"
  * dark-margin noise: in flat dark patches MAD collapses to ~0, so we never
- * report a σ̂ below what the Stage-0 noise model says (DR-4 / Stage 6 note).
+ * report a sigma_hat below what the Stage-0 noise model says (Stage 6 note).
  *
  * Two input domains:
  *  - rgbMode=false: the sparse Bayer grid (u_domainScale = 1, raw DN); the
  *    8-neighbour channel-wise MAD (robust to hot pixels / missed DPC).
  *  - rgbMode=true:  a demosaiced RGB texture in 0..1 pixel units
- *    (u_domainScale = whiteLevel-blackLevel) — the capture path's post-RAW
+ *    (u_domainScale = whiteLevel-blackLevel) - the capture path's post-RAW
  *    re-estimation point; alpha is skipped (3 channels).  RGB content uses the
- *    direction-aware σ̂² (min of the 4 axis pair-differences) instead of the
- *    MAD: printed/demic pattern straddling ±1 neighbours inflates the MAD to
- *    σ̂²≈10-20k DN² at ink edges, which the S5 contract would read as noise and
+ *    direction-aware sigma_hat^2 (min of the 4 axis pair-differences) instead of the
+ *    MAD: printed/demic pattern straddling +-1 neighbours inflates the MAD to
+ *    sigma_hat^2~10-20k DN^2 at ink edges, which the S5 contract would read as noise and
  *    pit the letters (close-inspection residual).  Flats stay floor-anchored.
  */
 class SigmaHatShaderProgram {
@@ -173,14 +173,14 @@ uniform float u_iso_model_b;
 // Domain of the input texels: u_domainScale = 1 for the sparse Bayer grid
 // (already black-subtracted raw DN); = whiteLevel-blackLevel for a demosaiced
 // RGBA input in 0..1 pixel units, so the MAD variance is scaled back to raw
-// DN² (×scale²) and the ISO-model floor is evaluated at DN signal (×scale).
+// DN^2 (x scale^2) and the ISO-model floor is evaluated at DN signal (x scale).
 uniform float u_domain_scale;
 // 0 = sparse grid (4 CFA phases incl. alpha), 1 = RGB demosaic (3 channels).
 uniform float u_rgb_mode;
 
 ${DenoiseGlsl.MOSAIC_HELPERS}
 
-// 8 same-CFA-phase neighbours in grid units (±1 output texel).
+// 8 same-CFA-phase neighbours in grid units (+-1 output texel).
 const int NOX[8] = int[8]( 1, -1,  0,  0,  1, -1,  1, -1);
 const int NOY[8] = int[8]( 0,  0,  1, -1,  1,  1, -1, -1);
 
@@ -205,22 +205,22 @@ void main() {
             ivec2 t = clamp(base + ivec2(NOX[k], NOY[k]), ivec2(0), ivec2(u_viewSize) - ivec2(1));
             vals[k] = channelOf(texelFetch(u_sparseTex, t, 0), p) * u_domain_scale;
         }
-        // σ̂².  Preview (sparse Bayer grid) → median-absolute-deviation over the
+        // sigma_hat^2.  Preview (sparse Bayer grid) -> median-absolute-deviation over the
         // 8 same-CFA-phase neighbours (robust to hot pixels / missed DPC);
-        // capture (demosaic RGB) → a printed/demic pattern (backlit sign text,
-        // halftone) straddles the ±1 neighbours and inflates the MAD to
-        // σ̂²≈10-20k DN², which the S5 ε contract reads as NOISE → aY drops →
+        // capture (demosaic RGB) -> a printed/demic pattern (backlit sign text,
+        // halftone) straddles the +-1 neighbours and inflates the MAD to
+        // sigma_hat^2~10-20k DN^2, which the S5 epsilon contract reads as NOISE -> aY drops ->
         // letter pixels drift to the window mean (residual pitting on close
         // inspection, device-verified 6 pit pixels, all at ink edges with
-        // σ̂² 10-22k vs 1.4k interior).  For RGB content take the MINIMUM
+        // sigma_hat^2 10-22k vs 1.4k interior).  For RGB content take the MINIMUM
         // squared pair-difference over the 4 axes (E/W, N/S, diag1, diag2):
         // along a stroke edge the along-edge axis stays at the REGION's own
-        // noise, so ink-edge σ̂² returns to the design scale and aY stays high.
+        // noise, so ink-edge sigma_hat^2 returns to the design scale and aY stays high.
         // The 2-sample axis variance is unbiased for pure noise; the min-of-4
-        // selection bias only lowers σ̂² below the ISO-model floor, which the
-        // max() clamp re-anchors (DR-4/DR-8) — flats are floor-dominated, so
-        // noise calibration is unchanged.  L1 (textured letters): 641→35 pits,
-        // edge σ̂² 20.4k→57.
+        // selection bias only lowers sigma_hat^2 below the ISO-model floor, which the
+        // max() clamp re-anchors - flats are floor-dominated, so
+        // noise calibration is unchanged.  (textured letters): 641->35 pits,
+        // edge sigma_hat^2 20.4k->57.
         float sig2;
         if (u_rgb_mode > 0.5) {
             float a0 = vals[0] - vals[1];
@@ -254,15 +254,15 @@ void main() {
                 devs[j + 1] = v;
             }
             float mad = (devs[3] + devs[4]) * 0.5;
-            // σ̂² from MAD². vals[] are already scaled into the σ̂ domain by
-            // u_domain_scale above (preview: domainScale=1 → 0..1 image units;
-            // capture rgbMode: domainScale=whiteRange → raw-DN).  Squaring the
-            // scale AGAIN here over-inflated the capture texture to σ̂²·WR²: the
-            // S5 main divides by 1/WR² once, leaving capture ε ≈ 0.7·σ̂² (∼WR²×
-            // the designed 0.7·σ̂²/WR²) → aY≈0 → thin bright strokes collapse to
+            // sigma_hat^2 from MAD^2. vals[] are already scaled into the sigma_hat domain by
+            // u_domain_scale above (preview: domainScale=1 -> 0..1 image units;
+            // capture rgbMode: domainScale=whiteRange -> raw-DN).  Squaring the
+            // scale AGAIN here over-inflated the capture texture to sigma_hat^2*WR^2: the
+            // S5 main divides by 1/WR^2 once, leaving capture epsilon ~ 0.7*sigma_hat^2 (~WR^2 x
+            // the designed 0.7*sigma_hat^2/WR^2) -> aY~0 -> thin bright strokes collapse to
             // the window mean (backlit-letter pitting/halo, device-verified).
-            // Keep a single power so the texture honours the S5 contract: σ̂² in
-            // raw-DN² on capture, image-DN²/unit² on preview (×1 unchanged).
+            // Keep a single power so the texture honours the S5 contract: sigma_hat^2 in
+            // raw-DN^2 on capture, image-DN^2/unit^2 on preview (x1 unchanged).
             sig2 = 2.1981 * mad * mad;
         }
         if (p == 0) sig2ByPhase.x = sig2;

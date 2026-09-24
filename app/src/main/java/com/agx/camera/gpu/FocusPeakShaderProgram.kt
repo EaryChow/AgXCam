@@ -10,8 +10,8 @@ import java.nio.FloatBuffer
  * Focus-peak composite pass.
  *
  * Takes the fully formed picture preview (which already contains the zoom crop) and
- * tints the sharp edges green. A pixel scores on the *adjacent* gradient — the
- * largest luminance step to its immediate ring neighbours — normalised by the local
+ * tints the sharp edges green. A pixel scores on the *adjacent* gradient - the
+ * largest luminance step to its immediate ring neighbours - normalised by the local
  * luminance. Out-of-focus content only produces gradual intensity ramps, whose
  * per-pixel gradient is tiny no matter how big the total edge amplitude is, so it
  * can never pass the threshold; a genuinely sharp edge has a hard per-pixel step.
@@ -19,7 +19,7 @@ import java.nio.FloatBuffer
  * wider span ([radius] texels), which confirms the response comes from a real edge
  * and rejects isolated single-pixel noise. Two scales are combined:
  *
- *  - a screen-anchored ring at 1 texel, confirmed out to [radius] texels — the
+ *  - a screen-anchored ring at 1 texel, confirmed out to [radius] texels - the
  *    band detector, tracking the displayed image regardless of zoom/thickness;
  *  - a source-anchored ring at [sharpOffsetX]/[sharpOffsetY] (in UV units that
  *    correspond to a fixed distance in SOURCE pixels, so it scales inversely to
@@ -69,8 +69,8 @@ class FocusPeakShaderProgram {
     /**
      * Composite the preview [textureId] with the green focus-peak overlay.
      * [screenWidth]/[screenHeight] are the viewport pixels the FBO is displayed in
-     * (texel size = 1/screen), [radius] is the support radius in screen pixels — the
-     * span over which an edge must stay consistent — and the band stays a fixed
+     * (texel size = 1/screen), [radius] is the support radius in screen pixels - the
+     * span over which an edge must stay consistent - and the band stays a fixed
      * pixel thickness whatever the zoom.
      * [sharpOffsetX]/[sharpOffsetY] are UV steps (in the FBO texture) that span a
      * fixed distance in SOURCE pixels, inverse-scaled by zoom, so the sharpness

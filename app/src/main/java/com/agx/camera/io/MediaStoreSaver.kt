@@ -49,7 +49,7 @@ class MediaStoreSaver(private val context: Context) {
                 resolver.update(uri, contentValues, null, null)
             }
 
-            Log.d(TAG, "Saved JPEG: $displayName → $uri")
+            Log.d(TAG, "Saved JPEG: $displayName -> $uri")
             lastSavedUri = uri
             return uri
         } catch (e: Exception) {

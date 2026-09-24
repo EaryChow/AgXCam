@@ -194,7 +194,7 @@ class ThermalThresholdTest {
         val tm = ThermalManager(context)
 
         tm.seedSmoothedTemperature(37.0f)
-        val afterRise = tm.smoothTemperature(40.0f) // 3.0° up-step
+        val afterRise = tm.smoothTemperature(40.0f) // 3.0 deg up-step
         val afterFall = tm.smoothTemperature(37.0f) // same size step down
 
         val riseMove = afterRise - 37.0f

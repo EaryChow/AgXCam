@@ -12,7 +12,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Verifies the Monte-Carlo lens-shading estimator (§15.1 fallback): sparse green
+ * Verifies the Monte-Carlo lens-shading estimator fallback: sparse green
  * sampling accumulating into a coarse grid, radial-bin + polynomial fit, the
  * achromatic LensShadingData encoding, the pause/resume/converge life cycle the
  * settings panel drives, and the time-gated convergence that keeps short

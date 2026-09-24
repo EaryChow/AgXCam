@@ -30,7 +30,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
     // Baseline preview size (pre-cap). Set by preparePreviewPipeline; the cap
     // below shrinks the FBO (and thus the demosaic/output pixel work) when the
-    // battery is warm or hotter. Resolution cap is pure throughput — it never
+    // battery is warm or hotter. Resolution cap is pure throughput - it never
     // rewrites exposure parameters.
     private var basePreviewWidth = 640
     private var basePreviewHeight = 480
@@ -67,7 +67,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     // Spatial-NR output-driven denoise buffers: single RGBA32F texture
     // holding the denoised 4-phase mosaic (R,G1,G2,B), written every frame
     // and consumed by the demosaic pass in the SAME frame via the reverse
-    // map.  Spatial-only — no history, no MRT.
+    // map.  Spatial-only - no history, no MRT.
     private var denoiseFboId = 0
     private var denoisedTexId = 0
     private var denoiseFboWidth = 0
@@ -76,7 +76,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     // S1/S3 same-colour pack buffers (RGBA32F denoised 4-phase mosaic).  The
     // pack pass precomputes the S3 filter once per texel / CFA phase and the
     // demosaic reverse-maps it, replacing the inline 13-tap filter that ran
-    // per box-AA sample × demosaic neighbourhood (1872 R16UI fetches per
+    // per box-AA sample x demosaic neighbourhood (1872 R16UI fetches per
     // output texel at preview, 117 at 1:1 capture).
     private var s3PackFboId = 0
     private var s3PackTexId = 0
@@ -92,7 +92,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var captureDenoiseFboHeight = 0
 
     // Stage 1 (DPC) transient buffers: avg/flag maps + two ping-pong work
-    // textures for the pass-CORRECT → pass-COUPLET chain. All RGBA32F at the
+    // textures for the pass-CORRECT -> pass-COUPLET chain. All RGBA32F at the
     // sparse-grid (demosaic) resolution.
     private var dpcAvgFboId = 0
     private var dpcAvgTexId = 0
@@ -105,16 +105,16 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var dpcBufferWidth = 0
     private var dpcBufferHeight = 0
 
-    // Stage 2 (sigma-hat) output texture: RGBA32F, R=σ̂², G=σ̂.
+    // Stage 2 (sigma-hat) output texture: RGBA32F, R=sigma_hat^2, G=sigma_hat.
     private var sigmaFboId = 0
     private var sigmaTexId = 0
     private var sigmaBufferWidth = 0
     private var sigmaBufferHeight = 0
 
     // Stage 2 (sigma-hat) output for the capture path: RGBA32F at the RAW
-    // demosaic resolution, holding the post-RAW σ̂ re-estimation that feeds
+    // demosaic resolution, holding the post-RAW sigma_hat re-estimation that feeds
     // Stage 5 on stills (capture runs no sparse grid, so rgbMode=true on the
-    // demosaiced output is the single DR-8 re-estimation point there).
+    // demosaiced output is the single re-estimation point there).
     private var captureSigmaFboId = 0
     private var captureSigmaTexId = 0
     private var captureSigmaBufferWidth = 0
@@ -139,7 +139,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var outNrBufferHeight = 0
 
     // 1x1 RGBA32F zero texture bound to float samplers that have no real data
-    // behind them (DPC avg/flag inputs while packing, σ̂ fallback).
+    // behind them (DPC avg/flag inputs while packing, sigma_hat fallback).
     private var fallbackFloatTexId = 0
 
     private val yuvShader = YuvShaderProgram()
@@ -187,15 +187,15 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     @Volatile var rawNrStrength = 0f
     @Volatile var outNrStrength = 0f
     @Volatile var syntheticTestEnabled = com.agx.camera.BuildConfig.AGX_SYNTHETIC_BAYER
-    // Runs the extra Day-0 Stage-2 draw — the post-DPC σ̂ re-estimation that
-    // DR-8 requires *as the boundary between DPC and Stage 3*.  Current
-    // consumers never read it (S3's strength is a host scalar α, S5 consumes
-    // the post-S3 estimate and the overwrite is the correct DR-8 semantics),
+    // Runs the extra Stage-2 draw - the post-DPC sigma_hat re-estimation that
+    // is required as the boundary between DPC and Stage 3.  Current
+    // consumers never read it (S3's strength is a host scalar alpha, S5 consumes
+    // the post-S3 estimate and the overwrite is the correct consuming write),
     // so it must NOT burn preview GPU budget every frame: OFF by default.
     // Keep it behind a diagnostic switch for two purposes:
-    //   1. validation channel — defect injection → σ̂ must stay unpolluted by
-    //      S1 (a DPC leak shows up as a σ̂² bump at the defect texel);
-    //   2. production profiling — cross-check the post-DPC MAD cost against
+    //   1. validation channel - defect injection -> sigma_hat must stay unpolluted by
+    //      S1 (a DPC leak shows up as a sigma_hat^2 bump at the defect texel);
+    //   2. production profiling - cross-check the post-DPC MAD cost against
     //      the post-S3 pass before folding either into a fused shader.
     // The draw keeps its timing instrumentation (log-and-skip: only counted
     // frames are logged) so enabling it costs zero logging overhead.
@@ -347,10 +347,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val sourceAspect = sourceW.toFloat() / sourceH.toFloat()
         val fboAspect = fboWidth.toFloat() / fboHeight.toFloat()
         return if (sourceAspect > fboAspect) {
-            // Source is wider than the output aspect → crop horizontal (scale X < 1)
+            // Source is wider than the output aspect -> crop horizontal (scale X < 1)
             Pair(fboAspect / sourceAspect, 1f)
         } else {
-            // Source is taller than the output aspect → crop vertical (scale Y < 1)
+            // Source is taller than the output aspect -> crop vertical (scale Y < 1)
             Pair(1f, sourceAspect / fboAspect)
         }
     }
@@ -531,7 +531,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         }
     }
 
-    /** Push a freshly-parsed lens shading gain map (§15.1). [pixelsRgba16f] is
+    /** Push a freshly-parsed lens shading gain map. [pixelsRgba16f] is
      *  RGBA16F half-float data, already permuted per the active CFA and
      *  Y-flipped for direct glTexImage2D upload. If GL is not initialized yet,
      *  initGlResources() picks it up; otherwise the upload runs on the GL
@@ -546,7 +546,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     }
 
     /** Drop the current lens shading map back to the identity no-op. Used when
-     *  a different lens is opened — its own calibration arrives with the first
+     *  a different lens is opened - its own calibration arrives with the first
      *  CaptureResults, and applying the previous lens's map in between would
      *  vignette the preview wrong. */
     fun resetLensShading() {
@@ -665,8 +665,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // dense enough at the current zoom (previewZoomK <= 2, roughly 3x+
         // zoom-in); at wider zoom it is skipped and the demosaic's per-sample
         // sampleSameColorNRRing runs inline instead (see needSparseGrid below).
-        // The grid chain is preview (live/synthetic) only — capture never runs
-        // it — and its density gate also removes the non-integer grid->sensor
+        // The grid chain is preview (live/synthetic) only - capture never runs
+        // it - and its density gate also removes the non-integer grid->sensor
         // collapse that the old output-res grid caused at this sensor/grid
         // ratio.
         val cellGridW = demosaicFboWidth
@@ -717,11 +717,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // pattern); the pack is kept only as a fallback when the DPC/GF shaders
         // are not ready.
         //
-        // The DPC+GF chain is spec-correct only when the sparse grid ≈ sensor
+        // The DPC+GF chain is spec-correct only when the sparse grid ~ sensor
         // resolution (k <= 2, i.e. roughly 3x+ zoom-in at preview sizes).  At
         // wider zoom each grid texel reverse-maps to several sensor pixels, so
         // the GF 5x5 window covers a huge sensor footprint and the DPC operates
-        // on sub-sampled texels — both add noise and let hot pixels fall between
+        // on sub-sampled texels - both add noise and let hot pixels fall between
         // samples.  There the demosaic's inline sampleSameColorNR (which reads
         // raw sensor values at any zoom and blends within a single CFA channel)
         // is the right path; demosaicDenoisedId stays 0 so drawDemosaic applies
@@ -754,25 +754,25 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             }
         }
 
-        // Stage 2: σ̂ re-estimation (MAD) on the sparse residual grid.  The
-        // post-S3 draw (below) is the DR-8 mandatory re-estimate at the
-        // Stage 3→Stage 5 boundary — S5 reads ITS output, and it overwrites
-        // the buffer so the σ̂ texture reflects the actual post-RAW residual
+        // Stage 2: sigma_hat re-estimation (MAD) on the sparse residual grid.  The
+        // post-S3 draw (below) is the mandatory re-estimate at the
+        // Stage 3->Stage 5 boundary - S5 reads ITS output, and it overwrites
+        // the buffer so the sigma_hat texture reflects the actual post-RAW residual
         // (no analytic variance propagation).  That single draw is the cost
-        // the performance acceptance (item 3) measures.
+        // the performance requirement measures.
         //
-        // The post-DPC draw exists for DR-8's *second* mandatory point (DPC→
+        // The post-DPC draw exists for the *second* mandatory point (DPC->
         // Stage 3 boundary) but is functionally dead for the current
-        // consumers: S3's strength is a host scalar α that never samples σ̂,
+        // consumers: S3's strength is a host scalar alpha that never samples sigma_hat,
         // and S5 reads the post-S3 estimate (so the post-S3 write-over is the
         // correct consuming write).  Running it every frame would permanently
         // charge the preview GPU budget for an unconsumed result, so it is
-        // OFF by default — retained only for the diagnostic switch
+        // OFF by default - retained only for the diagnostic switch
         // stage2DiagnosticPostDpcPass: a validation channel that injected
-        // defects must NOT pollute σ̂ (DPC leak shows up as a σ̂² bump at the
+        // defects must NOT pollute sigma_hat (DPC leak shows up as a sigma_hat^2 bump at the
         // defect texel), plus a profiling hook to compare post-DPC vs post-S3
         // MAD cost.  When enabled, the post-DPC draw runs FIRST and the
-        // post-S3 draw overwrites it — same semantics as if it were on.
+        // post-S3 draw overwrites it - same semantics as if it were on.
         var sigmaAvailable = false
         val sparseGridRendered = needSparseGrid && previewZoomK <= 2.0f
         if (outDenoiseActive && sparseGridRendered) {
@@ -875,7 +875,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // rules bound the demosaic configuration, probed across k=1.5..8 (the
         // S3PreviewGLReproTest monotonicity walk).
         //   (a) baseline bound: the effective averaging must never drop below
-        //       the zero-slider 4x4 — any step-down needs the blend to already
+        //       the zero-slider 4x4 - any step-down needs the blend to already
         //       be strong enough to keep every band's sigma AT OR BELOW the
         //       previous (weaker) slider value (per-band sigma gate).
         //   (b) the 4->2 box step itself is removed: the strong-s3 zone blends
@@ -890,7 +890,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // at 4, unchanged.
         val previewBoxAA = 4
         // In the box-AA=4 band the demosaic box supplies the steady averaging, so
-        // the α-trim ring only needs the 4 step-2 axis neighbours
+        // the alpha-trim ring only needs the 4 step-2 axis neighbours
         // (u_nr_radius=2).  The smooth blend's 2x2 side passes ring=4 in-shader
         // (the full 12-tap form that drags sigma down hard up there), so the
         // preview never switches u_nr_radius below/above while blending.
@@ -908,7 +908,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         }
 
         bayerShader.drawDemosaic(
-            cellGridW, cellGridH, // u_outputResolution: maps sensor coords → denoised grid texels
+            cellGridW, cellGridH, // u_outputResolution: maps sensor coords -> denoised grid texels
             previewTransform,
             effBlack,
             effColorMap,
@@ -1004,16 +1004,16 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         GLES20.glViewport(0, 0, width, height)
     }
 
-    /** Stage 5 — output-domain SWGF over the demosaiced RGB (plan §3 Stage 5).
-     *  Two iterations with a β=0.3 noise return and κ×1.4 on round 2. "κ×1.4"
-     *  is the round-2 σ multiplier; because ε ∝ σ̂² here, the round-2 ε
-     *  multiplier is (κ×1.4)² = 1.96 (see the round-2 comment below). The
+    /** Stage 5 - output-domain SWGF over the demosaiced RGB.
+     *  Two iterations with a beta=0.3 noise return and kappa x 1.4 on round 2. "kappa x 1.4"
+     *  is the round-2 sigma multiplier; because epsilon proportional to sigma_hat^2 here, the round-2 epsilon
+     *  multiplier is (kappa x 1.4)^2 = 1.96 (see the round-2 comment below). The
      *  returned texture id feeds the ISP (nrShader/draw) instead of the raw
      *  demosaic output.  The S5 geometry lives in output-pixel space, so the
      *  capture path passes winScale = captureRes/previewRes > 1 to widen the
      *  window centres + dense chroma-mean box to the same relative image
      *  footprint, and epsBoost to compensate for its missing boxAA low-pass
-     *  (preview residual σ̂²/32 vs 1:1 capture ~16x larger). */
+     *  (preview residual sigma_hat^2/32 vs 1:1 capture ~16x larger). */
     private fun runStage5(
         w: Int, h: Int, inputTex: Int, sigmaTex: Int, whiteRange: Float, gridW: Int, gridH: Int,
         useIsoSigma: Boolean = false, isoModelA: Float = 0f, isoModelB: Float = 0f,
@@ -1022,64 +1022,64 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     ): Int {
         if (!outNrShader.isReady()) return inputTex
         ensureOutNrBuffers(w, h)
-        // sigmaTex holds σ̂ on the 2×2-cell grid (cellGridW/H), which can differ
+        // sigmaTex holds sigma_hat on the 2x2-cell grid (cellGridW/H), which can differ
         // from this pass's output res; drawMain scales the fetch accordingly.
         val sigmaW = gridW.toFloat()
         val sigmaH = gridH.toFloat()
         val s = outNrStrength.coerceIn(0f, 1f)
         // Slider 0 = full bypass (C6): the caller gates on outNrStrength > 0,
         // but keep the guarantee here too so a strength-0 call can never run
-        // round 2's β-composed input (mix(outNr1, input, β)) through the final
-        // u_strength blend — that would not be bit-equal to the input.
+        // round 2's beta-composed input (mix(outNr1, input, beta)) through the final
+        // u_strength blend - that would not be bit-equal to the input.
         if (s <= 0f) return inputTex
         // Decoupled luma/chroma response.  eps is fixed at design maximum;
         // the slider controls a linear blend toward the filtered result so
         // strength 0..100 maps to 0%..100% denoise (0% = identity,
-        // 100% = full SWGF at epsY≈1.4, epsC≈64).
+        // 100% = full SWGF at epsY~1.4, epsC~64).
         val lumaEpsScale = 1.4f
         val chromaEpsScale = 64.0f
         val beta = 0.3f
-        // Stage-4 sparse-demosaic residual variance (plan §3: σ_dm ≈ 3~4 DN).
+        // Stage-4 sparse-demosaic residual variance (sigma_dm ~ 3~4 DN).
         val sigmaDm2 = 10f
-        // ε lives in the pixel domain (0..1); σ̂² and σ_dm² are in raw-DN².
+        // epsilon lives in the pixel domain (0..1); sigma_hat^2 and sigma_dm^2 are in raw-DN^2.
         val inverseRange2 = 1f / (whiteRange * whiteRange)
-        // Domain normalization factor: the S2 σ̂ grid (or the Stage-0 ISO model
-        // fallback) reports σ̂² in the raw-DN² calibration domain (pre-demosaic),
+        // Domain normalization factor: the S2 sigma_hat grid (or the Stage-0 ISO model
+        // fallback) reports sigma_hat^2 in the raw-DN^2 calibration domain (pre-demosaic),
         // while this pass sees the post-S3 + 4x4-boxAA-demosaic residual in the
-        // formed-image domain. The 32x is an operating-point fold — 16 (4x4
-        // boxAA) x ~2 (S3 alpha≈0.5 blend) — NOT a unit conversion: whiteRange
+        // formed-image domain. The 32x is an operating-point fold - 16 (4x4
+        // boxAA) x ~2 (S3 alpha~0.5 blend) - NOT a unit conversion: whiteRange
         // enters exactly once via inverseRange2 (12-bit would give 16x, the
         // 1023-vs-959 mirror slip is 7%). It therefore absorbs scene/alpha
         // dependence and is retained + documented as known debt rather than re-derived at the source.
-        // S5D f#1200 crash evidence: σ̂² is the sparse-grid DN² noise floor
-        // (readNoiseVariance(3200)=111.5 → sig2≈113), but the filter actually
+        // Observed S5D crash evidence: sigma_hat^2 is the sparse-grid DN^2 noise floor
+        // (readNoiseVariance(3200)=111.5 -> sig2~113), but the filter actually
         // sees the S3 + 4x4-boxAA-denoised demosaic residual (measured var
-        // ≈2-6e-6 → σ≈1.5-2.5 DN). Using the DN² floor verbatim makes
-        // ε≈30-100× the true residual → aY≈0.02 → output collapses to the
-        // window mean (brighten + pixel-art). Scale ε to the real residual.
+        // ~2-6e-6 -> sigma~1.5-2.5 DN). Using the DN^2 floor verbatim makes
+        // epsilon~30-100x the true residual -> aY~0.02 -> output collapses to the
+        // window mean (brighten + pixel-art). Scale epsilon to the real residual.
         val calibToResidualScale = 1f / 32f
         // EV PP multiplies the linear scene by exp2(EV) AFTER Stage 5 in the
         // formed picture read, so the noise the viewer sees grows with EV exactly as
-        // if the sensor ISO had been raised.  Fold the EV gain (σ² ∝ gain²)
+        // if the sensor ISO had been raised.  Fold the EV gain (sigma^2 proportional to gain^2)
         // into the ISO model, anchored at the +1.5 EV default so the baseline
         // the pipeline was tuned around stays unchanged.  Clamp to keep the
-        // filter out of the ε≫var collapse regime on either extreme.
+        // filter out of the epsilon>>var collapse regime on either extreme.
         val evGain2 = Math.pow(2.0, 2.0 * (exposureEv - 1.5)).toFloat().coerceIn(1f / 8f, 16f)
         val s5IsoA = isoModelA * evGain2
         val s5IsoB = isoModelB * evGain2
-        // Two SWGF iterations (plan §3 Stage 5, calibrated in the appendix-C
-        // noise-anchor table).  Round 1 blends the demosaic output with itself
-        // (β is an identity there); round 2 runs against the original with the
-        // ε multiplier raised to 1.96 = (κ×1.4)²  — the plan's "κ×1.4 on round
-        // 2" applies to σ, and since ε ∝ σ̂² (variance domain) the ε multiplier
-        // is the square of the σ multiplier.
+        // Two SWGF iterations (calibrated with the noise-anchor calibration table).
+        // Round 1 blends the demosaic output with itself
+        // (beta is an identity there); round 2 runs against the original with the
+        // epsilon multiplier raised to 1.96 = (kappa x 1.4)^2  - the "kappa x 1.4 on round
+        // 2" applies to sigma, and since epsilon proportional to sigma_hat^2 (variance domain) the epsilon multiplier
+        // is the square of the sigma multiplier.
         val iterations = 2
-        // Round-2 ε multiplier = (κ×1.4)².  κ is the round-1 σ multiplier
-        // (lumaEpsScale/chromaEpsScale lower these into the ε base); the plan's
-        // "κ×1.4" σ ratio therefore squares in ε (ε ∝ σ̂²).
+        // Round-2 epsilon multiplier = (kappa x 1.4)^2.  kappa is the round-1 sigma multiplier
+        // (lumaEpsScale/chromaEpsScale lower these into the epsilon base); the
+        // "kappa x 1.4" sigma ratio therefore squares in epsilon (epsilon proportional to sigma_hat^2).
         val round2EpsMult = 1.96f
 
-        // Round 1 (κ1): demosaic output → outNr1.
+        // Round 1 (kappa1): demosaic output -> outNr1.
         val flagConsumeNs0 = System.nanoTime()
         bindTarget(statsHFboId, w, h)
         outNrShader.drawStatsH(
@@ -1104,12 +1104,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
         if (iterations < 2) return outNr1TexId
 
-        // Round 2: outNr1 → outNr2.  ε multiplier 1.96 = (κ×1.4)², because ε ∝ σ̂²
-        // (κ×1.4 acts on σ; the variance-domain ε must scale by the square).
-        // β=0.3 noise-return blends the round-1 output toward the ORIGINAL
+        // Round 2: outNr1 -> outNr2.  epsilon multiplier 1.96 = (kappa x 1.4)^2, because epsilon proportional to sigma_hat^2
+        // (kappa x 1.4 acts on sigma; the variance-domain epsilon must scale by the square).
+        // beta=0.3 noise-return blends the round-1 output toward the ORIGINAL
         // input before stats and the final strength mix, so the second pass
-        // sees 0.7·r1 + 0.3·original instead of consolidating r1's correlated
-        // residual (flat-region low-frequency residue cleanup, plan §3).
+        // sees 0.7*r1 + 0.3*original instead of consolidating r1's correlated
+        // residual (flat-region low-frequency residue cleanup).
         bindTarget(statsHFboId, w, h)
         outNrShader.drawStatsH(
             outNr1TexId, inputTex, beta, S5_LUMA_WEIGHTS, winScale,
@@ -1145,7 +1145,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     // (0.5f reads as 8.83e-44). All readback helpers MUST use native order.
     // Readbacks use GL_FLOAT regardless of the attachment format: RGBA32F
     // cannot be read as GL_UNSIGNED_BYTE (GL_INVALID_OPERATION, and the buffer
-    // stays zeroed → fake black content), while GL_FLOAT is valid for both
+    // stays zeroed -> fake black content), while GL_FLOAT is valid for both
     // RGBA8 and RGBA32F attachments.
     private fun readBuffer(capacity: Int): ByteBuffer =
         ByteBuffer.allocateDirect(capacity).order(ByteOrder.nativeOrder())
@@ -1198,7 +1198,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 "avgD=$avgD flagD=$flagD gridD=$gridD (stage=$sigStr)"
             if (params.s3Active) {
                 // gridD (vs r.grid) shows how far S3 moved the cell; the pass
-                // criterion is gridUsedD = |gpu s3 grid − cpu s3 grid|.
+                // criterion is gridUsedD = |gpu s3 grid - cpu s3 grid|.
                 line += " used=$gridUsedD"
             }
             if (sigmaFbo != 0) {
@@ -1439,9 +1439,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     // Capture stills always use the demosaic's inline
                     // sampleSameColorNR: it reads raw sensor pixels directly at
                     // every sample, blends within one CFA channel, uses a softer
-                    // hot/cold band and has no M2 isolation test — so it removes
+                    // hot/cold band and has no M2 isolation test - so it removes
                     // defect pixels at ANY capture resolution (Full/Half/Quarter).
-                    // The spec-accurate DPC grid chain (θ=6 band, M2=10 isolation)
+                    // The spec-accurate DPC grid chain (theta=6 band, M2=10 isolation)
                     // deliberately leaves moderate hot pixels in a one-shot still,
                     // and the fused pack fallback would reintroduce boxedBlend's
                     // cross-phase achromatic drag.  The DPC+GF chain stays
@@ -1491,17 +1491,17 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     // Stage-5 output-domain SWGF at capture resolution, fed from
                     // the ISO noise model (the S2 grid stays preview-only).
                     // The S5 windows live in output-pixel space, so at full-res
-                    // capture (up to 3-4x the preview FBO) the fixed ±2 px geometry
+                    // capture (up to 3-4x the preview FBO) the fixed +-2 px geometry
                     // would cover a 3-4x smaller image footprint than on preview;
                     // scale the SWGF window centres and the dense chroma-mean
-                    // half-width by the preview→capture resolution ratio (the
+                    // half-width by the preview->capture resolution ratio (the
                     // stats' R follows the same rule) so the box hits the same
                     // relative image regions.  (The capture demosaic
                     // FBO is sized to the SETTINGS target resolution, which can be
                     // below the full sensor, so this ratio follows that too.)
-                    // The ε residual also depends on the settings resolution: at 1:1
+                    // The epsilon residual also depends on the settings resolution: at 1:1
                     // target == sensor there is no boxAA, so the per-pixel residual
-                    // is ~16x the preview's boxAA'd σ̂²/32 and ε is boosted by 16;
+                    // is ~16x the preview's boxAA'd sigma_hat^2/32 and epsilon is boosted by 16;
                     // at a reduced target the demosaic boxAA is ON (boxAA=4) and the
                     // residual is preview-like, so 16 would over-soften the means
                     // and push the output onto the sparse windows (blocky patches).
@@ -1511,12 +1511,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         rawDemosaicFboWidth.toFloat() / maxOf(previewS5W, 1).toFloat()
                     )
                     val capEpsBoost = if (captureBoxAA > 0) 1f else 16f
-                    // Stage 2: σ̂ re-estimation on the demosaiced still. Capture
+                    // Stage 2: sigma_hat re-estimation on the demosaiced still. Capture
                     // keeps the inline S1/S3 (no sparse grid chain), so the two
-                    // DR-8 points collapse to this single post-RAW re-estimate
+                    // re-estimation points collapse to this single post-RAW re-estimate
                     // feeding S5; rgbMode=true reads the R/G/B channels of the
-                    // 0..1 demosaic output with domainScale=whiteRange (→DN²).
-                    // The σ̂ buffer also carries the dark-region ISO-model floor
+                    // 0..1 demosaic output with domainScale=whiteRange (->DN^2).
+                    // The sigma_hat buffer also carries the dark-region ISO-model floor
                     // that Stage 6's AgX development relies on (previously dead
                     // on the real capture path).  If buffer/shader are missing,
                     // useIsoSigma falls back to the ISO model formula.
@@ -1622,13 +1622,13 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             val vpY: Int
             // FIT (CENTER_INSIDE) - show full frame with bars for selected aspect ratio
             if (contentAspect > viewAspect) {
-                // Content wider than view → fit width, letterbox top/bottom
+                // Content wider than view -> fit width, letterbox top/bottom
                 vpW = viewW
                 vpH = (viewW / contentAspect).toInt()
                 vpX = 0
                 vpY = (viewH - vpH) / 2
             } else {
-                // Content taller than view → fit height, pillarbox left/right
+                // Content taller than view -> fit height, pillarbox left/right
                 vpH = viewH
                 vpW = (viewH * contentAspect).toInt()
                 vpX = (viewW - vpW) / 2
@@ -2109,7 +2109,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val (t, f) = allocRgba32fFbo(width, height)
         // The demosaic reads this mosaic with 4-tap texelFetch bilinear
         // (denoisedSampleRaw): GL_LINEAR is illegal on RGBA32F in ES 3.0, so
-        // the shared allocator's NEAREST filter is left in place — texelFetch
+        // the shared allocator's NEAREST filter is left in place - texelFetch
         // ignores filtering state entirely anyway.
         s3PackTexId = t
         s3PackFboId = f
@@ -2331,7 +2331,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             logGlError("chain-dpc-couplet", renderCount)
             outputTex = dpcWorkBTexId
         } else {
-            // DPC disabled: pack raw → float sparse grid (black-subtracted,
+            // DPC disabled: pack raw -> float sparse grid (black-subtracted,
             // clamped) using pass CORRECT in pure pass-through mode.
             bindTarget(dpcWorkAFboId, gridW, gridH)
             dpcShader.draw(

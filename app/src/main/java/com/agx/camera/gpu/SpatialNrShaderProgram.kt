@@ -176,7 +176,7 @@ void main() {
     int parityY = abs(sc.y % 2);
 
     // A downscaled 1:1.5 sensor footprint per output texel.  The preview
-    // demosaic box-AA (u_box_aa=4) averages a 4x4 sensor window — so with
+    // demosaic box-AA (u_box_aa=4) averages a 4x4 sensor window - so with
     // stronger downscale that window collapses onto this one texel, and the
     // box-AA's noise reduction is lost unless this texel carries a per-phase
     // average over that same 4x4 window.  With weaker downscale the box-AA
@@ -218,7 +218,7 @@ void main() {
         ivec2 cc = sc + ivec2(parityX ^ phaseX, parityY ^ phaseY);
 
         // Gaussian-weighted average of same-phase neighbors in a 5x5 lattice
-        // (±4 sensor pixels, 25 samples).  σ² ≈ 4 gives gentle smoothing.
+        // (+-4 sensor pixels, 25 samples).  sigma^2 ~ 4 gives gentle smoothing.
         float sum = 0.0;
         float wsum = 0.0;
         for (int dy = -4; dy <= 4; dy += 2) {

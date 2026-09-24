@@ -7,18 +7,18 @@ import kotlin.math.roundToInt
 
 /**
  * Synthetic Bayer frame generator + CPU reference implementations of the
- * RAW-domain stages (DPC, green-guided GF, MAD σ̂) used to validate the GPU
- * pipeline on-device against a ground-truth oracle (plan T1-style anchor test).
+ * RAW-domain stages (DPC, green-guided GF, MAD sigma_hat) used to validate the GPU
+ * pipeline on-device against a ground-truth oracle (anchor test).
  *
  * Geometry mirrors the live pipeline in PreviewRenderer exactly:
- *  - sensor 192×160, 10-bit, RGGB (phase0=R, phase1=G, phase2=G, phase3=B),
+ *  - sensor 192x160, 10-bit, RGGB (phase0=R, phase1=G, phase2=G, phase3=B),
  *    uniform black level 64.
- *  - output grid = demosaic FBO (960×720 by default); one texel per ~1/5
+ *  - output grid = demosaic FBO (960x720 by default); one texel per ~1/5
  *    sensor column / 1/4.5 sensor row (the C3 cell mapping).
  *  - field: base 500 DN; vertical edge to 650 DN at x=40; a per-phase marker
- *    block x∈[80,128), y∈[64,112) (R=840, G1=220, G2=230, B=120) to detect
+ *    block x in [80,128), y in [64,112) (R=840, G1=220, G2=230, B=120) to detect
  *    phase swapping / texel misalignment; four isolated defects (2 hot, 1 hot,
- *    1 cold across phases); additive Gaussian σ=8 DN elsewhere.
+ *    1 cold across phases); additive Gaussian sigma=8 DN elsewhere.
  *
  * The CPU reference mirrors the GLSL float math including clamping, insertion
  * sorts, and the 2nd-largest/poison fallbacks, so deltas beyond tolerance
@@ -97,7 +97,7 @@ object SyntheticBayerTest {
         return sensor[cy * SENSOR_W + cx].toInt() and 0x3FF
     }
 
-    /** black-subtracted SIGNED value — mirror of GLSL bayerAt(). */
+    /** black-subtracted SIGNED value - mirror of GLSL bayerAt(). */
     fun sensorValue(sensor: ShortArray, x: Int, y: Int): Float {
         val cx = x.coerceIn(0, SENSOR_W - 1)
         val cy = y.coerceIn(0, SENSOR_H - 1)
@@ -108,9 +108,9 @@ object SyntheticBayerTest {
         ((texelX + 0.5f) / viewW.toFloat() * SENSOR_W.toFloat()).toInt()
 
     // Mirror of the GPU cellOrigin(): the pipeline's vertex shader applies the
-    // preview transform — centre-crop the sensor to the output aspect
-    // (scaleX/scaleY < 1, here scaleX=1, scaleY≈0.9 for 192x160 → 960x720) then
-    // a Y flip — so texel row ty owns sensor row
+    // preview transform - centre-crop the sensor to the output aspect
+    // (scaleX/scaleY < 1, here scaleX=1, scaleY~0.9 for 192x160 -> 960x720) then
+    // a Y flip - so texel row ty owns sensor row
     //     floor( SENSOR_H * (0.5*(1+scaleY) - scaleY*(ty+0.5)/viewH) )
     // clamped to [0, SENSOR_H-1]. Without this the oracle reads an unmoved,
     // unflipped, unscaled row set and every boundary/marker probe diverges.
@@ -171,7 +171,7 @@ object SyntheticBayerTest {
     fun isoSigma(signal: Float, isoA: Float, isoB: Float): Float =
         kotlin.math.sqrt(isoSigmaSq(signal, isoA, isoB))
 
-    /** Pass 0 (AVG): α-trimmed mean of the 8 same-colour neighbours per phase. */
+    /** Pass 0 (AVG): alpha-trimmed mean of the 8 same-colour neighbours per phase. */
     fun avgCell(sensor: ShortArray, texelX: Int, texelY: Int, viewW: Int, viewH: Int): FloatArray {
         val scx = cellOriginX(texelX, viewW)
         val scy = cellOriginY(texelY, viewW, viewH)
@@ -415,7 +415,7 @@ object SyntheticBayerTest {
     }
 
     // ------------------------------------------------------------------
-    // Stage 2 (MAD σ̂) mirror
+    // Stage 2 (MAD sigma_hat) mirror
     // ------------------------------------------------------------------
 
     fun sigmaCell(
@@ -503,8 +503,8 @@ object SyntheticBayerTest {
                         params.corrStrength, true, true
                     ) else rawPackCell(sensor, gx, gy, pw, ph)
                 }
-                // The GPU σ̂ stage consumes finalSparseTex (S3 output when active),
-                // so the oracle's σ̂ input must mirror the same chain.
+                // The GPU sigma_hat stage consumes finalSparseTex (S3 output when active),
+                // so the oracle's sigma_hat input must mirror the same chain.
                 val s3At: (Int, Int) -> FloatArray = { gx, gy ->
                     if (params.s3Active) guidedCell(gridAt, gx, gy, pw, ph, params.alpha, params.eps)
                     else gridAt(gx, gy)

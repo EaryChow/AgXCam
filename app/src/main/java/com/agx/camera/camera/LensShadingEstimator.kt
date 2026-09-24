@@ -10,8 +10,8 @@ enum class LensShadingState {
  * Monte-Carlo lens-shading (vignette) estimator.
  *
  * The Xiaomi HAL on device reports SENSOR_INFO_LENS_SHADING_APPLIED=true yet
- * never emits a STATISTICS_LENS_SHADING_MAP (§15.1 HAL-parity investigation),
- * so there is no per-lens map to consume. This estimator reconstructs one by
+ * never emits a STATISTICS_LENS_SHADING_MAP, so there is no per-lens map to
+ * consume. This estimator reconstructs one by
  * sampling live 16-bit Bayer frames:
  *
  *   - Accumulate CFA-aware green-phase samples (the least noisy channel and

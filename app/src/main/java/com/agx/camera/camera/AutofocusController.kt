@@ -16,7 +16,7 @@ class AutofocusController(
 
     /**
      * u, v: normalized coordinates (0..1) in the camera frame, before sensor
-     * rotation — i.e. the output of MainActivity.viewToFrameCoords().
+     * rotation - i.e. the output of MainActivity.viewToFrameCoords().
      */
     fun setFocusPoint(u: Float, v: Float, activeArray: Rect, isFrontCamera: Boolean, triggerScan: Boolean = true) {
         if (activeArray.width() <= 0 || activeArray.height() <= 0) return

@@ -4,7 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * Verifies the CPU-side stage of lens shading correction (§15.1): the
+ * Verifies the CPU-side stage of lens shading correction: the
  * per-channel gain grids are packed into an RGBA16F half-float texture, the
  * channels are permuted to match the active CFA so each raw phase picks up its
  * own plane's gain, and rows are vertically flipped (Android's map is row 0 at
@@ -60,7 +60,7 @@ class LensShadingMapTest {
         val data = makeData(w, h) { ch, _, _ -> ch * 10f + 1f } // R=1, Gr=11, Gb=21, B=31
         val pixels = data.toRgba16fFlipped(BayerPattern.BGGR)
         val out = FloatArray(4) { halfToFloat(pixels[it]) }
-        // BGGR swaps RGGB: B→R, Gb→G, Gr→B, R→A.
+        // BGGR swaps RGGB: B->R, Gb->G, Gr->B, R->A.
         assertEquals(31f, out[0], 1e-3f)
         assertEquals(21f, out[1], 1e-3f)
         assertEquals(11f, out[2], 1e-3f)
@@ -74,7 +74,7 @@ class LensShadingMapTest {
         val data = makeData(w, h) { ch, _, _ -> ch * 10f + 1f }
         val pixels = data.toRgba16fFlipped(BayerPattern.GRBG)
         val out = FloatArray(4) { halfToFloat(pixels[it]) }
-        // GRBG: Gr→R, R→G, B→B, Gb→A.
+        // GRBG: Gr->R, R->G, B->B, Gb->A.
         assertEquals(11f, out[0], 1e-3f)
         assertEquals(1f, out[1], 1e-3f)
         assertEquals(31f, out[2], 1e-3f)
@@ -88,7 +88,7 @@ class LensShadingMapTest {
         val data = makeData(w, h) { ch, _, _ -> ch * 10f + 1f }
         val pixels = data.toRgba16fFlipped(BayerPattern.GBRG)
         val out = FloatArray(4) { halfToFloat(pixels[it]) }
-        // GBRG: Gr→R, B→G, R→B, Gb→A.
+        // GBRG: Gr->R, B->G, R->B, Gb->A.
         assertEquals(11f, out[0], 1e-3f)
         assertEquals(31f, out[1], 1e-3f)
         assertEquals(1f, out[2], 1e-3f)
