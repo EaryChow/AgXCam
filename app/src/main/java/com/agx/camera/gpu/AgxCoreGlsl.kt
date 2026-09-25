@@ -90,7 +90,7 @@ vec3 vibrance(vec3 rgb, float strength) {
     const vec3 coeffs = vec3(0.2126, 0.7152, 0.0722);
     float luminance = dot(rgb, coeffs);
     float chrominance = max(rgb.r, max(rgb.g, rgb.b)) - luminance;
-    float mask = 1.0 - pow(max(chrominance, 0.0), 0.5);
+    float mask = (1.0 - pow(max(chrominance, 0.0), 0.5)) * pow(luminance, 0.5);
     float t = 1.0 + strength * mask;
     return luminance + (rgb - luminance) * t;
 }
