@@ -767,14 +767,14 @@
                 <CheckBox android:id="@+id/use_attenuation_for_boost_cb" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Use Attenuation for Boost" android:textColor="#FFFFFFFF" android:textSize="10sp" android:checked="false" />
             </LinearLayout>
 
-            <TextView android:id="@+id/inset_rot_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Red Rotation  17.19" android:textColor="#FFFFFFFF" android:textSize="11sp" />
-            <SeekBar android:id="@+id/inset_rot_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="412" android:layout_marginBottom="2dp" />
+            <TextView android:id="@+id/inset_rot_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Red Rotation  15.00" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/inset_rot_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="524" android:layout_marginBottom="2dp" />
 
-            <TextView android:id="@+id/inset_rot_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Green Rotation  -17.19" android:textColor="#FFFFFFFF" android:textSize="11sp" />
-            <SeekBar android:id="@+id/inset_rot_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="111" android:layout_marginBottom="2dp" />
+            <TextView android:id="@+id/inset_rot_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Green Rotation  -15.00" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/inset_rot_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="0" android:layout_marginBottom="2dp" />
 
             <TextView android:id="@+id/inset_rot_b_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Blue Rotation  -3.04" android:textColor="#FFFFFFFF" android:textSize="11sp" />
-            <SeekBar android:id="@+id/inset_rot_b_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="235" android:layout_marginBottom="4dp" />
+            <SeekBar android:id="@+id/inset_rot_b_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="208" android:layout_marginBottom="4dp" />
 
             <TextView android:id="@+id/inset_pur_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Attenuation R  50.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
             <SeekBar android:id="@+id/inset_pur_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="60" android:progress="50" android:layout_marginBottom="2dp" />
@@ -792,14 +792,14 @@
             <!-- Outset Primaries (reverse/boost groups hidden independently by the two checkboxes) -->
             <LinearLayout android:id="@+id/post_section" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
                 <LinearLayout android:id="@+id/outset_rotation_section" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
-                    <TextView android:id="@+id/outset_rot_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Reverse R  17.19" android:textColor="#FFFFFFFF" android:textSize="11sp" />
-                    <SeekBar android:id="@+id/outset_rot_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="412" android:layout_marginBottom="2dp" />
+                    <TextView android:id="@+id/outset_rot_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Reverse R  15.00" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                    <SeekBar android:id="@+id/outset_rot_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="524" android:layout_marginBottom="2dp" />
 
-                    <TextView android:id="@+id/outset_rot_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Reverse G  -17.19" android:textColor="#FFFFFFFF" android:textSize="11sp" />
-                    <SeekBar android:id="@+id/outset_rot_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="111" android:layout_marginBottom="2dp" />
+                    <TextView android:id="@+id/outset_rot_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Reverse G  -15.00" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                    <SeekBar android:id="@+id/outset_rot_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="0" android:layout_marginBottom="2dp" />
 
                     <TextView android:id="@+id/outset_rot_b_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Reverse B  -3.04" android:textColor="#FFFFFFFF" android:textSize="11sp" />
-                    <SeekBar android:id="@+id/outset_rot_b_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="235" android:layout_marginBottom="4dp" />
+                    <SeekBar android:id="@+id/outset_rot_b_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="208" android:layout_marginBottom="4dp" />
                 </LinearLayout>
 
                 <LinearLayout android:id="@+id/outset_boost_section" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">

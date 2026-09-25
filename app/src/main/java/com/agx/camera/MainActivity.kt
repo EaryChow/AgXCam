@@ -1182,7 +1182,7 @@ class MainActivity : AppCompatActivity() {
             uploadAgxUniforms()
         }
 
-        val rotRange = 0.5236f
+        val rotRange = 0.26179938779f // +/-15 deg = +/-pi/12 rad, matches Blender reference
         fun rotToProgress(v: Float) = ((v + rotRange) / (rotRange * 2) * 524).toInt().coerceIn(0, 524)
         fun progressToRot(p: Float) = (p / 524f * rotRange * 2) - rotRange
 
@@ -1657,7 +1657,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun syncInsetSliders() {
-        val rotRange = 0.5236f
+        val rotRange = 0.26179938779f // +/-15 deg = +/-pi/12 rad, matches Blender reference
         fun rotToProgress(v: Float) = ((v + rotRange) / (rotRange * 2) * 524).toInt().coerceIn(0, 524)
         insetRotRSlider.progress = rotToProgress(agxParams.rotation[0])
         insetRotRLabel.text = String.format("Red Rotation  %.2f", Math.toDegrees(agxParams.rotation[0].toDouble()))
@@ -1675,7 +1675,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun syncOutsetSliders() {
-        val rotRange = 0.5236f
+        val rotRange = 0.26179938779f // +/-15 deg = +/-pi/12 rad, matches Blender reference
         fun rotToProgress(v: Float) = ((v + rotRange) / (rotRange * 2) * 524).toInt().coerceIn(0, 524)
         outsetRotRSlider.progress = rotToProgress(agxParams.reverseRotation[0])
         outsetRotRLabel.text = String.format("Reverse R  %.2f", Math.toDegrees(agxParams.reverseRotation[0].toDouble()))
