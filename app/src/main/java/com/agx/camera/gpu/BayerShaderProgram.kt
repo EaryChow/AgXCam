@@ -588,7 +588,7 @@ class BayerShaderProgram {
         private val DEFAULT_LUMA_COEFFS = floatArrayOf(0.2126f, 0.7152f, 0.0722f)
 
         // Leading factor of the clip-neutralization exponent (u_clip_atten_factor * 5).
-        private const val CLIP_ATTEN_DEFAULT = 0.1f
+        private const val CLIP_ATTEN_DEFAULT = 0.5f
 
         private val QUAD_COORDS = floatArrayOf(
             -1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f
@@ -1721,8 +1721,8 @@ void main() {
         norm = compensateNegatives(norm);
         float luma = max(dot(u_luma_coeffs, norm), 0.0);
         float peak = max(norm.r, max(norm.g, norm.b));
-        float inverted = max(1.0 - luma, 0.0);
-        float attenuation = pow(inverted, u_clip_atten_factor * 5.0);
+        float over = max(peak - (1.0-0.05), 0.0);
+        float attenuation = exp(-over * u_clip_atten_factor * 2.0);
         linearRGB = (norm - vec3(peak)) * attenuation + vec3(peak);
         linearRGB *= clipScalar;
     }

@@ -217,8 +217,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     // (0.25*R + 0.5*G + 0.25*B); the Rec.709 row above is only for
     // demosaic clipping-neutralization and would bias st.r vs yccIn.x.
     val S5_LUMA_WEIGHTS = floatArrayOf(0.25f, 0.5f, 0.25f)
-    // Leading factor of the clipping-neutralization exponent (factor * 5).
-    @Volatile var clipAttenFactor = 0.1f
+    // Leading factor of the clipping-neutralization exponent.
+    @Volatile var clipAttenFactor = 0.5f
     // Lens shading (vignette) gain map for the Bayer/RAW pipeline: RGBA16F
     // half-float pixels, CFA-permuted and Y-flipped, uploaded to
     // u_lens_shading_map by initGlResources() or the GL thread whenever a new

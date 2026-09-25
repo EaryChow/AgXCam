@@ -881,8 +881,8 @@
             <!-- Sensor Clip Neutralization -->
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Sensor Clip" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
 
-            <TextView android:id="@+id/clip_atten_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Neutralize  0.10" android:textColor="#FFFFFFFF" android:textSize="11sp" />
-            <SeekBar android:id="@+id/clip_atten_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="100" android:progress="10" android:layout_marginBottom="8dp" />
+            <TextView android:id="@+id/clip_atten_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Neutralize  0.50" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/clip_atten_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="100" android:progress="50" android:layout_marginBottom="8dp" />
 
             <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
 

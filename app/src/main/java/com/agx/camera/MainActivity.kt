@@ -79,7 +79,7 @@ class MainActivity : AppCompatActivity() {
     private var agxParams = AgxParams()
     private var photoOutput = PhotoOutputSettings()
     // Leading factor of the demosaic clipping-neutralization exponent (factor * 5).
-    private var clipAttenFactor = 0.1f
+    private var clipAttenFactor = 0.5f
     private var cameraReady = false
     private var openingCamera = false
     private var settingsPanelOpen = false
@@ -523,7 +523,7 @@ class MainActivity : AppCompatActivity() {
         focusIndicatorTimeoutMs = previewResPrefs.getLong(PREF_FOCUS_TIMEOUT, 0L)
         maxPreviewDimensions = getMaxPreviewDimensions()
         thermalProtectionEnabled = previewResPrefs.getBoolean(PREF_THERMAL_PROTECTION_ENABLED, true)
-        clipAttenFactor = previewResPrefs.getFloat(PREF_CLIP_ATTEN, 0.1f).coerceIn(0f, 1f)
+        clipAttenFactor = previewResPrefs.getFloat(PREF_CLIP_ATTEN, 0.5f).coerceIn(0f, 1f)
         dpcStrength = previewResPrefs.getFloat(PREF_S1_DPC, 0f).coerceIn(0f, 1f)
         rawNrStrength = previewResPrefs.getFloat(PREF_S3_RAW, 0f).coerceIn(0f, 1f)
         outNrStrength = previewResPrefs.getFloat(PREF_S5_OUT, 0f).coerceIn(0f, 1f)
@@ -1399,11 +1399,11 @@ class MainActivity : AppCompatActivity() {
             previewRenderer.clipAttenFactor = clipAttenFactor
             previewResPrefs.edit().putFloat(PREF_CLIP_ATTEN, clipAttenFactor).apply()
         })
-        setupSliderDoubleClickReset(clipAttenSlider, 10) {
-            clipAttenFactor = 0.1f
-            clipAttenLabel.text = "Neutralize  0.10"
+        setupSliderDoubleClickReset(clipAttenSlider, 50) {
+            clipAttenFactor = 0.5f
+            clipAttenLabel.text = "Neutralize  0.5"
             previewRenderer.clipAttenFactor = clipAttenFactor
-            previewResPrefs.edit().putFloat(PREF_CLIP_ATTEN, 0.1f).apply()
+            previewResPrefs.edit().putFloat(PREF_CLIP_ATTEN, 0.5f).apply()
         }
 
         kelvinSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
