@@ -776,8 +776,8 @@
             <TextView android:id="@+id/inset_rot_b_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Blue Rotation  -3.04" android:textColor="#FFFFFFFF" android:textSize="11sp" />
             <SeekBar android:id="@+id/inset_rot_b_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="524" android:progress="208" android:layout_marginBottom="4dp" />
 
-            <TextView android:id="@+id/inset_pur_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Attenuation R  30.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
-            <SeekBar android:id="@+id/inset_pur_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="60" android:progress="30" android:layout_marginBottom="2dp" />
+            <TextView android:id="@+id/inset_pur_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Attenuation R  45.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/inset_pur_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="60" android:progress="45" android:layout_marginBottom="2dp" />
 
             <TextView android:id="@+id/inset_pur_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Attenuation G  50.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
             <SeekBar android:id="@+id/inset_pur_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="60" android:progress="50" android:layout_marginBottom="2dp" />
@@ -803,8 +803,8 @@
                 </LinearLayout>
 
                 <LinearLayout android:id="@+id/outset_boost_section" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
-                    <TextView android:id="@+id/outset_pur_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Purity Boost R  0.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
-                    <SeekBar android:id="@+id/outset_pur_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="60" android:progress="0" android:layout_marginBottom="2dp" />
+                    <TextView android:id="@+id/outset_pur_r_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Purity Boost R  20.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+                    <SeekBar android:id="@+id/outset_pur_r_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="60" android:progress="20" android:layout_marginBottom="2dp" />
 
                     <TextView android:id="@+id/outset_pur_g_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Purity Boost G  30.0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
                     <SeekBar android:id="@+id/outset_pur_g_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="60" android:progress="30" android:layout_marginBottom="2dp" />
