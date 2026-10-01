@@ -1017,7 +1017,7 @@ float sampleSameColorNRRing(ivec2 coord, int ring, float mCoarse) {
     // the clip, keeping a clipped plateau/specular at its measured brightness.
     // The alpha-trim mean itself stays the full 12-member form: excluding clipped
     // members would starve the mean right at the plateau edge, turning it
-    // per-pixel noisy (blocky water-stain patches radiating from highlights).
+    // per-pixel noisy (blocky water-stain patches radiating from clipped regions).
     // S1 (DPC) is unchanged and never skipped.  Non-clip pixels are
     // bit-identical to the baseline filter.
     float clipLo = max(u_white_level - u_black_level, 1.0);
@@ -1880,7 +1880,7 @@ float sampleSameColorNR(ivec2 coord, float mCoarse) {
     // the clip, keeping a clipped plateau/specular at its measured brightness.
     // The alpha-trim mean itself stays the full 12-member form: excluding clipped
     // members would starve the mean right at the plateau edge, turning it
-    // per-pixel noisy (blocky water-stain patches radiating from highlights).
+    // per-pixel noisy (blocky water-stain patches radiating from clipped regions).
     // S1 (DPC) is unchanged and never skipped.  Non-clip pixels are
     // bit-identical to the baseline filter.
     float clipLo = max(u_white_level - u_black_level, 1.0);
@@ -2132,7 +2132,7 @@ void main() {
         }
     }
     // A small footprint whose every present phase box-mean sits at clip is an
-    // all-hot cluster (or a sub-quad highlight): the mn==mx degenerate makes
+    // all-hot cluster (or a sub-quad clipped site): the mn==mx degenerate makes
     // boxedBlend a no-op, so DPC each phase cell individually through the
     // anchored per-phase filter (same as the 1-cell path) instead - removes
     // the cluster exactly as the inline path would.
@@ -2159,7 +2159,7 @@ void main() {
     }
     // A phase with no cells in an odd-shaped footprint borrows the mean of the
     // phases that ARE present, so every channel stays populated.  A phase whose
-    // box-mean sits at clip is a single hot cell (or a small-site highlight):
+    // box-mean sits at clip is a single hot cell (or a small clipped site):
     // pulling it 0.98x toward a poisoned fillback still leaves a visible speck,
     // so clip-level phase means are excluded from the fillback.
     float tot = 0.0;
@@ -2171,7 +2171,7 @@ void main() {
         }
     }
     if (tn == 0) {
-        // Every present phase is at clip (genuine highlight): fall back to the
+        // Every present phase is at clip (genuine clipped region): fall back to the
         // plain mean so the fillback stays populated.
         tot = 0.0; tn = 0;
         for (int p = 0; p < 4; p++) if (pN[p] > 0) { tot += pSum[p] / float(pN[p]); tn++; }

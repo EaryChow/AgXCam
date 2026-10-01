@@ -11,7 +11,7 @@ import org.junit.Test
 /**
  * Headless mirror of the Stage-5 GLSL (OutNrShaderProgram MAIN_FRAGMENT +
  * statsH/statsV) so we can reproduce the "blocky water-stain patches radiating
- * from highlights" on the JVM and iterate on the fix without a device.
+ * from clipped regions" on the JVM and iterate on the fix without a device.
  *
  * Two scenes:
  *  1. A warm, near-clipped disc (r=24) on a cool mid-gray field + small noise
@@ -804,7 +804,7 @@ class S5ReproTest {
 
     private val S13_BANDS = arrayOf(
         intArrayOf(8, 40, 30),    // dark
-        intArrayOf(42, 74, 120),  // shadow
+        intArrayOf(42, 74, 120),  // low signal
         intArrayOf(76, 108, 400), // mid (defects live here)
         intArrayOf(110, 151, 750) // bright
     )

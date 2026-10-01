@@ -486,7 +486,7 @@ class S3PreviewGLReproTest {
                 }
             }
             // A small footprint whose every present phase box-mean sits at clip
-            // is an all-hot cluster (or a sub-quad highlight): the mn==mx
+            // is an all-hot cluster (or a sub-quad clipped site): the mn==mx
 // degenerate makes boxedBlend a no-op, so DPC each phase cell
             // individually through the anchored per-phase filter (same as the
             // 1-cell path) instead - removes the cluster exactly as the inline
@@ -515,13 +515,13 @@ class S3PreviewGLReproTest {
             for (p in 0..3) if (pN[p] > 0) {
                 val pm = pSum[p] / pN[p]
                 // A phase whose box-mean sits at clip is a single hot cell (or a
-                // small-site highlight): pulling it down 0.98x toward a poisoned
+                // small clipped site): pulling it down 0.98x toward a poisoned
                 // fillback would still leave a visible speck, so exclude it from
                 // the fillback used for the absent phases (mirrors the shader).
                 if (pm < CLIP_SCALAR) { tot += pm; tn++ }
             }
             if (tn == 0) {
-                // Every present phase is at clip (genuine highlight): fall back
+                // Every present phase is at clip (genuine clipped region): fall back
                 // to the plain mean so the fillback stays populated.
                 for (p in 0..3) if (pN[p] > 0) { tot += pSum[p] / pN[p]; tn++ }
                 if (tn == 0) { tot = 0f; tn = 1 }

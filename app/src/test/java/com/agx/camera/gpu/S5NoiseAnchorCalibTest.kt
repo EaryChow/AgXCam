@@ -59,7 +59,7 @@ private const val ROUND2_EPS_MULT = 1.96f // (kappa x 1.4)^2, epsilon proportion
  *     attenuation so the model->truth ratio is visible per tier.
  *
  * Requirements:
- *  (a) highlight-texture/fine-edge preservation is not over-smoothed by the
+ *  (a) high-signal-texture/fine-edge preservation is not over-smoothed by the
  *      second pass (grating-modulation retention + edge rise-width floors);
  *  (b) the two-round cascade attenuation is measured and tabled by
  *      kappa = 1.0/1.2/1.5 including the beta-return's actual effect;
@@ -152,7 +152,7 @@ class S5NoiseAnchorCalibTest {
 
     /**
      * Scene for the texture-preservation regression: three vertical bands
-     * (shadow / mid / highlight). Within mid and highlight, a coarse grating
+     * (low / mid / high signal). Within mid and high, a coarse grating
      * (period Pc=16, amp Ac) and a fine grating (Pf=6, amp Af) region, plus a
      * hard step edge between adjacent bands. Gaussian noise added per channel.
      */
@@ -856,7 +856,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
     @Test
     fun texturePreservationDoublePass() {
         val size = 176
-        val bandXs = intArrayOf(0, 58, 116, size) // shadow | mid | highlight
+        val bandXs = intArrayOf(0, 58, 116, size) // low | mid | high signal
         val cfg = Cfg(iso = 3200) // double pass, preview, beta=0.3
         // sigma tiers: 10 DN = general mid-scale scene noise; 3 DN ~ sigma_hat/sqrt(32) =
         // the post-S3 collision residual (highest realized kappa_eff).
@@ -883,15 +883,15 @@ vals[k] = img.at(nx, ny, p) * whiteRange
                 val sin = gratingAmp(img, y0, y1, x0, x1, period)
                 val s1 = gratingAmp(r1, y0, y1, x0, x1, period)
                 val s2 = gratingAmp(r2, y0, y1, x0, x1, period)
-                val band = if (x0 >= 116) "highlight" else "mid"
+                val band = if (x0 >= 116) "high" else "mid"
                 val kind = if (period == 16) "coarse-P16" else "fine-P6"
                 val ret1 = s1 / sin
                 val ret2 = s2 / sin
                 sb.append(String.format("%-24s %-8s %-8s\n", "$band $kind",
                     f3(ret1.toDouble()), f3(ret2.toDouble())))
-                if (band == "highlight") {
+                if (band == "high") {
                     val floor = if (period == 16) 0.55f else 0.4f
-                    assertTrue("sigma=$sigmaDN highlight $kind: round-2 retention $ret2 must stay >= $floor",
+                    assertTrue("sigma=$sigmaDN high $kind: round-2 retention $ret2 must stay >= $floor",
                         ret2 >= floor)
                 }
             }
@@ -900,8 +900,8 @@ vals[k] = img.at(nx, ny, p) * whiteRange
             sb.append(String.format("%-18s %-14s %-6s %-6s\n", "edge", "input", "r1", "r2"))
             data class EdgeDef(val x: Int, val label: String, val lo: Float, val hi: Float)
             val edges = listOf(
-                EdgeDef(58, "shadow|mid", 0.2f, 0.5f),
-                EdgeDef(116, "mid|highlight", 0.5f, 0.83f)
+                EdgeDef(58, "low|mid", 0.2f, 0.5f),
+                EdgeDef(116, "mid|high", 0.5f, 0.83f)
             )
             for (e in edges) {
                 val inW = edgeRiseWidth(img, edgeY, e.x - 8, e.x + 8, e.lo, e.hi)
@@ -912,19 +912,19 @@ vals[k] = img.at(nx, ny, p) * whiteRange
                 assertTrue("sigma=$sigmaDN ${e.label} edge: r2 must stay sharp (r2=$r2W px)", r2W <= 4)
             }
 
-            // Cross-check noise: the flat shadow band (no grating) must be
+            // Cross-check noise: the flat low band (no grating) must be
             // denoised. At the 10 DN tier the realized kappa is light (~0.5), so
             // only no-amplification is required; at the collision-residual
             // tier (sigma ~ sigma_hat/sqrt(32) -> kappa_eff ~ 1.9) the cascade must actually clean.
             val flatIn2 = lumaStd(img, 88, 152, 6, 52)
             val flatR2 = lumaStd(r2, 88, 152, 6, 52)
-            sb.append(String.format("sigma=%d flat-shadow sigma: in %.6f -> r2 %.6f (att %.3f)\n",
+            sb.append(String.format("sigma=%d flat-low sigma: in %.6f -> r2 %.6f (att %.3f)\n",
                 sigmaDN, flatIn2, flatR2, flatR2 / flatIn2))
             if (sigmaDN == 10) {
-                assertTrue("sigma=$sigmaDN flat shadow must not amplify (att=${flatR2 / flatIn2})",
+                assertTrue("sigma=$sigmaDN flat low must not amplify (att=${flatR2 / flatIn2})",
                     flatR2 <= flatIn2 * 1.02f)
             } else {
-                assertTrue("sigma=$sigmaDN flat shadow must be denoised by double pass (att=${flatR2 / flatIn2})",
+                assertTrue("sigma=$sigmaDN flat low must be denoised by double pass (att=${flatR2 / flatIn2})",
                     flatR2 < flatIn2 * 0.85f)
             }
         }
@@ -1679,7 +1679,7 @@ sb.append(String.format(
             maxIn, maxOut, brightIn, brightOut, (inL.size).toFloat()
         ))
 
-        // Find divergent bright pixels (device vs replay) and unwind one.
+        // Find divergent higher-exposure-range pixels (device vs replay) and unwind one.
         data class DiffPx(val x: Int, val y: Int, val li: Float, val dr: Float, val rr: Float, val dd: Float)
         val difs = ArrayList<DiffPx>()
         for (y in margin until h - margin) {
@@ -1840,7 +1840,7 @@ sb.append(String.format(
         // variant below emulates the historical sigma_hat^2*WR^2 capture texture.
         val madMap = madSigma2DnAxis(scene, cfg, "min")
 
-        // All bright pixels (rims included - the real capture's letters are all
+        // All higher-exposure-range pixels (rims included - the real capture's letters are all
         // thin, so every letter pixel sits within a window's straddle reach).
         val lo = 6
         val hi = size - 6
@@ -1852,7 +1852,7 @@ sb.append(String.format(
             }
         }
 
-        // epsY actually seen at bright pixels (sigma_hat^2 in the sigma-hat texture):
+        // epsY actually seen at those pixels (sigma_hat^2 in the sigma-hat texture):
         val s2Bright = bright.map { madMap[it[1]][it[0]].toDouble() }.average()
         val baseDev = (s2Bright + cfg.sigmaDm2).toFloat() * (1f / cfg.inverseRange2) * cfg.inverseRange2 * cfg.sigmaScale * cfg.epsBoost
         val epsYDev = cfg.lumaEpsScale * baseDev
@@ -1913,7 +1913,7 @@ sb.append(String.format(
 
     // ------------------------------------------------------------------
     // Residual (post-fix, design operating point): the fixed-domain replay
-    // still pits a fraction of thin bright pixels (device "visible on close
+    // still pits a fraction of thin higher-exposure-range pixels (device "visible on close
     // inspection"). Identify WHICH pixels pit under the design epsilon and WHY:
     // per-pixel sigma_hat^2/epsY/varY/aY + window choice, then the same on a thin-stroke
     // synthetic (parity). Diagnostic only; the S5 math is unchanged.
@@ -1957,7 +1957,7 @@ sb.append(String.format(
         val sigma2Dev = Array(h) { y -> FloatArray(w) { x -> sigF[(y * w + x) * 4] / scaleDev } }
         val replay = runS5(inP, cfgDev, sigma2Dn = sigma2Dev)
 
-        // Build the pit set (bright pixels darkened >8% by the DESIGN filter).
+        // Build the pit set (higher-exposure-range pixels darkened >8% by the filter).
         data class Pit(val x: Int, val y: Int, val li: Float, val lp: Float, val s2: Float)
         val pits = ArrayList<Pit>()
         val kept = ArrayList<Pit>()

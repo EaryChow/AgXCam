@@ -115,11 +115,11 @@ vec3 agxFormation(vec3 sensorLinear) {
 }
 """
 
-    // Same as AGX_FORMATION but expects input already normalized to 0..1
-    // (i.e. divided by (u_white_level - u_black_level) upstream).
+    // Same as AGX_FORMATION but expects input already scaled so full sensor
+    // capacity is 1.0 (i.e. divided by (u_white_level - u_black_level) upstream).
     const val AGX_FORMATION_NORM = """
-vec3 agxFormationNorm(vec3 normalizedLinear) {
-    vec3 rgb = normalizedLinear;
+vec3 agxFormationNorm(vec3 capacityLinear) {
+    vec3 rgb = capacityLinear;
     rgb = u_scene_linear_to_709 * rgb * exp2(u_exposure);
     rgb = compensateLowSide(rgb);
     rgb = u_insetmat * rgb;

@@ -283,7 +283,7 @@ class LensShadingEstimator(
         val centerMean = centerSum / centerCnt
         if (centerMean <= 0.0) return null
 
-        // Per-cell gains, clipped to >= 1 (correction only lifts shadows).
+        // Per-cell gains, clipped to >= 1 (correction only lifts low-signal areas).
         val gains = FloatArray(n)
         for (i in 0 until n) {
             if (cellCnt[i] <= 0) {

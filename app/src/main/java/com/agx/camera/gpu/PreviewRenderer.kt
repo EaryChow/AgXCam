@@ -713,11 +713,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // ---- RAW-domain stages (S1 DPC + S3 green-guided GF) producing the
         // float sparse Bayer grid that the demosaic (Stage 4) consumes.  On the
         // live device this replaces the fused pack's cross-phase approximation
-        // (which violated the spec and caused achromatic washout + mosaic
+        // (which cost per-colour accuracy and caused achromatic washout + mosaic
         // pattern); the pack is kept only as a fallback when the DPC/GF shaders
         // are not ready.
         //
-        // The DPC+GF chain is spec-correct only when the sparse grid ~ sensor
+        // The DPC+GF chain behaves per-channel only when the sparse grid ~ sensor
         // resolution (k <= 2, i.e. roughly 3x+ zoom-in at preview sizes).  At
         // wider zoom each grid texel reverse-maps to several sensor pixels, so
         // the GF 5x5 window covers a huge sensor footprint and the DPC operates
@@ -1323,7 +1323,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
                     val captureMatrix = FloatArray(16).also { android.opengl.Matrix.setIdentityM(it, 0) }
                     // Capture matrix: match preview's Y-flip (sensor -> OpenGL), but NO X-flip for front camera
-                    // (saved JPG must NOT be mirrored per spec). Rotation handled via EXIF.
+                    // (saved JPG must NOT be mirrored). Rotation handled via EXIF.
                     // Preview transform: rear=scale(1,-1), front=scale(-1,-1)
                     // Capture transform: both use scale(1,-1) = Y-flip only
                     android.opengl.Matrix.translateM(captureMatrix, 0, 0.5f, 0.5f, 0f)
@@ -1441,7 +1441,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     // every sample, blends within one CFA channel, uses a softer
                     // hot/cold band and has no M2 isolation test - so it removes
                     // defect pixels at ANY capture resolution (Full/Half/Quarter).
-                    // The spec-accurate DPC grid chain (theta=6 band, M2=10 isolation)
+                    // The per-channel DPC grid chain (theta=6 band, M2=10 isolation)
                     // deliberately leaves moderate hot pixels in a one-shot still,
                     // and the fused pack fallback would reintroduce boxedBlend's
                     // cross-phase achromatic drag.  The DPC+GF chain stays
@@ -2243,7 +2243,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     }
 
     /**
-     * Run the spec-accurate Stage-1 DPC (4-pass) + Stage-3 green-guided GF
+     * Run the per-channel Stage-1 DPC (4-pass) + Stage-3 green-guided GF
      * chain on the sparse Bayer grid.  Returns the output texture ID
      * (dpcWorkBTexId after DPC, denoisedTexId after GF, or dpcWorkATexId
      * for the passthrough path when DPC is disabled).

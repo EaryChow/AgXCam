@@ -448,7 +448,7 @@ float flagOf(ivec2 t) {
 // (preview R=2 -> 5x5) centred at base+winCentre, from the composed input.
 // The earlier strided 5x5 lattice (offsets +-2*step at u_chroma_step=3, 13x13
 // support) quantized the mean into stair blocks wherever the window crossed
-// the highlight rim or the demosaic's boxAA moire; the synthetic-Bayer repro
+// the clipped-region rim or the demosaic's boxAA moire; the synthetic-Bayer repro
 // projects exactly those stairs as blocky seams along with amplification
 // (14 big seams / RMS 0.00437 vs 6 / 0.00300 with the plain argmin).  A
 // dense box varies continuously with position while still collapsing
@@ -461,7 +461,7 @@ float flagOf(ivec2 t) {
 // NOTE: deliberately NOT clip-filtered at the tap level - excluding near-clip
 // taps from the box starves the C-mean right around a clipped region and
 // turns it per-pixel noisy (blocky water-stain patches radiating from
-// highlights).  The active-clip handling lives in the demosaic's
+// clipped regions).  The active-clip handling lives in the demosaic's
 // clip-attenuator and the S3 clipped-centre guard instead.
 vec2 chromaMean(ivec2 base, ivec2 winCentre) {
     int R = min(max(2, int(round(2.0 * u_win_scale))), 8);
@@ -518,9 +518,9 @@ void main() {
     vec3 yccIn = yccOf(rgbIn);
 
     // u_sigmaTex R holds sigma_hat^2 in raw-DN^2 (10-bit sensor units). Stage-5 input
-    // (demosaic FBO) is normalized to 0..1 by /(whiteLevel-blackLevel), so the
-    // variance must be converted to the same domain: multiply BOTH sigma_hat^2 and the
-    // demosaic residual variance by 1/(whiteLevel-blackLevel)^2 before feeding epsilon.
+    // (demosaic FBO) carries sensor units divided down by (whiteLevel-blackLevel),
+    // so the variance must be converted to that same scale: multiply BOTH sigma_hat^2
+    // and the demosaic residual variance by 1/(whiteLevel-blackLevel)^2 before feeding epsilon.
     // u_epsScale then rescales the raw-DN^2 noise floor to the actual S3+boxAA
     // residual that this pass sees (S5D: measured var ~2-6e-6 image units vs
     // sigma_hat^2~113 DN^2 -> epsilon was ~30-100x the true residual -> aY~0.02 -> output collapsed
@@ -530,7 +530,7 @@ void main() {
     // LIVE-PREVIEW path: when the S2 sigma_hat grid is gated off (Stage-1/2/3 are
     // capture-only), u_use_iso_sigma=1 substitutes the Stage-0 ISO model
     // sigma_hat^2 = a*signal + b with signal sampled at the owning output texel's luma.
-    // The luma here is yccIn.x normalized to 0..1 (relative to whiteRange), so
+    // The luma here is yccIn.x relative to whiteRange (full sensor capacity), so
     // signal is luma*whiteRange and whiteRange = 1/sqrt(u_inverse_range2).
     float sigma2 = 0.0;
     if (u_use_iso_sigma > 0.5) {
@@ -551,7 +551,7 @@ void main() {
 
     // SWGF (Yin 2019 Alg.1) window selection, softened.  A hard argmin among
     // the 8 discrete side windows maps every output pixel to exactly one mean;
-    // at a sharp luma edge (clipped highlight rim) the winner map becomes an
+    // at a sharp luma edge (clipped-region rim) the winner map becomes an
     // 8-ray starburst - adjacent pixels whose best window differs land on
     // different window means and the seams read as blocky stain patches
     // radiating from the bright region.  Instead fuse the two closest windows

@@ -1070,7 +1070,7 @@ class Camera2Manager(private val context: Context) {
                     // Kick the scan: START acts on the first frame of the request.
                     set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
                 } else if (useTapHold) {
-                    // Settled hold: TRIGGER_IDLE per spec does not re-scan.
+                    // Settled hold: TRIGGER_IDLE keeps the locked focus and does not re-scan.
                     set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE)
                 }
             }

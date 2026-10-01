@@ -27,7 +27,7 @@ import java.nio.FloatBuffer
  *    dilutes their per-screen-pixel gradient.
  *
  * The max of the two passes the threshold so zooming or switching to a tele lens
- * can no longer make in-focus edges drop out of the highlight. Everything else is
+ * can no longer make in-focus edges drop out of the peaking overlay. Everything else is
  * passed through untouched. Runs on the displayed FBO content, so it also tracks
  * crop and aspect letterbox.
  */
@@ -47,7 +47,7 @@ class FocusPeakShaderProgram {
     private val quadTexCoords: FloatBuffer = ByteBuffer.allocateDirect(QUAD_TEX_COORDS.size * 4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer().put(QUAD_TEX_COORDS).also { it.position(0) }
 
-    /** Highlight colour tint. */
+    /** Peaking overlay colour tint. */
     var color = floatArrayOf(0.1f, 0.95f, 0.15f)
 
     fun create() {
