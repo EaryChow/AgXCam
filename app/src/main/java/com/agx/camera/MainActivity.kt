@@ -49,6 +49,9 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -178,6 +181,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var thermalIndicator: TextView
     private lateinit var criticalThermalOverlay: TextView
     private lateinit var thermalProtectionSwitch: android.widget.Switch
+    // Measurement switches. All default off; nothing here touches the pipeline
+    // until it is explicitly armed, and the off state is bit-identical.
+    @Volatile private var measurementEnabled = false
     private lateinit var criticalBlinkWarning: TextView
     private lateinit var criticalBlinkController: CriticalBlinkController
     @Volatile private var lastThermalTempC = 0f
@@ -584,11 +590,28 @@ class MainActivity : AppCompatActivity() {
             findViewById(R.id.developer_banner)
         )
         findViewById<TextView>(R.id.save_debug_log_btn).setOnClickListener {
-            // Save the current CrashLogger buffer to Downloads.
-            CrashLogger.log("MainActivity", "Debug log save requested")
+            // The one export action. It writes the log with the measurement
+            // report folded in as a section, and carries the one-shot raw frame
+            // capture alongside it when one was requested and has landed.
+            CrashLogger.log(TAG, "debug log export requested")
+            // The raw frame is written first so the measurement bundle can name
+            // the file it landed in. The renderer keeps the grab's own summary,
+            // so consuming the bytes here does not blank the section.
+            val attached = ::previewRenderer.isInitialized && writePendingFrameGrab()
+            saveMeasurementBundle()
             CrashLogger.saveDebugLogToDownloads(this)
-            Toast.makeText(this, "Debug log saved to Downloads", Toast.LENGTH_SHORT).show()
+
+            // Clear the one-shot request either way, so the next export does not
+            // silently carry a stale frame the user no longer means to send.
+            findViewById<android.widget.CheckBox>(R.id.measurement_raw_frame_check)?.isChecked = false
+
+            Toast.makeText(
+                this,
+                if (attached) "Debug log and raw frame saved to Downloads" else "Debug log saved to Downloads",
+                Toast.LENGTH_SHORT
+            ).show()
         }
+        setupMeasurementSwitches()
 
         orientationListener = object : OrientationEventListener(this) {
             override fun onOrientationChanged(orientation: Int) {
@@ -629,6 +652,9 @@ class MainActivity : AppCompatActivity() {
             }
         }
         previewRenderer.degradedManager = DegradedPreviewManager(this)
+        // The switches are read before the renderer exists, so the persisted
+        // flags are applied here once there is something to apply them to.
+        applyMeasurementFlags()
 
         textureView.surfaceTextureListener = previewRenderer
 
@@ -3741,6 +3767,12 @@ override fun onResume() {
      */
     private fun handleThermalTier(state: ThermalManager.State) {
         updateThermalIndicatorFor(state)
+        // Recorded before the early return, so the report names the tier even
+        // when protection is off and nothing was actually throttled. A timing
+        // segment whose preview size moved needs to say whether the app's own
+        // controller moved it; otherwise a self-imposed resolution drop reads
+        // as a hardware downclock.
+        previewRenderer.setAppThermalTier(state.name)
 
         if (!thermalProtectionEnabled) {
             // Protection off: restore full throughput immediately (the same
@@ -3876,6 +3908,83 @@ override fun onResume() {
             .setOnCancelListener { restoreThermalProtectionSwitch() }
             .setOnDismissListener { thermalProtectionDialogShowing = false }
             .show()
+    }
+
+    /**
+     * Wires the two controls that feed the debug log export.
+     *
+     * "Record processing time" persists: turning it on keeps accumulating until
+     * it is turned off. "Attach raw frame" covers the next export only, so it
+     * is not persisted.
+     */
+    private fun setupMeasurementSwitches() {
+        val timingSwitch = findViewById<android.widget.Switch>(R.id.measurement_timing_switch)
+        val rawFrameCheck = findViewById<android.widget.CheckBox>(R.id.measurement_raw_frame_check)
+
+        measurementEnabled = previewResPrefs.getBoolean(PREF_MEASUREMENT, false)
+        timingSwitch.isChecked = measurementEnabled
+
+        timingSwitch.setOnClickListener {
+            measurementEnabled = timingSwitch.isChecked
+            previewResPrefs.edit().putBoolean(PREF_MEASUREMENT, measurementEnabled).apply()
+            applyMeasurementFlags()
+            CrashLogger.log(TAG, "record processing time: $measurementEnabled")
+        }
+
+        rawFrameCheck.setOnClickListener {
+            if (rawFrameCheck.isChecked && ::previewRenderer.isInitialized) {
+                previewRenderer.armFrameGrabOnce()
+                Toast.makeText(
+                    this,
+                    "Raw frame will be attached to the next export",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+        applyMeasurementFlags()
+    }
+
+    private fun applyMeasurementFlags() {
+        if (!::previewRenderer.isInitialized) return
+        previewRenderer.setMeasurementEnabled(measurementEnabled)
+    }
+
+    /**
+     * Folds the renderer-side measurement state into the log as a section. The
+     * renderer owns the histogram and the profile, so this only snapshots it;
+     * the section is cleared by the next save, matching the existing dump-guard
+     * behavior.
+     */
+    private fun saveMeasurementBundle() {
+        if (!::previewRenderer.isInitialized) return
+        CrashLogger.setSection("Measurement", previewRenderer.measurementBundle())
+        // The grab is one-shot, so its report lines are retired here. Without
+        // this the next export would replay a capture that was already reported.
+        previewRenderer.clearFrameGrabReport()
+    }
+
+    /**
+     * Writes the pending one-shot raw frame next to the log. Returns true only
+     * when a file was actually written, so the toast cannot claim an
+     * attachment that never arrived.
+     */
+    private fun writePendingFrameGrab(): Boolean {
+        if (!::previewRenderer.isInitialized) return false
+        val bytes = previewRenderer.takeFrameGrabBytes() ?: return false
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val ok = CrashLogger.writeDownloadsBytes(
+            this, "agxframe_$stamp.framegrab", bytes, "application/octet-stream"
+        )
+        // After a successful write only: rotation deletes older grabs, and
+        // doing that when this write failed would lose evidence without adding
+        // a replacement.
+        if (ok) CrashLogger.rotateDownloadsBlobs(this, "agxframe_", FRAME_GRAB_KEEP)
+        // Handed back to the renderer so the bundle names the attachment.
+        previewRenderer.setFrameGrabSavedPath(if (ok) CrashLogger.lastDownloadsLocation() else null)
+        if (!ok) {
+            CrashLogger.log(TAG, "raw frame attachment failed to write")
+        }
+        return ok
     }
 
     private fun restoreThermalProtectionSwitch() {
@@ -4719,6 +4828,13 @@ override fun onResume() {
         private const val PREF_FOCUS_TIMEOUT = "focus_indicator_timeout"
         private const val PREF_STARTUP_PRESET = "startup_preset"
         private const val PREF_THERMAL_PROTECTION_ENABLED = "thermal_protection_enabled"
+
+    /**
+     * Captured-frame attachments kept in Downloads. Three is enough to hold the
+     * last build's grab alongside the current one and a known-good reference,
+     * at about 15 MB each.
+     */
+    private const val FRAME_GRAB_KEEP = 3
         // White balance is a user preference, not a per-lens one: it persists
         // across lens switches and app restarts (global, like flash mode).
         private const val PREF_WB_MODE = "wb_mode_global"
@@ -4731,6 +4847,7 @@ override fun onResume() {
         private const val PREF_S1_DPC = "stage1_dpc_strength"
         private const val PREF_S3_RAW = "stage3_raw_strength"
         private const val PREF_S5_OUT = "stage5_out_strength"
+private const val PREF_MEASUREMENT = "measurement_timing"
         // Lens shading correction strength (0.0..1.0) of the estimated map.
         private const val PREF_LS_STRENGTH = "lens_shading_strength"
         // Lens shading source policy, persisted so the user's explicit choice is

@@ -10,8 +10,10 @@ import kotlin.math.sqrt
 import kotlin.math.PI
 import kotlin.random.Random
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
+import com.agx.camera.DeviceDumpGate
+import com.agx.camera.SlowTests
 import org.junit.Test
+import org.junit.experimental.categories.Category
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -1256,25 +1258,10 @@ vals[k] = img.at(nx, ny, p) * whiteRange
     private val dumpW = 1024
     private val dumpH = 1024
 
-    private fun dumpDir(): File {
-        System.getProperty("capdump.dir")?.let { p -> val f = File(p); if (f.isDirectory) return f }
-        // No baked-in default: the device dump is machine-local (gitignored),
-        // so without -Dcapdump.dir the replay tests are skipped by
-        // requireDeviceDump.
-        return File("")
-    }
-
-    /** Device-dump gate: skip (not fail) when the gitignored dump is absent. */
-    private fun requireDeviceDump(required: Array<String>): File {
-        val dir = dumpDir()
-        val missing = required.filter { !File(dir, it).exists() }
-        assumeTrue(
-            "device capture dump missing - skipping (clone/produce it or set -Dcapdump.dir): " +
-                "$dir ${missing.joinToString { "[$it]" }}",
-            missing.isEmpty()
-        )
-        return dir
-    }
+    // Device-dump gate lives in DeviceDumpGate so every replay test in the
+    // project skips the same way and names the same property.
+    private fun requireDeviceDump(required: Array<String>): File =
+        DeviceDumpGate.require(*required)
 
     private fun readRgbaF32(dir: File, name: String): FloatArray {
         val bytes = File(dir, name).readBytes()
@@ -1295,7 +1282,11 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         return c[idx]
     }
 
+    // Device-capture replays: each runs the full S5 mirror over megabytes of
+    // captured floats, so they are marked slow and can be selected or excluded
+    // from the fast headless run.
     @Test
+    @Category(SlowTests::class)
     fun deviceCaptureReplayAndMetrics() {
         val dir = requireDeviceDump(arrayOf("s5_in.f32", "s5_out.f32", "s5_sigma.f32"))
         val inF = readRgbaF32(dir, "s5_in.f32")
@@ -1920,6 +1911,7 @@ sb.append(String.format(
     // ------------------------------------------------------------------
 
     @Test
+    @Category(SlowTests::class)
     fun residualPitMechanism() {
         val dir = requireDeviceDump(arrayOf("s5_in.f32", "s5_sigma.f32"))
         val inF = readRgbaF32(dir, "s5_in.f32")
@@ -2056,6 +2048,7 @@ sb.append(String.format(
     }
 
     @Test
+    @Category(SlowTests::class)
     fun residualPitCandidates() {
         val dir = requireDeviceDump(arrayOf("s5_in.f32", "s5_sigma.f32"))
         val inF = readRgbaF32(dir, "s5_in.f32")

@@ -9,6 +9,10 @@ import java.nio.FloatBuffer
 class NrShaderProgram {
 
     private var programId = 0
+
+    /** Exposed only for the shader budget table in the measurement report. */
+    fun budgetProgramId(): Int = programId
+
     private var uDemosaicTexLoc = 0
     private var uExposureLoc = 0
     private var uSceneLinearTo709Loc = 0

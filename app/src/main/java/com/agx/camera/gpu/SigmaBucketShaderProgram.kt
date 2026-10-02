@@ -7,38 +7,40 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 /**
- * Stage 3 - RAW-domain pre-denoise (ISO-driven), green-guided guided filter on
- * the sparse Bayer grid (Stage 3). Replaces the placeholder Gaussian
- * kernel; retains the placeholder's shell + indexing contract (one output
- * texel per 2x2 sensor cell, four phases in RGBA, RGBA32F).
+ * Axis-min bucket split (diagnostic only).
  *
- * Input:  sparse grid RGBA32F (black level already subtracted, clamped >= 0).
- * Output: same-layout sparse grid, blended by u_alpha:
- *     out_p = alpha * u_p + (1 - alpha) * GF_G(u)_p
- * with alpha = effective keep-raw blend (1 = fully raw / off, 0.3 = strong),
- * computed on the host from ISO via NoiseModel.alphaRaw(iso) and the S3 slider.
+ * The second sigma_hat re-estimate point currently averages the three
+ * axis-min variances into one number, which hides the per-channel spread.
+ * This pass writes the split so the spread can be measured:
  *
- * The guide is the green channel (highest sampling / SNR): guide value at every
- * texel = mean of the two green phases of that texel. A guided-filter window
- * (5x5 same-CFA lattice, radius 2) per phase produces coefficients
- * a = cov(I,G)/(var(G)+epsilon), b = meanI - a*meanG, output = a*g0 + b with g0 the
- * guide at the centre.
+ *   R = sigma_hat^2 for the R channel's axis-min
+ *   G = sigma_hat^2 for the G channel's axis-min
+ *   B = sigma_hat^2 for the B channel's axis-min
+ *   A = sigma_hat^2 of the 3-channel mean (what S5 consumes today)
+ *
+ * It renders into its OWN FBO and nothing downstream reads it: S5 keeps
+ * consuming the untouched SigmaHatShaderProgram output, so the S5 result is
+ * bit-identical whether this pass ran or not. That is the whole point of the
+ * measurement-first discipline - the split is observed before it is allowed
+ * to be consumed.
  */
-class RawDenoiseShaderProgram {
+class SigmaBucketShaderProgram {
 
     private var programId = 0
 
     /** Exposed only for the shader budget table in the measurement report. */
     fun budgetProgramId(): Int = programId
 
-    private var uGridTexLoc = 0
+    private var uSparseTexLoc = 0
     private var uTransformMatrixLoc = 0
     private var uSensorSizeLoc = 0
     private var uCropOriginLoc = 0
     private var uCropSizeLoc = 0
     private var uViewSizeLoc = 0
-    private var uAlphaLoc = 0
-    private var uEpsLoc = 0
+    private var uBlackLevelPatternLoc = 0
+    private var uIsoModelA = 0
+    private var uIsoModelB = 0
+    private var uDomainScaleLoc = 0
 
     private val quadVertices: FloatBuffer = ByteBuffer.allocateDirect(QUAD_COORDS.size * 4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer().put(QUAD_COORDS).also { it.position(0) }
@@ -48,20 +50,22 @@ class RawDenoiseShaderProgram {
     fun create() {
         programId = createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
         if (programId == 0) {
-            Log.e(TAG, "Failed to create RAW denoise shader program")
-            com.agx.camera.CrashLogger.log(TAG, "Failed to create RAW denoise shader program")
+            Log.e(TAG, "Failed to create sigma bucket shader program")
+            com.agx.camera.CrashLogger.log(TAG, "Failed to create sigma bucket shader program")
             return
         }
-        uGridTexLoc = GLES20.glGetUniformLocation(programId, "u_gridTex")
+        uSparseTexLoc = GLES20.glGetUniformLocation(programId, "u_sparseTex")
         uTransformMatrixLoc = GLES20.glGetUniformLocation(programId, "u_transformMatrix")
         uSensorSizeLoc = GLES20.glGetUniformLocation(programId, "u_sensorSize")
         uCropOriginLoc = GLES20.glGetUniformLocation(programId, "u_cropOrigin")
         uCropSizeLoc = GLES20.glGetUniformLocation(programId, "u_cropSize")
         uViewSizeLoc = GLES20.glGetUniformLocation(programId, "u_viewSize")
-        uAlphaLoc = GLES20.glGetUniformLocation(programId, "u_alpha")
-        uEpsLoc = GLES20.glGetUniformLocation(programId, "u_eps")
-        Log.d(TAG, "RAW denoise shader program created: $programId")
-        com.agx.camera.CrashLogger.log(TAG, "Program created: rawDenoise=$programId")
+        uBlackLevelPatternLoc = GLES20.glGetUniformLocation(programId, "u_black_level_pattern")
+        uIsoModelA = GLES20.glGetUniformLocation(programId, "u_iso_model_a")
+        uIsoModelB = GLES20.glGetUniformLocation(programId, "u_iso_model_b")
+        uDomainScaleLoc = GLES20.glGetUniformLocation(programId, "u_domain_scale")
+        Log.d(TAG, "Sigma bucket shader program created: $programId")
+        com.agx.camera.CrashLogger.log(TAG, "Program created: sigmaBucket=$programId")
     }
 
     fun draw(
@@ -70,24 +74,29 @@ class RawDenoiseShaderProgram {
         cropSizeX: Float, cropSizeY: Float,
         viewWidth: Float, viewHeight: Float,
         sensorWidth: Float, sensorHeight: Float,
-        gridTex: Int,
-        alpha: Float,
-        eps: Float
+        sparseTex: Int,
+        blackLevelPattern: IntArray,
+        isoModelA: Float, isoModelB: Float,
+        domainScale: Float
     ) {
         if (programId == 0) return
         GLES20.glUseProgram(programId)
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, gridTex)
-        GLES20.glUniform1i(uGridTexLoc, 0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, sparseTex)
+        GLES20.glUniform1i(uSparseTexLoc, 0)
 
         GLES20.glUniformMatrix4fv(uTransformMatrixLoc, 1, false, transformMatrix, 0)
         GLES20.glUniform2f(uSensorSizeLoc, sensorWidth, sensorHeight)
         GLES20.glUniform2f(uCropOriginLoc, cropOriginX, cropOriginY)
         GLES20.glUniform2f(uCropSizeLoc, cropSizeX, cropSizeY)
         GLES20.glUniform2f(uViewSizeLoc, viewWidth, viewHeight)
-        GLES20.glUniform1f(uAlphaLoc, alpha)
-        GLES20.glUniform1f(uEpsLoc, eps)
+        GLES20.glUniform4i(uBlackLevelPatternLoc,
+            blackLevelPattern[0], blackLevelPattern[1],
+            blackLevelPattern[2], blackLevelPattern[3])
+        GLES20.glUniform1f(uIsoModelA, isoModelA)
+        GLES20.glUniform1f(uIsoModelB, isoModelB)
+        GLES20.glUniform1f(uDomainScaleLoc, domainScale)
 
         val posHandle = GLES20.glGetAttribLocation(programId, "a_position")
         val texHandle = GLES20.glGetAttribLocation(programId, "a_texCoord")
@@ -114,7 +123,7 @@ class RawDenoiseShaderProgram {
     }
 
     companion object {
-        private const val TAG = "RawDenoiseShaderProgram"
+        private const val TAG = "SigmaBucketShaderProgram"
 
         private val QUAD_COORDS = floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
         private val QUAD_TEX_COORDS = floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
@@ -131,6 +140,12 @@ void main() {
 }
 """
 
+        // Same estimator as SigmaHatShaderProgram's rgbMode branch: the
+        // minimum squared 2-sample axis difference over the four neighbour
+        // axes, times the 2-sample unbiased factor 0.5 times 2.1981 (the
+        // MAD-consistency constant). Kept in lockstep with that shader on
+        // purpose: if the two ever diverge the split stops measuring the same
+        // estimator S5 consumes, and the bucket report would be a fiction.
         private const val FRAGMENT_SHADER = """
 #version 300 es
 precision highp float;
@@ -139,27 +154,20 @@ precision highp int;
 in vec2 v_texCoord;
 out vec4 outColor;
 
-uniform sampler2D u_gridTex;
+uniform sampler2D u_sparseTex;
 uniform vec2 u_sensorSize;
 uniform vec2 u_cropOrigin;
 uniform vec2 u_cropSize;
 uniform vec2 u_viewSize;
-uniform float u_alpha;
-uniform float u_eps;
+uniform ivec4 u_black_level_pattern;
+uniform float u_iso_model_a;
+uniform float u_iso_model_b;
+uniform float u_domain_scale;
 
-// Same-CFA neighbourhood in grid units (radius 2 lattice)
-const int WX[25] = int[25](
-    -2, -2, -2, -2, -2,
-    -1, -1, -1, -1, -1,
-     0,  0,  0,  0,  0,
-     1,  1,  1,  1,  1,
-     2,  2,  2,  2,  2);
-const int WY[25] = int[25](
-    -2, -1,  0,  1,  2,
-    -2, -1,  0,  1,  2,
-    -2, -1,  0,  1,  2,
-    -2, -1,  0,  1,  2,
-    -2, -1,  0,  1,  2);
+${DenoiseGlsl.MOSAIC_HELPERS}
+
+const int NOX[8] = int[8]( 1, -1,  0,  0,  1, -1,  1, -1);
+const int NOY[8] = int[8]( 0,  0,  1, -1,  1,  1, -1, -1);
 
 float channelOf(vec4 c, int p) {
     if (p == 0) return c.r;
@@ -168,56 +176,37 @@ float channelOf(vec4 c, int p) {
     return c.a;
 }
 
-// Green guide value at texel t = mean of the two green phases (high SNR).
-float guideAt(ivec2 t) {
-    vec4 c = texelFetch(u_gridTex, t, 0);
-    return (c.g + c.b) * 0.5;
+float axisMinSig2(ivec2 base, int p) {
+    float vals[8];
+    for (int k = 0; k < 8; k++) {
+        ivec2 t = clamp(base + ivec2(NOX[k], NOY[k]), ivec2(0), ivec2(u_viewSize) - ivec2(1));
+        vals[k] = channelOf(texelFetch(u_sparseTex, t, 0), p) * u_domain_scale;
+    }
+    float a0 = vals[0] - vals[1];
+    float a1 = vals[2] - vals[3];
+    float a2 = vals[4] - vals[6];
+    float a3 = vals[5] - vals[7];
+    float m = min(min(a0 * a0, a1 * a1), min(a2 * a2, a3 * a3));
+    return 2.1981 * 0.5 * m;
 }
 
 void main() {
     ivec2 base = ivec2(gl_FragCoord.xy);
-    vec4 center = texelFetch(u_gridTex, base, 0);
-    vec4 result = vec4(0.0);
+    float sig2R = axisMinSig2(base, 0);
+    float sig2G = axisMinSig2(base, 1);
+    float sig2B = axisMinSig2(base, 2);
 
-    float g0 = guideAt(base);
+    vec4 center = texelFetch(u_sparseTex, base, 0);
+    float meanSignal = (0.25 * center.r + 0.5 * center.g + 0.25 * center.b) * u_domain_scale;
+    float floor2 = isoModelSigmaSq(meanSignal);
 
-    for (int p = 0; p < 4; p++) {
-        float y0 = channelOf(center, p);
+    // Same order S5 uses: floor the channel mean, not the channels. Flooring
+    // each channel first would lift the mean and column A would stop matching
+    // the value S5 reads.
+    float meanFloored = max((sig2R + sig2G + sig2B) / 3.0, floor2);
 
-        float meanI = 0.0;
-        float meanG = 0.0;
-        float sumII = 0.0;
-        float sumGG = 0.0;
-        float sumIG = 0.0;
-        for (int k = 0; k < 25; k++) {
-            ivec2 t = clamp(base + ivec2(WX[k], WY[k]), ivec2(0), ivec2(u_viewSize) - ivec2(1));
-            vec4 c = texelFetch(u_gridTex, t, 0);
-            float i = channelOf(c, p);
-            float g = (c.g + c.b) * 0.5;    // green guide field for every phase
-            meanI += i;
-            meanG += g;
-            sumII += i * i;
-            sumGG += g * g;
-            sumIG += i * g;
-        }
-        float invN = 1.0 / 25.0;
-        meanI *= invN;
-        meanG *= invN;
-        float varG = max(sumGG * invN - meanG * meanG, 0.0);
-        float covIG = sumIG * invN - meanI * meanG;
-
-        float a = covIG / (varG + u_eps);
-        float b = meanI - a * meanG;
-        float gfOut = a * g0 + b;
-        float outVal = mix(y0, gfOut, 1.0 - u_alpha);
-        outVal = max(outVal, 0.0);
-
-        if (p == 0) result.r = outVal;
-        else if (p == 1) result.g = outVal;
-        else if (p == 2) result.b = outVal;
-        else result.a = outVal;
-    }
-    outColor = result;
+    // R/G/B stay unfloored so they remain the raw per-channel split.
+    outColor = vec4(sig2R, sig2G, sig2B, meanFloored);
 }
 """
 
@@ -240,6 +229,7 @@ void main() {
                 GLES20.glDeleteProgram(program)
                 return 0
             }
+
             GLES20.glDeleteShader(vertexShader)
             GLES20.glDeleteShader(fragmentShader)
             return program
@@ -249,6 +239,7 @@ void main() {
             val shader = GLES20.glCreateShader(type)
             GLES20.glShaderSource(shader, source)
             GLES20.glCompileShader(shader)
+
             val compiled = IntArray(1)
             GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
             if (compiled[0] != GLES20.GL_TRUE) {

@@ -5,8 +5,10 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 import kotlin.random.Random
+import com.agx.camera.SlowTests
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.experimental.categories.Category
 
 /**
  * Headless mirror of the Stage-5 GLSL (OutNrShaderProgram MAIN_FRAGMENT +
@@ -27,6 +29,9 @@ import org.junit.Test
  * max; the slider is a final linear blend toward this filtered result),
  * winScale=1.
  */
+// Whole-class slow marker: full two-round S5 mirrors over multi-megapixel
+// synthetic captures, so it is selected out of the fast headless run.
+@Category(SlowTests::class)
 class S5ReproTest {
 
     private val W = 129

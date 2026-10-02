@@ -23,6 +23,9 @@ class SpatialNrShaderProgram {
 
     private var programId = 0
 
+    /** Exposed only for the shader budget table in the measurement report. */
+    fun budgetProgramId(): Int = programId
+
     private var uBayerTexLoc = 0
     private var uTransformMatrixLoc = 0
     private var uSensorSizeLoc = 0

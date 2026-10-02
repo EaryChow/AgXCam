@@ -39,6 +39,13 @@ class OutNrShaderProgram {
     private var mainProgramId = 0
     private var ready = false
 
+    /**
+     * The main filter program only. The two stats programs are captured once per
+     * frame into a 1D reduction rather than run per pixel, and the budget counts
+     * per-texel work, so charging their size against this pass would overstate it.
+     */
+    fun budgetProgramId(): Int = mainProgramId
+
     private var hInTexLoc = 0
     private var hBaseTexLoc = 0
     private var hBetaLoc = 0

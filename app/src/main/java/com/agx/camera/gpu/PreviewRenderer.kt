@@ -10,11 +10,14 @@ import com.agx.camera.camera.ZoomController
 import com.agx.camera.io.JpegEncoder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlin.math.abs
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 class PreviewRenderer(private val textureView: TextureView) : TextureView.SurfaceTextureListener {
 
@@ -22,6 +25,17 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     @Volatile private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
     @Volatile private var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
     @Volatile private var eglConfig: EGLConfig? = null
+
+    /**
+     * The EGL_CONTEXT_CLIENT_VERSION value the live context was created with.
+     * Recorded because a 3.0 request on a driver that reports 3.1 is the whole
+     * reason GL_TIME_ELAPSED can be missing, and the report has to show the
+     * request next to the version that was actually handed back.
+     */
+    @Volatile private var eglContextClientVersion = 0
+
+    /** Minor version asked for alongside the major, 0 when the EGL 1.4 form won. */
+    @Volatile private var eglContextMinorVersion = 0
 
     private var fboId = 0
     private var fboTextureId = 0
@@ -200,6 +214,154 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     // The draw keeps its timing instrumentation (log-and-skip: only counted
     // frames are logged) so enabling it costs zero logging overhead.
     @Volatile var stage2DiagnosticPostDpcPass = false
+
+// ---- Measurement ----
+    // Per-pass GPU timing, axis-min buckets, structure map. The three are read
+    // against each other, so they share one flag: bucket ratios without the
+    // timings beside them are not actionable.
+    @Volatile var measurementActive = false
+
+    // Raw frame capture for the export. Fires on the next RAW_SENSOR frame and
+    // clears itself, so a session cannot sit here buffering every frame.
+    @Volatile var frameGrabArmed = false
+
+    // Axis-min bucket split. S5 reads the untouched SigmaHatShaderProgram
+    // output either way, so the S5 result is bit-identical.
+    private var axisBucketDiagnostic = false
+    // Structure map: built, classified on the host, not read by the pipeline.
+    private var structureMapDiagnostic = false
+
+    private val gpuTimers = GpuTimerQueries()
+    private val sigmaBucketShader = SigmaBucketShaderProgram()
+    private val structureMapShader = StructureMapShaderProgram()
+    private val profileStats = com.agx.camera.camera.NoiseProfileStats()
+    private val structureStabilizer = StructureMapStabilizer()
+    private var formedPictureLut: FormedPictureLut? = null
+
+    private var sigmaBucketFboId = 0
+
+    /**
+     * Render-frame index each sampled plane's contents were last computed on.
+     *
+     * The structure map and the axis buckets are drawn on census frames only,
+     * so between those draws their framebuffers still hold the previous census
+     * frame's data. 0 means "never drawn", which no real frame index can be.
+     * These exist so a frame grab can state which frame a plane describes
+     * instead of implying every plane came from the exported one.
+     */
+    private var structureMapFrameIndex = 0
+    private var axisBucketFrameIndex = 0
+    private var sigmaFrameIndex = 0
+
+    // Whether the bucket draw actually executed this frame, as opposed to being
+    // merely eligible. Kept apart from the gate flag because the draw is
+    // census-gated: eligibility is a property of the configuration, execution is
+    // a property of the frame, and reporting eligibility as though it were
+    // execution claimed the pass ran on nineteen frames in twenty where it did
+    // not.
+    private var axisBucketDrawn = false
+    private var sigmaBucketTexId = 0
+    private var sigmaBucketWidth = 0
+    private var sigmaBucketHeight = 0
+
+    // What the last timed frame actually did. The state block reports these
+    // rather than the switches that were requested, so a pass that was asked
+    // for but skipped by a density or readiness gate shows up as skipped.
+    private var passSwgfThisFrame = false
+    private var passSigmaThisFrame = false
+    private var sigmaSourceThisFrame = PipelineGates.SigmaSource.NONE
+    private var structureMapLumaSource = PipelineGates.LumaSource.NOT_USED
+    private var lastPipelineGates: PipelineGates? = null
+    private var lastFrameGrabPath: String? = null
+    private var lastFrameGrabSummary: String? = null
+
+/**
+ * Whether the last rendered frame had a measurement consumer forcing passes
+ * the image path had gated out. Held as a field because the bundle is built on
+ * the export thread, off the render thread that knows.
+ */
+    @Volatile private var measurementConsumerActive = false
+    private val pipelineStateLog = PipelineStateLog()
+    private val shaderBudget = ShaderBudget.standard()
+
+    private var structureMapFboId = 0
+    private var structureMapTexId = 0
+    private var structureMapWidth = 0
+    private var structureMapHeight = 0
+
+    // Edge-triggered so a per-frame overrun is reported once, plus a heartbeat.
+    private var structureChurnWarned = false
+    private var lastStructureChurnWarnNanos = 0L
+    private var censusFrame = 0
+
+    /**
+     * Wall-clock rate the viewfinder actually presents frames at.
+     *
+     * This is not a pass timing and does not claim to be one - the budget is
+     * measured with GPU queries only. It answers a question the camera frame
+     * rate cannot: the sensor can hold 30 fps while the GL thread renders 11,
+     * and a report that only carries the sensor rate describes a healthy
+     * pipeline while the viewfinder is visibly stuttering.
+     *
+     * EMA rather than a window because the interesting cases are the dips. A
+     * windowed average over a few hundred frames smooths a stutter away
+     * exactly when the user is noticing it.
+     */
+    private var viewfinderFps = 0f
+
+    private var lastFrameNanos = 0L
+
+    private var lastFpsLogNanos = 0L
+
+    /**
+     * Emits the viewfinder rate on a wall-clock heartbeat.
+     *
+     * Separate from the pipeline state line on purpose. That line is
+     * change-detected, so a continuously-moving value inside it would emit one
+     * line per frame; and dropping the rate from the log entirely would lose
+     * the one number that shows the viewfinder falling behind the sensor
+     * between two discrete state changes.
+     */
+    private fun logFrameRateIfDue() {
+        val now = System.nanoTime()
+        val last = lastFpsLogNanos
+        if (last != 0L && now - last < VIEWFINDER_FPS_LOG_INTERVAL_NANOS) return
+        lastFpsLogNanos = now
+        if (viewfinderFps <= 0f) return
+        CrashLogger.log(
+            TAG, String.format(
+                "viewfinder fps=%.1f appTier=%s thermal=%s",
+                viewfinderFps, appThermalTier, ThermalStatus.text(thermalStatus.current())
+            )
+        )
+    }
+
+    private lateinit var thermalStatus: ThermalStatus
+
+    /** Samples the clock once per frame and folds it into the EMA. */
+    private fun noteFrameRate() {
+        val now = System.nanoTime()
+        val last = lastFrameNanos
+        lastFrameNanos = now
+        if (last == 0L) return
+        // Guard against a resume or a stall making one huge interval that would
+        // drag the EMA down long after the stall is over.
+        val dt = now - last
+        if (dt <= 0L || dt > 1_000_000_000L) return
+        val fps = 1.0e9 / dt.toDouble()
+        viewfinderFps = if (viewfinderFps <= 0f) fps.toFloat()
+        else viewfinderFps + (fps.toFloat() - viewfinderFps) * VIEWFINDER_FPS_ALPHA
+    }
+
+    // Held between capture and export. A later capture overwrites it rather than
+    // queueing, so the memory does not grow across a long session.
+    private var pendingFrameGrab: FrameGrab? = null
+    private var lastBucketStats = ""
+    private var lastStructureStats = ""
+    // Advisory only; null means no anchor sample has been taken yet, which the
+    // advisory reports as INSUFFICIENT_DATA rather than as a pass.
+    @Volatile private var anchorReport: AnchorAdvisory.Report? = null
+
     private var syntheticSensor: ShortArray? = null
     private var syntheticBuffer: java.nio.ByteBuffer? = null
     // Live ISO used to derive the Stage-0 noise-model uniforms for every
@@ -262,6 +424,23 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         if (glInitialized) fboResizePending = true
     }
 
+    /**
+     * The app's own thermal controller tier, for the report only.
+     *
+     * Distinct from [thermalStatus], which is the platform's read. This app
+     * reduces the preview resolution itself when its controller goes WARM, so a
+     * segment can change size without any change in device thermal status. A
+     * report that showed only the platform level would leave a self-imposed
+     * resolution drop looking like a hardware downclock, which is the opposite
+     * of who caused it.
+     */
+    @Volatile
+    private var appThermalTier = "unknown"
+
+    fun setAppThermalTier(name: String) {
+        appThermalTier = name
+    }
+
     /** Thermal cap on the longest demosaic/output dimension (0 = no cap). */
     fun setPreviewResolutionCap(maxDim: Int) {
         if (previewResCapDim == maxDim) return
@@ -272,6 +451,166 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         fboHeight = h
         if (glInitialized) fboResizePending = true
         requestRender()
+    }
+
+    // ---- Measurement plumbing ------------------------------------------
+
+    /** Timers, bucket split and structure map move together. */
+    fun setMeasurementEnabled(enabled: Boolean) {
+        if (measurementActive == enabled) return
+        measurementActive = enabled
+        if (enabled) {
+            gpuTimers.arm()
+            axisBucketDiagnostic = true
+            structureMapDiagnostic = true
+        } else {
+            gpuTimers.disarm()
+            axisBucketDiagnostic = false
+            structureMapDiagnostic = false
+            releaseSigmaBucketBuffer()
+            releaseStructureMapBuffer()
+            structureStabilizer.reset()
+            structureChurnWarned = false
+            lastStructureChurnWarnNanos = 0L
+            censusFrame = 0
+        }
+        CrashLogger.log(
+            TAG,
+            "measurement: $enabled (GPU pass timing + axis-min buckets + structure map; none consumed by S5)"
+        )
+    }
+
+    /**
+     * Arms the raw frame grab. buildFrameGrabIfArmed clears the flag on capture.
+     *
+     * A grab is self-sufficient: it collects the full forensic set - sigma, axis
+     * buckets and structure map - whether or not measurement is armed. Leaving
+     * it to inherit the armed diagnostics made the product depend on unrelated
+     * toggle state, so pressing grab with the timing switch off produced a file
+     * holding one float plane and no image, with `structureMap=0` and
+     * `axisBuckets=0` in the meta to say nothing about why.
+     *
+     * Forcing the draws does not extend them: the passes behind the planes have
+     * no image-path consumer, and the churn, stabilizer and profile updates that
+     * do have persisted state are still gated on measurement being armed, so a
+     * grab reads the buffers without folding anything into them.
+     */
+    fun armFrameGrabOnce() {
+        pendingFrameGrab = null
+        frameGrabArmed = true
+        CrashLogger.log(TAG, "framegrab armed for the next RAW_SENSOR frame")
+    }
+
+/**
+ * The full measurement bundle: the GL environment, the shader budget, the gate
+ * state, the pass timings grouped by configuration, the noise profile rows, the
+ * covariance scan verdict, the structure-map probe results and the armed grab.
+ * MainActivity feeds this to CrashLogger as a section so it lands in the same
+ * download as the log.
+ *
+ * The state block and the pass timings sit next to each other on purpose. An
+ * empty section is undecidable on its own: "no samples yet" reads the same
+ * whether the pass never ran, a gate was closed, or the benchmark was off. With
+ * the gates above it, each section can be read against what the frame did.
+ *
+ * Every section states a reason when it has no numbers, so a gap is
+ * distinguishable from a bug at export time rather than after.
+ */
+    fun measurementBundle(): String {
+        val sb = StringBuilder()
+
+        // GL first. Every timing and every unavailable verdict below is a
+        // statement about one specific implementation, so the implementation
+        // has to be readable before any of them is.
+        sb.append("== GL environment ==\n")
+        sb.append(gpuTimers.glEnvironmentReport()).append('\n')
+
+        sb.append("== shader budget ==\n")
+        sb.append(shaderBudget.report(measurementConsumerActive)).append('\n')
+
+        sb.append("== measurement state ==\n")
+        val gates = lastPipelineGates
+        if (gates != null) {
+            sb.append(gates.reportText())
+        } else {
+            sb.append("no frame has been rendered with a measurement consumer live yet\n")
+        }
+        if (frameGrabArmed) {
+            sb.append("framegrab: armed, implies the measurement chain on the next RAW_SENSOR frame\n")
+        }
+        sb.append('\n')
+
+        sb.append("== GPU pass timing ==\n")
+        sb.append(gpuTimers.report()).append("\n\n")
+
+        sb.append("== noise profile ==\n")
+        sb.append(profileStats.report(com.agx.camera.camera.NoiseProfileStats.offlineRatioTable())).append('\n')
+        if (!measurementConsumerActive) {
+            sb.append("no rows: the axis-min bucket pass runs only with a measurement consumer live\n")
+        } else if (lastBucketStats.isEmpty()) {
+            sb.append("no rows: the bucket pass produced no sample this session\n")
+        } else {
+            sb.append(lastBucketStats).append('\n')
+        }
+
+        sb.append("\n== covariance sweep ==\n")
+        sb.append(CovarianceSensitivity.sweepShippedModel().report()).append("\n\n")
+
+        sb.append("== structure map ==\n")
+        sb.append(StructureMapClassifier.report(isoForDenoise)).append('\n')
+        sb.append(structureStabilizer.report()).append('\n')
+        if (lastStructureStats.isNotEmpty()) {
+            sb.append(lastStructureStats).append('\n')
+        } else if (!measurementConsumerActive) {
+            sb.append("no classification: the structure map runs only with a measurement consumer live\n")
+        } else {
+            sb.append("no classification: the structure map pass produced no sample this session\n")
+        }
+        sb.append('\n')
+        sb.append(
+            (anchorReport ?: AnchorAdvisory.judge(null, probeIso = isoForDenoise.coerceAtLeast(1))).text()
+        ).append('\n')
+
+        sb.append("== frame grab ==\n")
+        val grab = pendingFrameGrab ?: lastFrameGrabSummary
+        if (grab != null) {
+            sb.append("captured raw frame: ").append(grab).append('\n')
+            sb.append(if (lastFrameGrabPath != null) {
+                "saved to: ${lastFrameGrabPath}\n"
+            } else {
+                "saved to: not written yet (the export writes it after this bundle is built)\n"
+            })
+        } else {
+            sb.append("captured raw frame: ")
+                .append(if (frameGrabArmed) "requested, waiting for the next RAW_SENSOR frame" else "none")
+                .append('\n')
+        }
+        return sb.toString()
+    }
+
+    /**
+     * Called once the export has written the sidecar, so the bundle can name the
+     * file a reader can open rather than only its size.
+     */
+    fun setFrameGrabSavedPath(path: String?) {
+        lastFrameGrabPath = path
+    }
+
+    /**
+     * Retires the one-shot grab's report lines. Called by the export once the
+     * bundle has been built, so the next export with no fresh grab reports none
+     * rather than replaying a capture the reader has already seen.
+     */
+    fun clearFrameGrabReport() {
+        lastFrameGrabSummary = null
+        lastFrameGrabPath = null
+    }
+
+    /** Bytes of the last armed grab, or null. Consumed once when saving. */
+    fun takeFrameGrabBytes(): ByteArray? {
+        val grab = pendingFrameGrab ?: return null
+        pendingFrameGrab = null
+        return grab.toBytes()
     }
 
     /** Critical-battery blackout: drop any held frame and render black. */
@@ -559,7 +898,20 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
     fun start() {
         running = true
-        renderThread = Thread({ renderLoop() }, "PreviewRenderer").also { it.start() }
+        renderThread = Thread({
+            renderLoop()
+        }, "PreviewRenderer").apply {
+            // A native fault in the driver raises no Java exception, so nothing
+            // reaches the process-wide handler and the log just stops. An
+            // escaping throwable is the one case that can be narrated, and
+            // without this the render thread can die between the await and the
+            // per-frame try with no line to point at.
+            uncaughtExceptionHandler = Thread.UncaughtExceptionHandler { t, e ->
+                CrashLogger.log(TAG, "renderLoop: thread died: ${e.javaClass.simpleName}: ${e.message}")
+                CrashLogger.logException(TAG, e)
+            }
+            start()
+        }
     }
 
     fun stop() {
@@ -650,6 +1002,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         }
 
         bayerRenderCount++
+        noteFrameRate()
         if (bayerRenderCount <= 8 || bayerRenderCount % 120 == 0) {
             val pend = GLES20.glGetError()
             CrashLogger.log(
@@ -710,6 +1063,65 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             crop[3] / demosaicFboHeight.toFloat()
         )
 
+        // Measurement consumers read statistics rather than filtering the
+        // displayed image, so they need the sparse chain and the sigma-hat
+        // estimate even when the density gate has them switched off for the
+        // image path. Armed counts as a consumer: a one-shot grab is worth one
+        // frame of extra passes to have the attribution planes attached.
+        val sparseGridRendered = needSparseGrid && previewZoomK <= 2.0f
+
+        // Which diagnostics this frame owes a plane to. An armed grab widens the
+        // set so the container is self-sufficient; see armFrameGrabOnce. Only
+        // the draws are widened - everything that folds a frame into persisted
+        // measurement state stays on the armed flags alone, so a grab cannot
+        // perturb the churn, the stabilizer, the anchor advisory or the noise
+        // profile.
+        val axisBucketForFrame = FrameGrab.collectsPlane(axisBucketDiagnostic, frameGrabArmed)
+        val structureMapForFrame = FrameGrab.collectsPlane(structureMapDiagnostic, frameGrabArmed)
+
+        // Set before anything reads it this frame, and read again by the export
+        // thread later. The field rather than a local because the bundle is
+        // built off the render thread.
+        measurementConsumerActive = measurementActive || frameGrabArmed
+        // Decided once per frame so the profile census and the churn census
+        // cannot drift into sampling on different schedules.
+        //
+        // An armed grab forces a census frame. Without this, 19 of every 20 grabs
+        // would attach the previous census frame's structure map while
+        // meta("frame") named the current one - the container would assert a
+        // currency it could not back up. One extra census frame on a one-shot
+        // grab costs the map's 3.5 ms once, which is nothing next to shipping a
+        // stale plane as if it described the exported frame.
+        val censusDue = measurementConsumerActive && (frameGrabArmed || censusDueThisFrame())
+        var s1Raw = 0
+        var s3Raw = 0
+        var s5Raw = 0
+        // The frame's segment key, built once here and handed to PipelineGates below.
+        // Entered before the first timed pass of the frame, so a switch lands on a
+        // frame boundary instead of splitting a pass sequence.
+        //
+        // The zero placeholder only satisfies definite assignment across the two
+        // sibling blocks below. It cannot reach anything: the assignment and the
+        // PipelineGates construction that reads it are both guarded by the same
+        // measurementConsumerActive check, so any edit that separates those two guards
+        // needs to notice this line rather than discover it as a wrong segment key in
+        // a report.
+        var segment = PipelineGates.segmentKeyFor(0, 0, 0, false, 0, 0, appThermalTier, false)
+        if (measurementConsumerActive) {
+            // Raw 0-100 slider numbers, not derived strengths: this is what a
+            // reader can reproduce from the UI. Not computed at all in the off
+            // state.
+            s1Raw = (s1 * 100f).roundToInt()
+            s3Raw = (s3 * 100f).roundToInt()
+            s5Raw = (outNrStrength * 100f).roundToInt()
+            segment = PipelineGates.segmentKeyFor(
+                s1Raw, s3Raw, s5Raw, sparseGridRendered, cellGridW, cellGridH,
+                appThermalTier, ThermalStatus.isThrottled(thermalStatus.current())
+            )
+            gpuTimers.onFrameBoundary(segment)
+            gpuTimers.noteFrameContext(thermalStatus.current(), previewZoomK)
+        }
+
         // ---- RAW-domain stages (S1 DPC + S3 green-guided GF) producing the
         // float sparse Bayer grid that the demosaic (Stage 4) consumes.  On the
         // live device this replaces the fused pack's cross-phase approximation
@@ -727,6 +1139,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // is the right path; demosaicDenoisedId stays 0 so drawDemosaic applies
         // dpStrength/rawNrStrength inline.
         var demosaicDenoisedId = 0
+        var sparseChainTex = 0
         if (needSparseGrid && previewZoomK <= 2.0f) {
             demosaicDenoisedId = runDpcAndGfChain(
                 previewTransform, crop, gridW, gridH,
@@ -737,6 +1150,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 rawDenoiseActive, keepRawAlpha, s3Eps,
                 bayerRenderCount
             )
+            sparseChainTex = demosaicDenoisedId
             logGlError("after runDpcAndGfChain", bayerRenderCount)
         } else if (!needSparseGrid && (s1 > 0f || s3 > 0f) && bayerShader.isReady() && previewZoomK <= 2.0f) {
             // Pack fallback when DPC/GF shaders aren't ready.
@@ -774,73 +1188,73 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // MAD cost.  When enabled, the post-DPC draw runs FIRST and the
         // post-S3 draw overwrites it - same semantics as if it were on.
         var sigmaAvailable = false
-        val sparseGridRendered = needSparseGrid && previewZoomK <= 2.0f
-        if (outDenoiseActive && sparseGridRendered) {
-            ensureSigmaBuffer(gridW, gridH)
-            val postDpcTex = if (dpEnabled) dpcWorkBTexId else dpcWorkATexId
-            val postS3Tex = if (rawDenoiseActive) denoisedTexId else postDpcTex
-            val logS2 = bayerRenderCount <= 8 || bayerRenderCount % 120 == 0
-            if (stage2DiagnosticPostDpcPass) {
-                val t0 = System.nanoTime()
-                bindTarget(sigmaFboId, gridW, gridH)
-                sigmaHatShader.draw(
-                    transformMatrix = previewTransform,
-                    cropOriginX = crop[0], cropOriginY = crop[1],
-                    cropSizeX = crop[2], cropSizeY = crop[3],
-                    viewWidth = gridW.toFloat(), viewHeight = gridH.toFloat(),
-                    sensorWidth = effW.toFloat(), sensorHeight = effH.toFloat(),
-                    sparseTex = postDpcTex,
-                    blackLevelPattern = effBlack,
-                    isoModelA = isoModelA, isoModelB = isoModelB
+        // The chain output this frame. The image path's own output when the
+        // density gate let it run, otherwise a measurement-only run of the SAME
+        // chain into the same offscreen grid targets. Reusing the image path's
+        // output rather than re-running it keeps the passes counted once per
+        // frame, and reusing the same pass code rather than a simplified stand-in
+        // is what keeps the sigma-hat numbers on the sparse chain's definition:
+        // post-DPC, post-S3, grid domain. A different input would change what
+        // the residual anchors and the EMA tables are anchored to.
+        val chainOutTex = when {
+            sparseChainTex != 0 -> sparseChainTex
+            measurementConsumerActive && dpcShader.isReady() -> {
+                val off = runDpcAndGfChain(
+                    previewTransform, crop, gridW, gridH,
+                    effW.toFloat(), effH.toFloat(),
+                    bayerShader.bayerTextureHandle(),
+                    effBlack, effBitDepth,
+                    dpEnabled, m1v, m2v, thetav, isoModelA, isoModelB, s1,
+                    rawDenoiseActive, keepRawAlpha, s3Eps,
+                    bayerRenderCount
                 )
-                logGlError("after stage2 sigma (post-DPC diag)", bayerRenderCount)
-                val t1 = System.nanoTime()
-                bindTarget(sigmaFboId, gridW, gridH)
-                sigmaHatShader.draw(
-                    transformMatrix = previewTransform,
-                    cropOriginX = crop[0], cropOriginY = crop[1],
-                    cropSizeX = crop[2], cropSizeY = crop[3],
-                    viewWidth = gridW.toFloat(), viewHeight = gridH.toFloat(),
-                    sensorWidth = effW.toFloat(), sensorHeight = effH.toFloat(),
-                    sparseTex = postS3Tex,
-                    blackLevelPattern = effBlack,
-                    isoModelA = isoModelA, isoModelB = isoModelB
-                )
-                logGlError("after stage2 sigma (post-S3)", bayerRenderCount)
-                val t2 = System.nanoTime()
-                sigmaAvailable = true
-                if (logS2) {
-                    CrashLogger.log(
-                        TAG, "Stage2 MAD (preview): post-DPC=" +
-                            "%.3f".format((t1 - t0) / 1.0e6) +
-                            "ms post-S3=" + "%.3f".format((t2 - t1) / 1.0e6) +
-                            "ms grid=${gridW}x${gridH} diag=ON"
-                    )
-                }
-            } else {
-                val t0 = System.nanoTime()
-                bindTarget(sigmaFboId, gridW, gridH)
-                sigmaHatShader.draw(
-                    transformMatrix = previewTransform,
-                    cropOriginX = crop[0], cropOriginY = crop[1],
-                    cropSizeX = crop[2], cropSizeY = crop[3],
-                    viewWidth = gridW.toFloat(), viewHeight = gridH.toFloat(),
-                    sensorWidth = effW.toFloat(), sensorHeight = effH.toFloat(),
-                    sparseTex = postS3Tex,
-                    blackLevelPattern = effBlack,
-                    isoModelA = isoModelA, isoModelB = isoModelB
-                )
-                logGlError("after stage2 sigma (post-S3)", bayerRenderCount)
-                val t1 = System.nanoTime()
-                sigmaAvailable = true
-                if (logS2) {
-                    CrashLogger.log(
-                        TAG, "Stage2 MAD (preview): post-S3=" +
-                            "%.3f".format((t1 - t0) / 1.0e6) +
-                            "ms grid=${gridW}x${gridH}"
-                    )
-                }
+                logGlError("after measurement grid chain", bayerRenderCount)
+                off
             }
+            else -> 0
+        }
+        val sigmaSource = when {
+            chainOutTex == 0 -> PipelineGates.SigmaSource.NONE
+            sparseGridRendered -> PipelineGates.SigmaSource.IMAGE_CHAIN
+            else -> PipelineGates.SigmaSource.OFFSCREEN_CHAIN
+        }
+        // sigma_hat runs for S5, and for any measurement consumer that needs the
+        // estimate. The outNR final mix stays tied to outNrStrength alone.
+        if (outDenoiseActive || measurementConsumerActive) {
+            sigmaAvailable = runSigmaHatPass(
+                postDpcTex = if (dpEnabled) dpcWorkBTexId else dpcWorkATexId,
+                postS3Tex = chainOutTex,
+                previewTransform = previewTransform, crop = crop,
+                gridW = gridW, gridH = gridH,
+                effW = effW.toFloat(), effH = effH.toFloat(),
+                effBlack = effBlack,
+                isoModelA = isoModelA, isoModelB = isoModelB, whiteRange = whiteRange,
+                // Census-gated, because that is the only cadence anything reads
+                // this at: updateProfileFromSample below samples on census
+                // frames, and the frame grab stamps whatever frame the plane
+                // holds. Drawing it every frame cost 0.330 ms to fill a target
+                // that nineteen times out of twenty was overwritten unread.
+                // The earlier justification for that - that sigma_hat consumes
+                // the buckets - was simply false; sigma_hat writes them and
+                // reads only its own output.
+                axisBuckets = axisBucketForFrame && censusDue,
+                renderCount = bayerRenderCount
+            )
+            axisBucketDrawn = axisBucketForFrame && censusDue
+            if (sigmaAvailable) sigmaFrameIndex = bayerRenderCount
+        }
+        if (measurementConsumerActive) {
+            passSwgfThisFrame = sparseGridRendered && rawDenoiseActive
+            passSigmaThisFrame = sigmaAvailable
+            sigmaSourceThisFrame = sigmaSource
+        }
+
+        if (FrameGrab.foldsPersistedState(axisBucketDiagnostic, frameGrabArmed) &&
+            sigmaBucketTexId != 0 && censusDue) {
+            // Deliberately narrower than axisBucketForFrame: a grab-only bucket
+            // draw must not fold a sample into the runtime noise profile, because
+            // the grab is a read-only request.
+            updateProfileFromSample(iso, rawDenoiseActive, gridW, gridH)
         }
 
         // CPU cross-check against the synthetic oracle whenever the RAW-domain
@@ -938,16 +1352,79 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             // flagAvailable=false, which keeps Stage 5 bit-identical to the
             // shipped filter.  The grid flag map is already at the S5 grid.
             val previewFlagAvailable = demosaicDenoisedId != 0 && dpEnabled && dpcFlagTexId != 0
+            // Whether S5 may consume this frame's sigma_hat estimate.
+            //
+            // Two consumers, two different rules. S5 may always use an estimate
+            // derived from the image path's own S3 output. It may also use one
+            // from a measurement-only chain, because measurement mode
+            // deliberately re-routes S5 onto the sparse-chain noise definition
+            // and discloses it, via SigmaSource.OFFSCREEN_CHAIN and
+            // shaderBudget's measurementForcedChain.
+            //
+            // It may NOT do so because a frame grab was armed. A grab is a
+            // read-only request to attach planes to a frame; letting it change
+            // S5's noise model means inspecting the raw attachment changes the
+            // frame under inspection, on the one frame someone is trying to
+            // reason about, with nothing in the pixels to say so. Past the
+            // density gate (k>2) the image path takes the inline route with no
+            // grid chain at all, so the offscreen chain below is pure
+            // diagnostic machinery and must stay out of S5.
+            //
+            // Gated on measurementActive, not measurementConsumerActive, for
+            // that reason alone. The flag plane below already worked this way.
+            val sigmaForImagePath =
+                sigmaAvailable && (sparseGridRendered || measurementActive)
             ispInputTex = runStage5(
                 demosaicFboWidth, demosaicFboHeight, demosaicFboTextureId,
-                if (sigmaAvailable) sigmaTexId else 0,
+                if (sigmaForImagePath) sigmaTexId else 0,
                 whiteRange, gridW, gridH,
-                useIsoSigma = !sigmaAvailable,
+                useIsoSigma = !sigmaForImagePath,
                 isoModelA = isoModelA, isoModelB = isoModelB,
                 flagTex = if (previewFlagAvailable) dpcFlagTexId else 0,
                 flagAvailable = previewFlagAvailable
             )
             logGlError("after stage5 outDenoise", bayerRenderCount)
+        }
+
+        // Structure map runs on this frame's S5 output, so it has to come after
+        // runStage5 above and before the AgX pass below. Reading it earlier
+        // would classify the previous frame's demosaic result.
+        //
+        // The pass is drawn on census frames only, not just its readback. It is
+        // the most expensive entry in the budget and nothing consumes it: the
+        // measured cost at 960x720 was 3.5 ms mean and 5.0 ms p95, paid on
+        // every frame and discarded on nineteen of every twenty. The churn
+        // census compares consecutive samples, so drawing on census frames
+        // leaves its statistics intact and costs a twentieth of the pass time.
+        //
+        // Eligibility is tracked separately from the draw so the reported gate
+        // state stays a property of the configuration instead of flipping with
+        // the cadence: a gate that alternated every frame would describe a
+        // pipeline that runs the map half the time rather than one that samples it.
+        val structureMapEligible =
+            structureMapForFrame && structureMapShader.isReady() && sigmaAvailable
+        val structureMapRan = structureMapEligible && censusDue
+        if (structureMapRan) {
+            runStructureMapDiagnostic(ispInputTex, gridW, gridH)
+            structureMapFrameIndex = bayerRenderCount
+            // Only the armed flag folds this frame into persisted measurement
+            // state. A grab-only draw leaves churn, the stabilizer and the
+            // anchor advisory untouched; the grab reads the FBO directly.
+            if (FrameGrab.foldsPersistedState(structureMapDiagnostic, frameGrabArmed)) {
+                updateStructureChurn()
+            }
+        }
+        if (measurementConsumerActive) {
+            // The map's input is the sigma_hat above plus the luma actually on
+            // screen. Which luma that is depends on how S5 ran, and saying so
+            // keeps the map from being read as a characterisation of a path that
+            // was inactive.
+            structureMapLumaSource = when {
+                !structureMapEligible -> PipelineGates.LumaSource.NOT_USED
+                !outDenoiseActive -> PipelineGates.LumaSource.DEMOSAIC_NO_S5
+                sparseGridRendered -> PipelineGates.LumaSource.S5_SPARSE
+                else -> PipelineGates.LumaSource.S5_INLINE
+            }
         }
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
@@ -969,6 +1446,53 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             agxVibrance
         )
         logGlError("after nrShader.draw", bayerRenderCount)
+
+        gpuTimers.poll()
+
+        // The state block is built here rather than at the frame boundary so the
+        // pass flags are what the frame actually did, not what was requested.
+        // A pass asked for but skipped by a readiness or density gate then reads
+        // as skipped, which is the whole point of the block.
+        if (measurementConsumerActive) {
+            val gates = PipelineGates(
+                s1Raw = s1Raw, s3Raw = s3Raw, s5Raw = s5Raw,
+                s1Strength = s1, s3Strength = s3, s5Strength = outNrStrength,
+                outDenoiseActive = outDenoiseActive,
+                needSparseGrid = needSparseGrid,
+                sparseGridRendered = sparseGridRendered,
+                zoomK = previewZoomK,
+                viewWidth = cellGridW, viewHeight = cellGridH,
+                passSigma = passSigmaThisFrame,
+                passSwgf = passSwgfThisFrame,
+                passOutNr = outDenoiseActive,
+                passBucket = axisBucketForFrame && sigmaBucketTexId != 0,
+                bucketDrawn = axisBucketDrawn,
+                passStructureMap = structureMapEligible,
+                structureMapDrawn = structureMapRan,
+                sigmaSource = sigmaSourceThisFrame,
+                lumaSource = structureMapLumaSource,
+                thermalStatus = thermalStatus.current(),
+                appThermalTier = appThermalTier,
+                viewfinderFps = viewfinderFps,
+                // The key built before this frame's first timed pass, not a
+                // rebuild from the fields above. Rebuilding here would let the
+                // report's segment list and this block describe different
+                // segmentations, which is the one thing the shared key exists
+                // to rule out.
+                segmentKey = segment
+            )
+            lastPipelineGates = gates
+            if (pipelineStateLog.shouldLog(gates)) {
+                CrashLogger.log(TAG, gates.reportText().replace('\n', ' '))
+            }
+            logFrameRateIfDue()
+        }
+
+        // A grab needs the attribution planes, so it implies the measurement
+        // chain regardless of whether the image path was drawing it.
+        if (frameGrabArmed) {
+            buildFrameGrabIfArmed(iso, gridW, gridH)
+        }
     }
 
     private fun applyBayerCrop() {
@@ -1037,7 +1561,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // strength 0..100 maps to 0%..100% denoise (0% = identity,
         // 100% = full SWGF at epsY~1.4, epsC~64).
         val lumaEpsScale = 1.4f
-        val chromaEpsScale = 64.0f
         val beta = 0.3f
         // Stage-4 sparse-demosaic residual variance (sigma_dm ~ 3~4 DN).
         val sigmaDm2 = 10f
@@ -1075,32 +1598,38 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // is the square of the sigma multiplier.
         val iterations = 2
         // Round-2 epsilon multiplier = (kappa x 1.4)^2.  kappa is the round-1 sigma multiplier
-        // (lumaEpsScale/chromaEpsScale lower these into the epsilon base); the
+        // (lumaEpsScale/CHROMA_EPS_SCALE lower these into the epsilon base); the
         // "kappa x 1.4" sigma ratio therefore squares in epsilon (epsilon proportional to sigma_hat^2).
         val round2EpsMult = 1.96f
 
         // Round 1 (kappa1): demosaic output -> outNr1.
         val flagConsumeNs0 = System.nanoTime()
+        gpuTimers.begin("S5.statsH1")
         bindTarget(statsHFboId, w, h)
         outNrShader.drawStatsH(
             inputTex, inputTex, beta, S5_LUMA_WEIGHTS, winScale,
             flagTex = flagTex, flagAvailable = flagAvailable
         )
         logGlError("stage5 statsH1", bayerRenderCount)
+        gpuTimers.end("S5.statsH1")
+        gpuTimers.begin("S5.statsV1")
         bindTarget(statsVFboId, w, h)
         outNrShader.drawStatsV(statsHTexId, winScale, flagAvailable)
         logGlError("stage5 statsV1", bayerRenderCount)
+        gpuTimers.end("S5.statsV1")
+        gpuTimers.begin("S5.main1")
         bindTarget(outNr1FboId, w, h)
         outNrShader.drawMain(
             inputTex, inputTex, statsVTexId, sigmaTex,
             sigmaW, sigmaH, w.toFloat(), h.toFloat(),
-            beta, lumaEpsScale, chromaEpsScale, sigmaDm2,
+            beta, lumaEpsScale, CHROMA_EPS_SCALE, sigmaDm2,
             inverseRange2, calibToResidualScale,
             useIsoSigma, s5IsoA, s5IsoB,
             winScale, epsBoost, strength = s,
             flagTex = flagTex, flagAvailable = flagAvailable
         )
         logGlError("stage5 main1", bayerRenderCount)
+        gpuTimers.end("S5.main1")
 
         if (iterations < 2) return outNr1TexId
 
@@ -1110,34 +1639,589 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // input before stats and the final strength mix, so the second pass
         // sees 0.7*r1 + 0.3*original instead of consolidating r1's correlated
         // residual (flat-region low-frequency residue cleanup).
+        gpuTimers.begin("S5.statsH2")
         bindTarget(statsHFboId, w, h)
         outNrShader.drawStatsH(
             outNr1TexId, inputTex, beta, S5_LUMA_WEIGHTS, winScale,
             flagTex = flagTex, flagAvailable = flagAvailable
         )
         logGlError("stage5 statsH2", bayerRenderCount)
+        gpuTimers.end("S5.statsH2")
+        gpuTimers.begin("S5.statsV2")
         bindTarget(statsVFboId, w, h)
         outNrShader.drawStatsV(statsHTexId, winScale, flagAvailable)
         logGlError("stage5 statsV2", bayerRenderCount)
+        gpuTimers.end("S5.statsV2")
         if (flagAvailable && (bayerRenderCount <= 8 || bayerRenderCount % 120 == 0)) {
             CrashLogger.log(
                 TAG, "S5 flag consume (stats h/v x2): " +
                     "%.3f".format((System.nanoTime() - flagConsumeNs0) / 1.0e6) + "ms ${w}x$h"
             )
         }
+        gpuTimers.begin("S5.main2")
         bindTarget(outNr2FboId, w, h)
         outNrShader.drawMain(
             outNr1TexId, inputTex, statsVTexId, sigmaTex,
             sigmaW, sigmaH, w.toFloat(), h.toFloat(),
-            beta, round2EpsMult * lumaEpsScale, round2EpsMult * chromaEpsScale, sigmaDm2,
+            beta, round2EpsMult * lumaEpsScale, round2EpsMult * CHROMA_EPS_SCALE, sigmaDm2,
             inverseRange2, calibToResidualScale,
             useIsoSigma, s5IsoA, s5IsoB,
             winScale, epsBoost, strength = s,
             flagTex = flagTex, flagAvailable = flagAvailable
         )
         logGlError("stage5 main2", bayerRenderCount)
+        gpuTimers.end("S5.main2")
 
         return outNr2TexId
+    }
+
+    /**
+     * Axis-min bucket split, rendered into its own buffer. The three channels
+     * and their mean land in R/G/B/A; the mean column is floored exactly the
+     * way the S5-consuming shader floors it, so a reader can check the split
+     * against the live estimate instead of taking it on faith.
+     *
+     * Nothing downstream samples this texture.
+     */
+    /**
+     * The Stage-2 sigma_hat estimate over the sparse residual grid, as one
+     * function so the image path and the measurement chain cannot drift apart.
+     *
+     * The post-S3 draw is the mandatory re-estimate at the Stage-3 -> Stage-5
+     * boundary: S5 reads its output, and it overwrites the buffer so sigma_hat
+     * reflects the actual post-RAW residual, with no analytic variance
+     * propagation. That single draw is the cost the performance requirement
+     * measures.
+     *
+     * The post-DPC draw exists for the second mandatory point (DPC -> Stage 3
+     * boundary) but is functionally dead for the current consumers: S3's
+     * strength is a host scalar alpha that never samples sigma_hat, and S5
+     * reads the post-S3 estimate, so the post-S3 write-over is the correct
+     * consuming write. Running it every frame would permanently charge the
+     * preview GPU budget for an unconsumed result, so it is off by default and
+     * kept behind the diagnostic switch stage2DiagnosticPostDpcPass: a
+     * validation channel that injected defects must not pollute sigma_hat (a
+     * DPC leak shows up as a sigma_hat^2 bump at the defect texel), plus a
+     * profiling hook to compare the two MAD costs. When enabled it runs first
+     * and the post-S3 draw overwrites it, same semantics as if it were on.
+     *
+     * Returns whether an estimate is now available. False means a consumer that
+     * asked for one has to fall back, which the report has to be able to state.
+     */
+    private fun runSigmaHatPass(
+        postDpcTex: Int,
+        postS3Tex: Int,
+        previewTransform: FloatArray,
+        crop: FloatArray,
+        gridW: Int, gridH: Int,
+        effW: Float, effH: Float,
+        effBlack: IntArray,
+        isoModelA: Float, isoModelB: Float,
+        whiteRange: Float,
+        axisBuckets: Boolean,
+        renderCount: Int
+    ): Boolean {
+        if (postS3Tex == 0) return false
+        if (!sigmaHatShader.isReady()) return false
+        ensureSigmaBuffer(gridW, gridH)
+        if (sigmaFboId == 0) return false
+        val logS2 = renderCount <= 8 || renderCount % 120 == 0
+        if (stage2DiagnosticPostDpcPass && postDpcTex != 0) {
+            val t0 = System.nanoTime()
+            gpuTimers.begin("S2.sigma_post_dpc")
+            bindTarget(sigmaFboId, gridW, gridH)
+            sigmaHatShader.draw(
+                transformMatrix = previewTransform,
+                cropOriginX = crop[0], cropOriginY = crop[1],
+                cropSizeX = crop[2], cropSizeY = crop[3],
+                viewWidth = gridW.toFloat(), viewHeight = gridH.toFloat(),
+                sensorWidth = effW, sensorHeight = effH,
+                sparseTex = postDpcTex,
+                blackLevelPattern = effBlack,
+                isoModelA = isoModelA, isoModelB = isoModelB
+            )
+            gpuTimers.end("S2.sigma_post_dpc")
+            logGlError("after stage2 sigma (post-DPC diag)", renderCount)
+            val t1 = System.nanoTime()
+            gpuTimers.begin("S2.sigma_post_s3")
+            bindTarget(sigmaFboId, gridW, gridH)
+            sigmaHatShader.draw(
+                transformMatrix = previewTransform,
+                cropOriginX = crop[0], cropOriginY = crop[1],
+                cropSizeX = crop[2], cropSizeY = crop[3],
+                viewWidth = gridW.toFloat(), viewHeight = gridH.toFloat(),
+                sensorWidth = effW, sensorHeight = effH,
+                sparseTex = postS3Tex,
+                blackLevelPattern = effBlack,
+                isoModelA = isoModelA, isoModelB = isoModelB
+            )
+            gpuTimers.end("S2.sigma_post_s3")
+            logGlError("after stage2 sigma (post-S3)", renderCount)
+            if (logS2) {
+                CrashLogger.log(
+                    TAG, "Stage2 MAD (preview): post-DPC=" +
+                        "%.3f".format((t1 - t0) / 1.0e6) +
+                        "ms post-S3=" + "%.3f".format((System.nanoTime() - t1) / 1.0e6) +
+                        "ms grid=${gridW}x${gridH} diag=ON"
+                )
+            }
+        } else {
+            val t0 = System.nanoTime()
+            gpuTimers.begin("S2.sigma_post_s3")
+            bindTarget(sigmaFboId, gridW, gridH)
+            sigmaHatShader.draw(
+                transformMatrix = previewTransform,
+                cropOriginX = crop[0], cropOriginY = crop[1],
+                cropSizeX = crop[2], cropSizeY = crop[3],
+                viewWidth = gridW.toFloat(), viewHeight = gridH.toFloat(),
+                sensorWidth = effW, sensorHeight = effH,
+                sparseTex = postS3Tex,
+                blackLevelPattern = effBlack,
+                isoModelA = isoModelA, isoModelB = isoModelB
+            )
+            gpuTimers.end("S2.sigma_post_s3")
+            logGlError("after stage2 sigma (post-S3)", renderCount)
+            if (logS2) {
+                CrashLogger.log(
+                    TAG, "Stage2 MAD (preview): post-S3=" +
+                        "%.3f".format((System.nanoTime() - t0) / 1.0e6) +
+                        "ms grid=${gridW}x${gridH}"
+                )
+            }
+        }
+
+        if (axisBuckets && sigmaBucketShader.isReady()) {
+            runAxisBucketDiagnostic(
+                postS3Tex, previewTransform, crop, gridW, gridH,
+                effW, effH,
+                effBlack, isoModelA, isoModelB, whiteRange, bayerRenderCount
+            )
+        }
+        return true
+    }
+
+    private fun runAxisBucketDiagnostic(
+        srcTex: Int,
+        previewTransform: FloatArray,
+        crop: FloatArray,
+        gridW: Int, gridH: Int,
+        sensorW: Float, sensorH: Float,
+        blackLevelPattern: IntArray,
+        isoModelA: Float, isoModelB: Float,
+        whiteRange: Float,
+        renderCount: Int
+    ) {
+        if (srcTex == 0) return
+        ensureSigmaBucketBuffer(gridW, gridH)
+        if (sigmaBucketFboId == 0) return
+        gpuTimers.begin("S2.axis_buckets")
+        bindTarget(sigmaBucketFboId, gridW, gridH)
+        sigmaBucketShader.draw(
+            transformMatrix = previewTransform,
+            cropOriginX = crop[0], cropOriginY = crop[1],
+            cropSizeX = crop[2], cropSizeY = crop[3],
+            viewWidth = gridW.toFloat(), viewHeight = gridH.toFloat(),
+            sensorWidth = sensorW, sensorHeight = sensorH,
+            sparseTex = srcTex,
+            blackLevelPattern = blackLevelPattern,
+            isoModelA = isoModelA, isoModelB = isoModelB,
+            // 1.0, matching the S2 sigma pass this compares against. The
+            // preview path works in 0..1 image units; whiteRange is the
+            // capture path's scale.
+            domainScale = 1.0f
+        )
+        logGlError("after axis-min buckets", bayerRenderCount)
+        gpuTimers.end("S2.axis_buckets")
+        axisBucketFrameIndex = renderCount
+    }
+
+    /**
+     * Returns the cached table when it was built from the current AgX curve
+     * settings, otherwise rebuilds it. The session sliders change logMin/logMax
+     * and the tone curve, so exposure alone is not a sufficient cache key.
+     */
+    private fun formedPictureLutForSession(cached: FormedPictureLut?): FormedPictureLut {
+        val key = formedPictureLutKey()
+        if (cached != null && cached.configKey == key) return cached
+        return FormedPictureLut(
+            logMin = agxLogMin,
+            logMax = agxLogMax,
+            logMidgray = agxLogMidgray,
+            displayMidgray = agxDisplayMidgray,
+            contrast = agxContrast,
+            toe = agxToe,
+            shoulder = agxShoulder,
+            exposureEv = exposureEv
+        ).also { formedPictureLut = it }
+    }
+
+    private fun formedPictureLutKey(): String =
+        "logMin=$agxLogMin logMax=$agxLogMax mid=$agxLogMidgray " +
+            "disp=$agxDisplayMidgray contrast=$agxContrast toe=$agxToe " +
+            "shoulder=$agxShoulder ev=$exposureEv"
+
+    /**
+     * Classifies this frame's S5 output into PLAIN/TEXTURE/EDGE. The caller
+     * passes the live S5 texture, so the map reflects the current frame rather
+     * than the previous one. A strided readback of the result feeds the
+     * stabilizer, the churn log and the anchor advisory. Nothing in the image
+     * path reads the map.
+     */
+    private fun runStructureMapDiagnostic(inputTex: Int, gridW: Int, gridH: Int) {
+        val w = demosaicFboWidth
+        val h = demosaicFboHeight
+        if (w <= 0 || h <= 0) return
+        ensureStructureMapBuffer(w, h)
+        if (structureMapFboId == 0) return
+        val cached = formedPictureLut
+        val lut = formedPictureLutForSession(cached)
+        val cal = StructureMapClassifier.calibrationFor(isoForDenoise)
+        gpuTimers.begin("S5.structure_map")
+        bindTarget(structureMapFboId, w, h)
+        structureMapShader.draw(
+            inputTex = inputTex,
+            sigmaTex = sigmaTexId,
+            sigmaW = gridW, sigmaH = gridH,
+            outW = w, outH = h,
+            rRetain = cal.rRetain,
+            plainMax = cal.plainMax,
+            textureMin = cal.textureMin,
+            edgeCoherenceMin = cal.edgeCoherenceMin,
+            formedLut = lut.table,
+            lutDomainMinStop = lut.domainMinStop,
+            lutDomainMaxStop = lut.domainMaxStop
+        )
+        logGlError("after structure map", bayerRenderCount)
+        gpuTimers.end("S5.structure_map")
+    }
+
+    /**
+     * True on the frames the CPU-side census runs, i.e. when a diagnostic pass
+     * is followed by a readback.
+     *
+     * Both quantities here are slow variables: the noise profile feeds an EMA
+     * that is already averaged over history, and churn is a displacement rate
+     * that says nothing new at 60 Hz. Reading them every frame bought no
+     * resolution the report could use and cost a pipeline flush each time,
+     * which serialised the frame against the GPU. One sample every
+     * CENSUS_INTERVAL_FRAMES frames keeps a steady low-rate estimate that
+     * still fills the 30-frame confidence floor inside a second at preview
+     * rate.
+     *
+     * The structure map is drawn on these frames too, so a sampling frame
+     * always reads the map it just drew rather than a stale target. The axis
+     * buckets are drawn on the same cadence, for the same reason plus their
+     * own: nothing reads them between census frames. They cost 0.330 ms
+     * against the map's 3.5 ms, so drawing them every frame would have bought
+     * a target that was overwritten unread nineteen times out of twenty.
+     *
+     * An armed frame grab forces the census, so a grab always lands on a frame
+     * where both draws have just run and its planes are current.
+     */
+    private fun censusDueThisFrame(): Boolean {
+        censusFrame++
+        return censusFrame % CENSUS_INTERVAL_FRAMES == 0
+    }
+
+    /**
+     * Folds a strided sample of the axis-min bucket split into the runtime
+     * profile. The bucket split is the only source of the per-channel sigma
+     * the profile needs, so this reads it rather than the structure map: the
+     * profile measures sigma, the structure map measures the residual/noise
+     * ratio, and conflating them would make the reported ratio meaningless.
+     *
+     * Requires the bucket diagnostic to be armed; with it off there is no
+     * per-channel data and no sample is recorded. Nothing is substituted.
+     */
+    private fun updateProfileFromSample(iso: Int, s3Active: Boolean, gridW: Int, gridH: Int) {
+        if (sigmaBucketTexId == 0 || gridW <= 0 || gridH <= 0) return
+        val stride = maxOf(1, minOf(gridW, gridH) / 32)
+        val plane = readPlaneF(sigmaBucketFboId, gridW, gridH) ?: return
+        var sig2RSum = 0.0
+        var sig2GSum = 0.0
+        var sig2BSum = 0.0
+        var n = 0
+        var y = 0
+        while (y < gridH) {
+            var x = 0
+            while (x < gridW) {
+                val i = (y * gridW + x) * 4
+                sig2RSum += plane.get(i).toDouble()
+                sig2GSum += plane.get(i + 1).toDouble()
+                sig2BSum += plane.get(i + 2).toDouble()
+                n++
+                x += stride
+            }
+            y += stride
+        }
+        if (n == 0) return
+        val sR = Math.sqrt(sig2RSum / n).toFloat()
+        val sG = Math.sqrt(sig2GSum / n).toFloat()
+        val sB = Math.sqrt(sig2BSum / n).toFloat()
+        if (!(sR > 0f) || !(sG > 0f) || !(sB > 0f)) return
+
+        val lumaVar = CovarianceSensitivity.lumaVarianceMarginal(sR * sR, sG * sG, sB * sB)
+        val chromaVar = CovarianceSensitivity.chromaVarianceMarginal(sR * sR, sG * sG, sB * sB)
+        val meanSigmaLuma = sqrt(lumaVar).toFloat()
+        val meanSigmaChroma = sqrt(chromaVar).toFloat() * CHROMA_EPS_SCALE
+        if (!(meanSigmaLuma > 0f) || !(meanSigmaChroma > 0f)) return
+
+        // The profile key is (ISO bucket, S3 state). The S3 state matters
+        // because the blend changes what residual the estimator sees; an EMA
+        // shared across both states averages two populations.
+        profileStats.update(iso, s3Active, meanSigmaChroma, meanSigmaLuma)
+        lastBucketStats = String.format(
+            "axis-min bucket sample n=%d stride=%d cadence=1/%d frames sigma(R,G,B)=(%.3f,%.3f,%.3f) meanSigL=%.4f meanSigC=%.3f",
+            n, stride, CENSUS_INTERVAL_FRAMES, sR, sG, sB, meanSigmaLuma, meanSigmaChroma
+        )
+    }
+
+    /**
+     * Samples the structure map and reports how much of the map's class
+     * assignment moved under the stabilizer's slew limit in one frame. High
+     * churn means the control signal itself would flicker, so it is logged
+     * even though nothing consumes the map yet.
+     */
+    private fun updateStructureChurn() {
+        val w = structureMapWidth
+        val h = structureMapHeight
+        if (w <= 0 || h <= 0) return
+        val stride = maxOf(1, minOf(w, h) / 32)
+        val plane = readPlaneF(structureMapFboId, w, h) ?: return
+        var changed = 0
+        var n = 0
+        var ratioSum = 0f
+        var nonPlain = 0
+        var textureTexels = 0
+        var edgeTexels = 0
+        val ratios = ArrayList<Float>()
+        var y = 0
+        while (y < h) {
+            var x = 0
+            while (x < w) {
+                val i = (y * w + x) * 4
+                val ratio = plane.get(i)
+                ratioSum += ratio
+                ratios.add(ratio)
+                val cls = plane.get(i + 2).toInt()
+                if (cls != StructureMapClassifier.PLAIN) nonPlain++
+                // Broken out per class because the advisory needs to tell a
+                // flat scene with a thresholding tail from a scene the
+                // classifier found real structure in.
+                if (cls == StructureMapClassifier.TEXTURE) textureTexels++
+                if (cls == StructureMapClassifier.EDGE) edgeTexels++
+                // Key on the texel position, not the running sample index, so
+                // a given key always refers to the same texel across frames.
+                val key = y * w + x
+                val stabilized = structureStabilizer.update(key, cls)
+                if (stabilized != cls) changed++
+                n++
+                x += stride
+            }
+            y += stride
+        }
+        if (n == 0) return
+        val churn = changed.toFloat() / n.toFloat()
+        lastStructureStats = String.format(
+            "structure map sample n=%d stride=%d cadence=1/%d frames meanRatio=%.3f slewLimited=%.1f%% of texels%s",
+            n, stride, CENSUS_INTERVAL_FRAMES, ratioSum / n, churn * 100f,
+            if (churn > CHURN_WARN) " (ABOVE churn warn - control signal would flicker)" else ""
+        )
+        logStructureChurnWarning(churn)
+
+        // The same readback doubles as the anchor sample: it is already a
+        // strided census of the map, and the advisory needs the class
+        // distribution on a flat scene, not a second pass.
+        //
+        // The per-round dose re-check stays empty here: it needs a measured
+        // device attenuation reference, which is not measured yet, and every
+        // entry would report not-comparable until then.
+        val sorted = ratios.sorted()
+        val p99 = if (sorted.isEmpty()) 0f else sorted[(sorted.size * 0.99f).toInt().coerceIn(0, sorted.size - 1)]
+        val isoForAnchor = isoForDenoise.coerceAtLeast(1)
+        val sample = AnchorAdvisory.AnchorSample(
+            iso = isoForAnchor,
+            sampledTexels = n,
+            nonPlainTexels = nonPlain,
+            meanRatio = ratioSum / n,
+            p99Ratio = p99,
+            maxRatio = sorted.lastOrNull() ?: 0f,
+            textureTexels = textureTexels,
+            edgeTexels = edgeTexels
+        )
+        anchorReport = AnchorAdvisory.judge(
+            sample,
+            probeIso = isoForAnchor,
+            sceneFlat = AnchorAdvisory.isFlatAnchorScene(sample, isoForAnchor)
+        )
+    }
+
+    /**
+     * Logs the churn warning on the way past the threshold and then on a slow
+     * heartbeat, not once per frame.
+     *
+     * The census runs on every frame the structure map runs, so a persistent
+     * overrun used to emit one line per frame: it buried the rest of the log
+     * under the same message and charged a String.format to the very frame it
+     * was characterising. The value itself still reaches the report on every
+     * sample through lastStructureStats, so nothing is lost by logging the
+     * crossing and letting a stuck overrun re-announce itself periodically
+     * instead of continuously.
+     */
+    private fun logStructureChurnWarning(churn: Float) {
+        if (churn <= CHURN_WARN) {
+            structureChurnWarned = false
+            return
+        }
+        val now = System.nanoTime()
+        if (structureChurnWarned && now - lastStructureChurnWarnNanos < CHURN_WARN_HEARTBEAT_NANOS) return
+        structureChurnWarned = true
+        lastStructureChurnWarnNanos = now
+        CrashLogger.log(
+            TAG,
+            "structure map churn ${"%.1f".format(churn * 100f)}% - map is not temporally stable" +
+                if (churn > CHURN_WARN_HEARTBEAT) " (above ${(CHURN_WARN_HEARTBEAT * 100f).toInt()}%)" else ""
+        )
+    }
+
+    private fun ensureSigmaBucketBuffer(width: Int, height: Int) {
+        if (sigmaBucketWidth == width && sigmaBucketHeight == height && sigmaBucketFboId != 0) return
+        releaseSigmaBucketBuffer()
+        val (t, f) = allocRgba32fFbo(width, height)
+        if (f == 0) return
+        sigmaBucketTexId = t
+        sigmaBucketFboId = f
+        sigmaBucketWidth = width
+        sigmaBucketHeight = height
+        CrashLogger.log(TAG, "axis-min bucket buffer: ${width}x$height tex=$t")
+    }
+
+    private fun releaseSigmaBucketBuffer() {
+        deleteFboTex(sigmaBucketFboId, sigmaBucketTexId)
+        sigmaBucketFboId = 0
+        sigmaBucketTexId = 0
+        sigmaBucketWidth = 0
+        sigmaBucketHeight = 0
+        // The scratch is sized for the wider of the two census planes, so drop
+        // it with the census rather than holding megabytes of native memory
+        // for a mode that is no longer sampling.
+        samplePlaneBuffer = null
+    }
+
+    private fun ensureStructureMapBuffer(width: Int, height: Int) {
+        if (structureMapWidth == width && structureMapHeight == height && structureMapFboId != 0) return
+        deleteFboTex(structureMapFboId, structureMapTexId)
+        structureMapFboId = 0
+        structureMapTexId = 0
+        structureMapWidth = width
+        structureMapHeight = height
+        val (t, f) = allocRgba32fFbo(width, height)
+        if (f == 0) return
+        structureMapTexId = t
+        structureMapFboId = f
+        CrashLogger.log(TAG, "structure map buffer: ${width}x$height tex=$t")
+    }
+
+    private fun releaseStructureMapBuffer() {
+        deleteFboTex(structureMapFboId, structureMapTexId)
+        structureMapFboId = 0
+        structureMapTexId = 0
+        structureMapWidth = 0
+        structureMapHeight = 0
+    }
+
+    /**
+     * Builds the armed forensic grab from whatever diagnostic buffers exist
+     * this frame. Every plane is optional: a grab with three planes is still a
+     * valid, parseable file, which is the point of the container.
+     */
+    private fun buildFrameGrabIfArmed(iso: Int, gridW: Int, gridH: Int) {
+        if (!frameGrabArmed) return
+        val b = FrameGrab.builder()
+            .meta("format", "framegrab")
+            .meta("version", FrameGrab.VERSION)
+            .meta("frame", bayerRenderCount)
+            .meta("iso", iso)
+            .meta("isoBucket", com.agx.camera.camera.NoiseProfileStats.isoBucketFor(iso))
+            .meta("s1", dpcStrength)
+            .meta("s3", rawNrStrength)
+            .meta("s5", outNrStrength)
+            .meta("sensorW", bayerWidth)
+            .meta("sensorH", bayerHeight)
+            .meta("gridW", gridW)
+            .meta("gridH", gridH)
+            .meta("outW", demosaicFboWidth)
+            .meta("outH", demosaicFboHeight)
+            .meta("whiteRange", agxWhiteLevel - agxBlackLevel)
+            .meta("exposureEv", exposureEv)
+            .meta("axisBuckets", axisBucketDiagnostic)
+            .meta("structureMap", structureMapDiagnostic)
+            .meta("measurement", measurementActive)
+
+        if (sigmaTexId != 0 && gridW > 0 && gridH > 0) {
+            val data = readFloatPlane(sigmaFboId, gridW, gridH)
+            b.plane("s2.sigma", gridW, gridH, 4, data, sourceFrame = sigmaFrameIndex)
+        }
+        if (sigmaBucketTexId != 0 && gridW > 0 && gridH > 0) {
+            b.plane(
+                "s2.axisBuckets", gridW, gridH, 4,
+                readFloatPlane(sigmaBucketFboId, gridW, gridH),
+                sourceFrame = axisBucketFrameIndex
+            )
+        }
+        if (structureMapTexId != 0 && demosaicFboWidth > 0 && demosaicFboHeight > 0) {
+            b.plane(
+                "s5.structureMap", demosaicFboWidth, demosaicFboHeight, 4,
+                readFloatPlane(structureMapFboId, demosaicFboWidth, demosaicFboHeight),
+                sourceFrame = structureMapFrameIndex
+            )
+        }
+        // States the rule the @frame stamps above follow, so the file explains
+        // itself without this class's source in hand.
+        b.meta(
+            "planeFramePolicy",
+            "each plane's @frame is the render frame its contents were computed on; " +
+                "a value equal to frame describes this export, a lower value is an " +
+                "earlier census frame; a grab collects s2.sigma, s2.axisBuckets and " +
+                "s5.structureMap whether or not measurement was armed, and omits a " +
+                "plane only when the pass that produces it could not run"
+        )
+        pendingFrameGrab = b.build()
+        // Captured here rather than read from pendingFrameGrab at export time,
+        // because the export writes the bytes before it builds the bundle. The
+        // summary therefore has to survive the grab being consumed.
+        lastFrameGrabSummary = "${pendingFrameGrab!!.byteCount()} bytes\n" + pendingFrameGrab!!.indexText()
+        // Single shot, like a camera's self-timer: fire once, fall back to safe.
+        // Staying armed would buffer another full grab on every frame.
+        frameGrabArmed = false
+        // A grab can force the bucket and map draws without measurement armed,
+        // which allocates buffers the off state does not otherwise hold. Give
+        // them back so "measurement off" keeps meaning off rather than quietly
+        // retaining several megabytes of GPU memory per session.
+        if (!axisBucketDiagnostic) releaseSigmaBucketBuffer()
+        if (!structureMapDiagnostic) releaseStructureMapBuffer()
+        CrashLogger.log(
+            TAG,
+            "framegrab captured and disarmed" +
+                if (measurementActive) "" else " (grab-only: diagnostic buffers released)"
+        )
+    }
+
+    /** Full RGBA32F readback of one FBO attachment, native byte order. */
+    private fun readFloatPlane(fboId: Int, width: Int, height: Int): FloatArray? {
+        return try {
+            val texels = width * height
+            val buf = ByteBuffer.allocateDirect(FloatReadback.planeBytes(width, height))
+                .order(ByteOrder.nativeOrder())
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+            GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_FLOAT, buf)
+            val out = FloatArray(texels * 4)
+            buf.asFloatBuffer().get(out)
+            out
+        } catch (t: Throwable) {
+            CrashLogger.log(TAG, "framegrab readback failed ${width}x$height: ${t.message}")
+            null
+        }
     }
 
     // GL writes GL_FLOAT pixels in the platform's native (little-endian) byte
@@ -1150,10 +2234,54 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private fun readBuffer(capacity: Int): ByteBuffer =
         ByteBuffer.allocateDirect(capacity).order(ByteOrder.nativeOrder())
 
+    // Full-plane scratch for the strided samplers, sized on first use and then
+    // reused so a per-frame sample costs readbacks rather than allocations.
+    private var samplePlaneBuffer: ByteBuffer? = null
+
+    /**
+     * Reads one full RGBA32F plane into a shared direct buffer and returns a
+     * view over it. The strided samplers then index it on the CPU.
+     *
+     * The plane is read in one glReadPixels rather than one per sampled row.
+     * Every glReadPixels is a pipeline sync: it blocks until the GPU has
+     * finished everything queued ahead of it, so the row loop was not buying
+     * bandwidth, it was buying 32 round-trips to the GPU per sampler. Two
+     * samplers on a frame therefore cost 64 stalls, and the viewfinder ran at
+     * the sync rate instead of the render rate. One read per plane keeps the
+     * same stall count as a single texel probe while carrying the whole census
+     * in one transfer.
+     *
+     * Row 0 is the bottom row in both the old per-row form and here, so a
+     * texel at (x, y) is the same GL texel and the structure stabilizer's
+     * (y * w + x) key still names the same texel frame to frame.
+     *
+     * The size is computed in bytes because that is the unit both sides of this
+     * call speak: allocateDirect takes bytes, ByteBuffer.capacity() reports
+     * bytes, and glReadPixels writes bytes. Deriving the requirement as a texel
+     * or channel count and handing that number straight to allocateDirect
+     * under-allocates the buffer by a factor of four per float, so the driver
+     * writes past the end of a native allocation. A direct buffer is not on the
+     * Java heap, so nothing about that is visible to the collector: the process
+     * simply dies of a native fault a frame or two later, with no exception for
+     * a crash log to record.
+     */
+    private fun readPlaneF(fboId: Int, width: Int, height: Int): FloatBuffer? {
+        val neededBytes = FloatReadback.planeBytes(width, height)
+        var buf = samplePlaneBuffer
+        if (buf == null || buf.capacity() < neededBytes) {
+            buf = readBuffer(neededBytes)
+            samplePlaneBuffer = buf
+        }
+        buf.clear()
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+        GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_FLOAT, buf)
+        return buf.asFloatBuffer()
+    }
+
     // Reads the float RGBA value of one texel of an RGBA32F FBO attachment.
     private fun readTexelF(fboId: Int, x: Int, y: Int): FloatArray {
         return try {
-            val buf = readBuffer(16)
+            val buf = readBuffer(FloatReadback.texelBytes())
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
             GLES20.glReadPixels(x, y, 1, 1, GLES20.GL_RGBA, GLES20.GL_FLOAT, buf)
             val rb = buf.asFloatBuffer()
@@ -1249,6 +2377,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
     private fun renderLoop() {
         CrashLogger.log(TAG, "renderLoop: starting")
+        // Sampled before the first frame so the very first pipeline state block
+        // already carries a thermal reading rather than showing an unset field.
+        thermalStatus = ThermalStatus(textureView.context)
         initEgl()
 
         while (running) {
@@ -1279,7 +2410,32 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             }
 
             if (!glInitialized) {
-                initGlResources()
+                // GL init is the one step that can leave the render thread with
+                // a half-built pipeline. A failure here used to take the thread
+                // down with no trace, so it is retried a bounded number of times
+                // and each attempt is logged by name before the loop gives up.
+                try {
+                    initGlResources()
+                } catch (t: Throwable) {
+                    glInitAttempts++
+                    CrashLogger.log(
+                        TAG,
+                        "initGlResources: attempt ${glInitAttempts + 1} failed: " +
+                            "${t.javaClass.simpleName}: ${t.message}"
+                    )
+                    CrashLogger.logException(TAG, t)
+                    if (glInitAttempts >= GL_INIT_MAX_ATTEMPTS) {
+                        CrashLogger.log(
+                            TAG,
+                            "initGlResources: giving up after $glInitAttempts attempts, " +
+                                "stopping the render thread"
+                        )
+                        running = false
+                        break
+                    }
+                    Thread.sleep(200)
+                    continue
+                }
             }
 
             // A thermal resolution cap changed the FBO size at runtime.
@@ -1711,6 +2867,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val version = IntArray(2)
         EGL14.eglInitialize(eglDisplay, version, 0, version, 1)
 
+        // The ES 2 bit, unchanged. Widening this to ES2|ES3 changed which config
+        // eglChooseConfig hands back, and with it the window surface's format,
+        // for no gain: the context version comes from EGL_CONTEXT_CLIENT_VERSION
+        // below, and this driver has always served the 3.2 timer queries off a
+        // version-3 context regardless of this bit.
         val configAttribs = intArrayOf(
             EGL14.EGL_RED_SIZE, 8,
             EGL14.EGL_GREEN_SIZE, 8,
@@ -1731,22 +2892,74 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             return
         }
 
-        val contextAttribs = intArrayOf(
-            EGL14.EGL_CONTEXT_CLIENT_VERSION, 3,
-            EGL14.EGL_NONE
-        )
-        eglContext = EGL14.eglCreateContext(
-            eglDisplay, eglConfig, EGL14.EGL_NO_CONTEXT, contextAttribs, 0
-        )
+        // One context, requested at the highest version, and never rebuilt.
+        //
+        // A minor version cannot be asked for through EGL_CONTEXT_CLIENT_VERSION:
+        // that attribute is a single major version, and asking it for 3 means
+        // "ES 3.x, whatever you have". The EGL 1.5 MAJOR/MINOR pair is the
+        // attribute that actually expresses 3.1 and 3.2, and it is what gets
+        // used here so the request names a real floor instead of relying on the
+        // driver to volunteer its highest version.
+        //
+        // This is a robustness fix, not the reason the timing section was
+        // empty: this driver was already handing back an ES 3.2 context off the
+        // version-3 request, and the samples were being discarded by the
+        // disjoint check instead. See GpuTimerQueries.isDisjoint.
+        eglContext = createEglContextVersion(3, 2)
+        eglContextClientVersion = 3
+        eglContextMinorVersion = 2
+        if (eglContext == EGL14.EGL_NO_CONTEXT) {
+            eglContext = createEglContextVersion(3, 1)
+            eglContextMinorVersion = 1
+        }
+        if (eglContext == EGL14.EGL_NO_CONTEXT) {
+            // A driver with EGL 1.4 only understands the major-version form.
+            eglContext = createEglContext(3)
+            eglContextMinorVersion = 0
+        }
+        if (eglContext == EGL14.EGL_NO_CONTEXT) {
+            // A driver that cannot serve an ES 3 context still gets a working
+            // preview on ES 2. The GL header then says so, and the timer route
+            // reads unavailable rather than the app losing the preview.
+            CrashLogger.log(TAG, "initEgl: ES 3 context request failed, falling back to ES 2")
+            eglContext = createEglContext(2)
+            eglContextClientVersion = 2
+        }
 
-        EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, eglContext)
-        EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-
-        CrashLogger.log(TAG, "initEgl: context created eglDisplay=$eglDisplay eglContext=$eglContext")
+        CrashLogger.log(
+            TAG,
+            "initEgl: context created eglDisplay=$eglDisplay eglContext=$eglContext " +
+                "requestedClientVersion=$eglContextClientVersion " +
+                "requestedMinor=${eglContextMinorVersion} eglVersion=${EGL14.eglQueryString(eglDisplay, EGL14.EGL_VERSION)} " +
+            "(that is the EGL version; GL_VERSION below is the GL one)"
+        )
         Log.d(TAG, "EGL initialized: display=$eglDisplay context=$eglContext")
     }
 
+    private fun createEglContext(clientVersion: Int): EGLContext {
+        val attribs = intArrayOf(
+            EGL14.EGL_CONTEXT_CLIENT_VERSION, clientVersion,
+            EGL14.EGL_NONE
+        )
+        return EGL14.eglCreateContext(eglDisplay, eglConfig, EGL14.EGL_NO_CONTEXT, attribs, 0)
+    }
+
+    /**
+     * EGL 1.5 context version request. A driver that predates the MAJOR/MINOR
+     * pair rejects the whole attribute list, which is why the caller keeps the
+     * EGL 1.4 form as a fallback rather than treating a failure here as fatal.
+     */
+    private fun createEglContextVersion(major: Int, minor: Int): EGLContext {
+        val attribs = intArrayOf(
+            EGL_CONTEXT_MAJOR_VERSION, major,
+            EGL_CONTEXT_MINOR_VERSION, minor,
+            EGL14.EGL_NONE
+        )
+        return EGL14.eglCreateContext(eglDisplay, eglConfig, EGL14.EGL_NO_CONTEXT, attribs, 0)
+    }
+
     @Volatile private var glInitialized = false
+    private var glInitAttempts = 0
 
     private fun initGlResources() {
         createFbo(fboWidth, fboHeight)
@@ -1761,13 +2974,63 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         sigmaHatShader.create()
         rawDenoiseShader.create()
         outNrShader.create()
+        // The two diagnostic programs are created up front so arming a switch
+        // never pays a shader compile mid-frame; their draws are gated by the
+        // switches themselves.
+        sigmaBucketShader.create()
+        structureMapShader.create()
 
         bayerLensShadingData?.let {
             bayerShader.uploadLensShadingMap(it, bayerLensShadingWidth, bayerLensShadingHeight)
         } ?: bayerShader.uploadIdentityLensShading()
 
+        recordShaderSizes()
+
+        // Probed once here rather than at arm time so the GL header is present
+        // in an export taken with the benchmark off, which is exactly the case
+        // where a reader needs to know what the implementation is.
+        gpuTimers.noteEnvironment(
+            GlEnvironment.probe(eglContextClientVersion) { gpuTimers.timerQueriesAvailable() }
+        )
         glInitialized = true
         CrashLogger.log(TAG, "initGlResources: done fbo=$fboId")
+    }
+
+    /**
+     * Records the resident size of every program in the budget table.
+     *
+     * Read once here, on the GL thread, because a program created for the
+     * measurement switches has to be counted the same way as one the image path
+     * uses. GL_PROGRAM_BINARY_LENGTH arrived in ES 3.1, so on the 3.0 context
+     * this class requests it returns nothing and the source length is reported
+     * instead, labelled as a proxy.
+     */
+    private fun recordShaderSizes() {
+        val programs = listOf(
+            "bayer" to bayerShader.budgetProgramId(),
+            "demosaic" to bayerShader.budgetDemosaicProgramId(),
+            "nr" to nrShader.budgetProgramId(),
+            "spatialNr" to spatialNrShader.budgetProgramId(),
+            "dpc" to dpcShader.budgetProgramId(),
+            "outNr" to outNrShader.budgetProgramId(),
+            "sigmaHat" to sigmaHatShader.budgetProgramId(),
+            "rawDenoise" to rawDenoiseShader.budgetProgramId(),
+            "sigmaBucket" to sigmaBucketShader.budgetProgramId(),
+            "structureMap" to structureMapShader.budgetProgramId()
+        )
+        for ((name, programId) in programs) {
+            val binary = GlProgramSize.binaryBytes(programId)
+            if (binary > 0) {
+                shaderBudget.record(name, binary, "GL_PROGRAM_BINARY_LENGTH")
+                continue
+            }
+            // ES 3.0 has no binary-length query. The source length is a proxy
+            // and is labelled as one rather than reported as the same figure.
+            val source = GlProgramSize.sourceBytesOfProgram(programId)
+            if (source > 0) {
+                shaderBudget.record(name, source, "source length proxy (no binary query on this context)")
+            }
+        }
     }
 
     fun createEglSurface() {
@@ -2270,6 +3533,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
         var outputTex = 0
         if (dpEnabled) {
+            gpuTimers.begin("S1.dpc_avg")
             bindTarget(dpcAvgFboId, gridW, gridH)
             dpcShader.draw(
                 DpcShaderProgram.PASS_AVG, transformMatrix,
@@ -2284,7 +3548,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 corrStrength = corrStrength
             )
             logGlError("chain-dpc-avg", renderCount)
+            gpuTimers.end("S1.dpc_avg")
 
+            gpuTimers.begin("S1.dpc_detect")
             bindTarget(dpcFlagFboId, gridW, gridH)
             dpcShader.draw(
                 DpcShaderProgram.PASS_DETECT, transformMatrix,
@@ -2299,7 +3565,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 corrStrength = corrStrength
             )
             logGlError("chain-dpc-detect", renderCount)
+            gpuTimers.end("S1.dpc_detect")
 
+            gpuTimers.begin("S1.dpc_correct")
             bindTarget(dpcWorkAFboId, gridW, gridH)
             dpcShader.draw(
                 DpcShaderProgram.PASS_CORRECT, transformMatrix,
@@ -2314,7 +3582,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 corrStrength = corrStrength
             )
             logGlError("chain-dpc-correct", renderCount)
+            gpuTimers.end("S1.dpc_correct")
 
+            gpuTimers.begin("S1.dpc_couplet")
             bindTarget(dpcWorkBFboId, gridW, gridH)
             dpcShader.draw(
                 DpcShaderProgram.PASS_COUPLET, transformMatrix,
@@ -2329,10 +3599,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 corrStrength = corrStrength
             )
             logGlError("chain-dpc-couplet", renderCount)
+            gpuTimers.end("S1.dpc_couplet")
             outputTex = dpcWorkBTexId
         } else {
             // DPC disabled: pack raw -> float sparse grid (black-subtracted,
             // clamped) using pass CORRECT in pure pass-through mode.
+            gpuTimers.begin("S1.dpc_pack")
             bindTarget(dpcWorkAFboId, gridW, gridH)
             dpcShader.draw(
                 DpcShaderProgram.PASS_CORRECT, transformMatrix,
@@ -2347,12 +3619,14 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 corrStrength = 0f
             )
             logGlError("chain-dpc-passthrough", renderCount)
+            gpuTimers.end("S1.dpc_pack")
             outputTex = dpcWorkATexId
         }
 
         // Stage 3: green-guided GF over the sparse grid.
         if (rawDenoiseActive) {
             ensureDenoiseBuffers(gridW, gridH)
+            gpuTimers.begin("S3.gf")
             bindTarget(denoiseFboId, denoiseFboWidth, denoiseFboHeight)
             rawDenoiseShader.draw(
                 transformMatrix = transformMatrix,
@@ -2365,6 +3639,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 eps = s3Eps
             )
             logGlError("chain-gf-denoise", renderCount)
+            gpuTimers.end("S3.gf")
             outputTex = denoisedTexId
         }
 
@@ -2503,6 +3778,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             statsVFboId = 0; statsVTexId = 0
             outNr1FboId = 0; outNr1TexId = 0
             outNr2FboId = 0; outNr2TexId = 0
+            releaseSigmaBucketBuffer()
+            releaseStructureMapBuffer()
+            sigmaBucketShader.destroy()
+            structureMapShader.destroy()
+            gpuTimers.disarm()
+            pendingFrameGrab = null
             if (fallbackFloatTexId != 0) {
                 GLES20.glDeleteTextures(1, intArrayOf(fallbackFloatTexId), 0)
                 fallbackFloatTexId = 0
@@ -2542,5 +3823,62 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     companion object {
         private const val TAG = "PreviewRenderer"
         private const val EGL_RECORDABLE_ANDROID = 0x3142
+
+        // EGL 1.5 context version attributes. android.opengl.EGL14 does not
+        // expose either name, so the values are spelled out.
+        private const val EGL_CONTEXT_MAJOR_VERSION = 0x3098
+        private const val EGL_CONTEXT_MINOR_VERSION = 0x30FB
+
+        /**
+         * How many times GL init is retried before the render thread stops.
+         * Retrying forever would re-create every shader on every pass and turn
+         * a deterministic failure into a spin, so the loop gives up and says so.
+         */
+        private const val GL_INIT_MAX_ATTEMPTS = 3
+
+        // S5's chroma epsilon scale, used both by the S5 pass above and by the
+        // profile sample, so the reported ratio is in the units the chroma
+        // branch actually uses.
+        private const val CHROMA_EPS_SCALE = 64.0f
+
+        // Above this per-frame class churn the structure map is reporting its
+        // own instability, which would show up as flicker in anything that
+        // later consumes it.
+        private const val CHURN_WARN = 0.15f
+
+        /**
+         * Churn above this is far enough past the warn line to be worth calling
+         * out separately in the log, so a marginal overrun and a runaway one
+         * are not reported with the same weight.
+         */
+        private const val CHURN_WARN_HEARTBEAT = 0.30f
+
+        /**
+         * Re-announce interval for a churn overrun that has not cleared. The
+         * first crossing always logs; after that the same overrun repeats on
+         * this cadence instead of once per frame.
+         */
+        private const val CHURN_WARN_HEARTBEAT_NANOS = 5_000_000_000L
+
+        /**
+         * Frames between CPU-side census samples.
+         *
+         * The structure map's draw rides the same cadence, and the report
+         * names it from the same constant, so the sampling period is stated in
+         * exactly one place: PipelineGates.CENSUS_INTERVAL_FRAMES.
+         */
+        private val CENSUS_INTERVAL_FRAMES = PipelineGates.CENSUS_INTERVAL_FRAMES
+
+        /**
+         * EMA weight for the viewfinder frame rate.
+         *
+         * 0.1 puts the time constant near ten frames: fast enough that a stall
+         * shows up within a couple of seconds, slow enough that one slow frame
+         * does not move the number much.
+         */
+        private const val VIEWFINDER_FPS_ALPHA = 0.1f
+
+        /** Wall-clock gap between viewfinder rate log lines: 2 s. */
+        private const val VIEWFINDER_FPS_LOG_INTERVAL_NANOS = 2_000_000_000L
     }
 }

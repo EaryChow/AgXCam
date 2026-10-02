@@ -8,8 +8,10 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
+import com.agx.camera.SlowTests
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.experimental.categories.Category
 
 private val SENSOR_W2 = 96
 private val SENSOR_H2 = 96
@@ -50,6 +52,9 @@ private val SENSOR_H2 = 96
  *   (a) a non-zero slider NEVER adds noise (gNoise(s1|s3) <= gNoise(0) );
  *   (b) zoom-in shows no magenta mosaic (magErr(s1|s3) bounded by baseline).
  */
+// Whole-class slow marker: every test here runs the full S3 preview mirror at
+// production grid sizes, which dominates the headless run time.
+@Category(SlowTests::class)
 class S3PreviewGLReproTest {
 
     private val SW = 96

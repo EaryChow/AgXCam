@@ -88,3 +88,37 @@ dependencies {
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
 }
+
+/**
+ * Slow-test selection.
+ *
+ * JUnit 4 has no @Tag, so "slow" is a marker interface
+ * (com.agx.camera.SlowTests) applied with @Category. These are the suites that
+ * run full production-grid mirrors over megabytes of synthetic or captured
+ * data - correct but slow, and they dominate the headless run.
+ *
+ *   gradlew testDebugUnitTest                          -> everything
+ *   gradlew testDebugUnitTest -Dtest.categories=fast    -> skip SlowTests
+ *   gradlew testDebugUnitTest -Dtest.categories=slow    -> only SlowTests
+ *
+ * Unset runs everything, so a plain invocation never silently drops coverage.
+ * Selecting "slow" fails the task when nothing matches, because an empty run
+ * that reports success is indistinguishable from a green one.
+ */
+val SLOW_CATEGORY = "com.agx.camera.SlowTests"
+val testCategories = providers.systemProperty("test.categories").orNull?.trim()?.lowercase()
+
+if (testCategories != null && testCategories.isNotEmpty() && testCategories != "slow" && testCategories != "fast") {
+    logger.warn("unknown -Dtest.categories='$testCategories' (expected slow, fast or unset); running all tests")
+}
+
+tasks.withType<Test>().configureEach {
+    if (testCategories == "slow") {
+        // includeCategories, not filter.includeTestsMatching: the latter matches
+        // class/method name patterns and silently ignores @Category markers.
+        useJUnit { includeCategories(SLOW_CATEGORY) }
+        filter.isFailOnNoMatchingTests = true
+    } else if (testCategories == "fast") {
+        useJUnit { excludeCategories(SLOW_CATEGORY) }
+    }
+}

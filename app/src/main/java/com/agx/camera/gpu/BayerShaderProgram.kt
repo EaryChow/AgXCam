@@ -13,6 +13,12 @@ class BayerShaderProgram {
 
     private var programId = 0
     private var demosaicProgramId = 0
+
+    /** Exposed only for the shader budget table in the measurement report. */
+    fun budgetProgramId(): Int = programId
+
+    /** Exposed only for the shader budget table in the measurement report. */
+    fun budgetDemosaicProgramId(): Int = demosaicProgramId
     private var bayerTextureId = 0
     private var lensShadingTextureId = 0
     // 1x1 native-RGBA texture bound to the u_denoisedTex unit whenever no real

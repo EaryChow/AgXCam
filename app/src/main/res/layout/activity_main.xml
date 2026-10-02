@@ -1168,6 +1168,76 @@
                 android:layout_marginBottom="8dp"
                 android:visibility="gone" />
 
+            <!-- Attachments for the debug log export below. -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginTop="8dp"
+                android:layout_marginBottom="2dp">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Record processing time"
+                        android:textColor="#FFFFFFFF"
+                        android:textSize="11sp" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Keeps a running total while on"
+                        android:textColor="#FFAAAAAA"
+                        android:textSize="10sp" />
+                </LinearLayout>
+
+                <Switch
+                    android:id="@+id/measurement_timing_switch"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Attach raw frame"
+                        android:textColor="#FFFFFFFF"
+                        android:textSize="11sp" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="One frame, with the next export"
+                        android:textColor="#FFAAAAAA"
+                        android:textSize="10sp" />
+                </LinearLayout>
+
+                <CheckBox
+                    android:id="@+id/measurement_raw_frame_check"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+
             <TextView
                 android:id="@+id/save_debug_log_btn"
                 android:layout_width="wrap_content"
@@ -1177,7 +1247,7 @@
                 android:background="#444444"
                 android:gravity="center"
                 android:paddingHorizontal="16dp"
-                android:text="Save Debug Log to Downloads"
+                android:text="Export debug log"
                 android:textColor="#FFFFFFFF"
                 android:textSize="11sp"
                 android:clickable="true"
