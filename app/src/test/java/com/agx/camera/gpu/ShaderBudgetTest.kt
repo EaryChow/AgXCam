@@ -1,6 +1,7 @@
 package com.agx.camera.gpu
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -143,7 +144,7 @@ class ShaderBudgetTest {
             .substringAfter("float localRatio(vec2 p) {")
             .substringBefore("float organizationAt")
         // One static window call site inside a 3x3 loop, so nine fetches, plus
-        // the centre tap and the sigma prediction from the second sampler.
+        // the centre tap.
         val windowLoops = Regex("for\\s*\\(\\s*int\\s+dy\\s*=\\s*-1;\\s*dy\\s*<=\\s*1").findAll(body).count()
         val windowInnerLoops = Regex("for\\s*\\(\\s*int\\s+dx\\s*=\\s*-1;\\s*dx\\s*<=\\s*1").findAll(body).count()
         assertEquals("expected one 3x3 window", 1, windowLoops)
@@ -151,7 +152,6 @@ class ShaderBudgetTest {
         // The window is one call site inside a 3x3 loop, so nine fetches from
         // two static call sites: the centre tap and the window tap.
         assertEquals("one centre plus one 3x3 window call site", 2, Regex("texture\\s*\\(\\s*u_input_tex").findAll(body).count())
-        assertTrue("localRatio must also read the sigma prediction", body.contains("u_sigma_tex"))
         // Executed cost of those three facts: one centre tap, nine window taps
         // from the single window call site inside a 3x3 loop, one sigma
         // prediction. The budget derives its FLAT count from 11 here, so this
@@ -163,6 +163,151 @@ class ShaderBudgetTest {
             11,
             ShaderBudget.FETCH_STRUCTURE_MAP_FLAT - 1 - 4 - 8 * 11
         )
+    }
+
+    @Test
+    fun structureMapSigmaPredictionIsTheOneTapThatMakesEleven() {
+        // The sigma read moved into its own function when the denominator had to
+        // be brought into the residual's domain. It is still exactly one tap and
+        // it is still on the ratio's denominator, so the eleven above has to be
+        // re-derivable from where the tap now lives - otherwise the budget and
+        // the shader can drift apart again with nothing failing.
+        val prediction = source("StructureMapShaderProgram")
+            .substringAfter("float noisePrediction(vec2 p) {")
+            .substringBefore("float localRatio")
+        assertEquals(
+            "the prediction reads sigma_hat once and nothing else",
+            1,
+            Regex("texture\\s*\\(\\s*u_sigma_tex").findAll(prediction).count()
+        )
+        val localRatio = source("StructureMapShaderProgram")
+            .substringAfter("float localRatio(vec2 p) {")
+            .substringBefore("float organizationAt")
+        assertTrue("localRatio must divide by the shared prediction", localRatio.contains("noisePrediction(p)"))
+    }
+
+    @Test
+    fun structureMapDomainFoldIsPresentSoTheRatioIsNotComparedAcrossUnits() {
+        // The live census read a p99 ratio of 0.004 against a plain ceiling of
+        // 1.60 because a formed-image residual was divided by a raw-DN^2
+        // variance. The fold that fixes it is a set of uniforms, so the test
+        // pins the uniforms and the term that consumes them.
+        val src = source("StructureMapShaderProgram")
+        for (uniform in listOf(
+            "u_luma_eps_scale", "u_sigma_dm2", "u_inverse_range2", "u_calib_scale", "u_eps_boost"
+        )) {
+            assertTrue("expected a $uniform uniform", src.contains("uniform float $uniform;"))
+        }
+        val prediction = src
+            .substringAfter("float noisePrediction(vec2 p) {")
+            .substringBefore("float localRatio")
+        assertTrue("the fold must reach the prediction", prediction.contains("u_inverse_range2"))
+        assertTrue("the fold must reach the prediction", prediction.contains("u_calib_scale"))
+        assertTrue("the fold must reach the prediction", prediction.contains("u_eps_boost"))
+        assertTrue("the fold must reach the prediction", prediction.contains("u_sigma_dm2"))
+    }
+
+    @Test
+    fun structureMapSamplesSigmaByImageCoordinateNotByGridSize() {
+        // Dividing the pixel coordinate by the sigma grid size is only the right
+        // UV when the two happen to be the same size; past the density gate the
+        // grid is far coarser than the image and every lookup walks off the end
+        // of the texture.
+        val prediction = source("StructureMapShaderProgram")
+            .substringAfter("float noisePrediction(vec2 p) {")
+            .substringBefore("float localRatio")
+        assertTrue(
+            "the sigma lookup is normalised by the output size",
+            prediction.contains("/ u_output_size")
+        )
+        assertFalse(
+            "the sigma lookup must not be normalised by the sigma grid size",
+            prediction.contains("/ u_sigma_size")
+        )
+    }
+
+    /**
+     * The fold is present in the GLSL; this asks whether it is present *in the
+     * running pipeline*.
+     *
+     * The shipped values are read out of PreviewRenderer rather than restated
+     * here, because a test that hardcodes 1.4 / 10 / 1/32 only proves those
+     * literals multiply to something non-zero - it keeps passing after someone
+     * sets the production constant to 0. That is the whole failure: a zeroed
+     * fold term collapses the denominator onto the sigmaDm2 floor alone (or
+     * onto the 1e-12 clamp, if that is zeroed too) and the ratio inflates by
+     * orders of magnitude while every other test in the suite stays green.
+     */
+    @Test
+    fun everyFoldTermIsNonZeroAtTheShippedOperatingPoint() {
+        val renderer = source("PreviewRenderer")
+
+        fun shippedConst(name: String): Float {
+            val m = Regex("private const val $name = ([0-9.]+)f").find(renderer)
+            assertTrue("$name is not a Float constant in PreviewRenderer", m != null)
+            return m!!.groupValues[1].toFloat()
+        }
+
+        val lumaEpsScale = shippedConst("S5_LUMA_EPS_SCALE")
+        val sigmaDm2 = shippedConst("S5_SIGMA_DM2")
+        val calibScale = shippedConst("S5_CALIB_TO_RESIDUAL_SCALE")
+
+        assertTrue("S5_LUMA_EPS_SCALE must be non-zero, was $lumaEpsScale", lumaEpsScale > 0f)
+        // sigmaDm2 is the term with a 0f default in draw()'s own signature, so it
+        // is the one that can be silently dropped by a call that stops naming it.
+        assertTrue("S5_SIGMA_DM2 must be non-zero, was $sigmaDm2", sigmaDm2 > 0f)
+        assertTrue("S5_CALIB_TO_RESIDUAL_SCALE must be non-zero, was $calibScale", calibScale > 0f)
+
+        // inverseRange2 is derived, not stored: a whiteRange that parses as 0 or
+        // as a raw DN count instead of a range both land here as a silent
+        // rescale. Pin the derivation so it cannot be dropped either.
+        assertTrue(
+            "inverseRange2 must still be derived from whiteRange",
+            renderer.contains("inverseRange2 = 1f / (whiteRange * whiteRange)")
+        )
+    }
+
+    /**
+     * The fold multiplies to something finite and strictly positive across the
+     * whole sigma range the sensor can report, and lands the pure-noise anchor
+     * on 1.0 at the shipped constants rather than at hand-picked ones.
+     *
+     * A sweep rather than a single point because the dangerous term is additive:
+     * sigmaDm2 sets a floor that dominates whenever sigma_hat^2 drops below it,
+     * so a check at one ISO can pass while the floor itself is wrong.
+     */
+    @Test
+    fun theShippedFoldKeepsThePureNoiseAnchorAtOne() {
+        val renderer = source("PreviewRenderer")
+
+        fun shippedConst(name: String): Float =
+            Regex("private const val $name = ([0-9.]+)f").find(renderer)!!.groupValues[1].toFloat()
+
+        val lumaEpsScale = shippedConst("S5_LUMA_EPS_SCALE")
+        val sigmaDm2 = shippedConst("S5_SIGMA_DM2")
+        val calibScale = shippedConst("S5_CALIB_TO_RESIDUAL_SCALE")
+        // The DN range the shipped sensor reports: white 1023 - black 64.
+        val whiteRange = 959f
+        val inverseRange2 = 1f / (whiteRange * whiteRange)
+        val cal = StructureMapClassifier.calibrationFor(367)
+
+        // 0.1 .. 1000 DN^2 brackets the floor, the live band and a bright ISO.
+        for (sigmaHat2 in listOf(0.1f, 1f, 7f, sigmaDm2, 23f, 113f, 540f, 1000f)) {
+            val pred = StructureMapClassifier.noisePrediction(
+                sigmaHat2, sigmaDm2, inverseRange2, calibScale, 1f, lumaEpsScale
+            )
+            assertTrue("prediction must be finite at sigmaHat2=$sigmaHat2", pred.isFinite())
+            assertTrue("prediction must be positive at sigmaHat2=$sigmaHat2, was $pred", pred > 0f)
+            // The anchor: a residual equal to the prediction times the retention
+            // has to read exactly 1.0, whatever sigma_hat^2 was. This is the
+            // property the fold exists to preserve.
+            assertEquals(
+                "pure noise must read 1.0 at sigmaHat2=$sigmaHat2",
+                1.0f,
+                StructureMapClassifier.ratio(pred * cal.rRetain, pred, cal.rRetain),
+                1.0e-3f
+            )
+        }
     }
 
     // ---- Report shape --------------------------------------------------

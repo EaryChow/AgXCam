@@ -98,13 +98,57 @@ object StructureMapClassifier {
     fun allCalibrations(): List<Calibration> = CALIBRATION
 
     /**
-     * The SNR ratio. sigmaHat2 is the per-texel variance estimate, residual
-     * is the measured residual energy over the same window.
+     * The SNR ratio, against the folded denominator.
+     *
+     * The second argument is the output of noisePrediction(), not a raw
+     * sigmaHat2. Taking it unfolded is what let the host probes and the device
+     * map disagree by exactly the fold - at the shipped luma_eps_scale a
+     * pure-noise patch reads 1.0 here and 0.714 on the GPU - so a band that
+     * held on the probe sat somewhere else entirely on the device. There is no
+     * second form of this ratio; callers fold first.
      */
-    fun ratio(residualEnergy: Float, sigmaHat2: Float, rRetain: Float): Float {
-        if (sigmaHat2 <= 0f || rRetain <= 0f) return 0f
+    fun ratio(residualEnergy: Float, noisePrediction: Float, rRetain: Float): Float {
+        if (noisePrediction <= 0f || rRetain <= 0f) return 0f
         if (!residualEnergy.isFinite()) return 0f
-        return max(residualEnergy / (sigmaHat2 * rRetain), 0f)
+        return max(residualEnergy / (noisePrediction * rRetain), 0f)
+    }
+
+    /**
+     * The noise prediction the ratio denominator is built from, in the same
+     * domain the residual is measured in.
+     *
+     * This is the host mirror of the S5 luma epsilon, term for term:
+     *
+     *   u_lumaEpsScale * (sigmaHat2 + sigmaDm2) * inverseRange2 * calibScale * epsBoost
+     *
+     * It has to be the same expression, not an equivalent one. The residual is
+     * measured on an S5 output, which is formed-image units, while sigma_hat^2
+     * arrives in raw-DN^2; dividing one by the other without the domain fold
+     * produced ratios three to four orders of magnitude below the bands, which
+     * reads on the report as a degenerate map rather than as a unit error.
+     *
+     * Duplicated here rather than left implicit so the correction is testable
+     * without a GL context, and so the map and the filter it modulates cannot
+     * drift apart into two different noise predictions.
+     */
+    /**
+     * S5's luma epsilon scale. Named rather than a literal default because the
+     * probe-to-device anchor depends on it exactly: fold it in and pure noise
+     * reads 1/1.4, leave it out and the host reads 1.0 and the two disagree
+     * about where the bands sit.
+     */
+    const val LUMA_EPS_SCALE = 1.4f
+
+    fun noisePrediction(
+        sigmaHat2: Float,
+        sigmaDm2: Float,
+        inverseRange2: Float,
+        calibScale: Float,
+        epsBoost: Float,
+        lumaEpsScale: Float = LUMA_EPS_SCALE
+    ): Float {
+        if (!sigmaHat2.isFinite() || sigmaHat2 <= 0f) return 0f
+        return lumaEpsScale * (sigmaHat2 + sigmaDm2) * inverseRange2 * calibScale * epsBoost
     }
 
     /**
@@ -176,16 +220,16 @@ object StructureMapClassifier {
     }
 
     /**
- * Win-scale gamma per class.
- *
- * EDGE sits above 1 to trade edge sharpness against over-smoothing. TEXTURE is
- * meant to sit below 1 so the pass lets texture through instead of smoothing
- * it, but there is no calibrated value for it yet, so it stays at 1 and that
- * let-through arm is currently inert. Only EDGE modulates the main path.
- *
- * All three values are placeholders pending a calibration run; the design
- * sources gamma from the shared JND map rather than hardcoding it.
- */
+     * Win-scale gamma per class.
+     *
+     * EDGE sits above 1 to trade edge sharpness against over-smoothing. TEXTURE is
+     * meant to sit below 1 so the pass lets texture through instead of smoothing
+     * it, but there is no calibrated value for it yet, so it stays at 1 and that
+     * let-through arm is currently inert. Only EDGE modulates the main path.
+     *
+     * All three values are placeholders pending a calibration run; the design
+     * sources gamma from the shared JND map rather than hardcoding it.
+     */
     fun gammaFor(cls: Int): Float = when (cls) {
         EDGE -> 1.15f
         TEXTURE -> 1f
@@ -206,36 +250,42 @@ object StructureMapClassifier {
     /**
      * The five freeze-time probes. Probe 5 is the load-bearing one: pure noise
      * must land on PLAIN, because the anchor immunity claim rests on it.
+     *
+     * Every residual below is a multiple of the folded prediction, never of a
+     * raw sigma2. That is what makes the probes certify the device map instead
+     * of a host-only arithmetic: the residual and the denominator are the same
+     * quantity, so the fold cancels and 1.0 means pure noise here exactly as it
+     * does on the GPU. Writing the residual against SIG2 while the denominator
+     * carried the fold would have silently shifted every probe down by
+     * LUMA_EPS_SCALE while the thresholds stayed put.
      */
     fun runProbes(iso: Int = 1600): List<ProbeResult> {
         val out = ArrayList<ProbeResult>()
+        val pred = noisePrediction(SIG2, 0f, 1f, 1f, 1f)
+        val rRetain = calibrationFor(iso).rRetain
+        fun ratioAt(multiple: Float): Float = ratio(multiple * pred, pred, rRetain)
 
-        // 1. flat noise patch - residual IS the noise prediction.
-        val r1 = classify(iso, ratio(residualEnergy = 0.28f * SIG2, sigmaHat2 = SIG2, rRetain = calibrationFor(iso).rRetain),
-            edgeCoherence = 0.08f, organization = 0.10f)
+        // 1. flat noise patch - residual below the retention anchor.
+        val r1 = classify(iso, ratioAt(0.28f), edgeCoherence = 0.08f, organization = 0.10f)
         out.add(ProbeResult("1 flat noise patch", r1, PLAIN, r1 == PLAIN, "residual at the retention anchor"))
 
         // 2. high-saturation fine texture.
-        val r2 = classify(iso, ratio(residualEnergy = 9.0f * SIG2, sigmaHat2 = SIG2, rRetain = calibrationFor(iso).rRetain),
-            edgeCoherence = 0.22f, organization = 0.85f)
+        val r2 = classify(iso, ratioAt(9.0f), edgeCoherence = 0.22f, organization = 0.85f)
         out.add(ProbeResult("2 saturated fine texture", r2, TEXTURE, r2 == TEXTURE, "residual far above prediction, connected"))
 
         // 3. chroma edge x luma texture overlap.
-        val r3 = classify(iso, ratio(residualEnergy = 5.0f * SIG2, sigmaHat2 = SIG2, rRetain = calibrationFor(iso).rRetain),
-            edgeCoherence = 0.80f, organization = 0.70f)
+        val r3 = classify(iso, ratioAt(5.0f), edgeCoherence = 0.80f, organization = 0.70f)
         out.add(ProbeResult("3 chroma edge x luma texture", r3, EDGE, r3 == EDGE, "gradient coherence decides over ratio"))
 
         // 4. pure chroma edge x flat luma - the case a luma-side criterion
         //    would miss entirely.
-        val r4 = classify(iso, ratio(residualEnergy = 6.0f * SIG2, sigmaHat2 = SIG2, rRetain = calibrationFor(iso).rRetain),
-            edgeCoherence = 0.86f, organization = 0.30f)
+        val r4 = classify(iso, ratioAt(6.0f), edgeCoherence = 0.86f, organization = 0.30f)
         out.add(ProbeResult("4 chroma edge x flat luma", r4, EDGE, r4 == EDGE, "coherence only; low luma-side ratio"))
 
         // 5. noise disguised as texture. A pure-noise patch with a locally
         //    elevated residual - still PLAIN, because the ratio carries the
         //    prediction with it.
-        val r5 = classify(iso, ratio(residualEnergy = 1.9f * SIG2, sigmaHat2 = SIG2, rRetain = calibrationFor(iso).rRetain),
-            edgeCoherence = 0.18f, organization = 0.20f)
+        val r5 = classify(iso, ratioAt(1.9f), edgeCoherence = 0.18f, organization = 0.20f)
         out.add(ProbeResult("5 noise disguised as texture", r5, PLAIN, r5 == PLAIN, "immune claim depends on this one"))
 
         return out
@@ -259,7 +309,7 @@ object StructureMapClassifier {
     fun report(iso: Int = 1600): String {
         val sb = StringBuilder()
         sb.append("structure map classifier (SNR ratio, dimensionless thresholds)\n")
-        sb.append("  ratio = residual / (sigma^2 * r_retain), r_retain from the anchor table\n")
+        sb.append("  ratio = residual / (noisePrediction * r_retain), both folded like S5 epsilon\n")
         for (c in CALIBRATION) {
             sb.append("  iso<=").append(c.isoBucket)
                 .append(" rRetain=").append(String.format("%.2f", c.rRetain))

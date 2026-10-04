@@ -358,6 +358,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var pendingFrameGrab: FrameGrab? = null
     private var lastBucketStats = ""
     private var lastStructureStats = ""
+    // The domain fold the map's ratio denominator last ran with, reported beside
+    // the ratio itself. Empty until the map has drawn once.
+    private var lastStructureMapFold = ""
+    private var lastCovariance: OutputCovariance.Measurement? = null
+    private var lastCovarianceReport = OutputCovariance.NO_SAMPLE
     // Advisory only; null means no anchor sample has been taken yet, which the
     // advisory reports as INSUFFICIENT_DATA rather than as a pass.
     @Volatile private var anchorReport: AnchorAdvisory.Report? = null
@@ -566,6 +571,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         } else {
             sb.append("no classification: the structure map pass produced no sample this session\n")
         }
+        sb.append(lastCovarianceReport).append('\n')
         sb.append('\n')
         sb.append(
             (anchorReport ?: AnchorAdvisory.judge(null, probeIso = isoForDenoise.coerceAtLeast(1))).text()
@@ -1405,7 +1411,20 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             structureMapForFrame && structureMapShader.isReady() && sigmaAvailable
         val structureMapRan = structureMapEligible && censusDue
         if (structureMapRan) {
-            runStructureMapDiagnostic(ispInputTex, gridW, gridH)
+            // Folded exactly as runStage5 folds its own epsilon, so the map's
+            // ratio denominator is the same noise prediction the filter saw on
+            // this frame and 1.0 is the pure-noise anchor on host and device.
+            // whiteRange enters once, via inverseRange2; the preview path runs
+            // the shipped epsBoost, so the map is on the shipped operating point.
+            runStructureMapDiagnostic(
+                ispInputTex, gridW, gridH,
+                whiteRangeForFold = whiteRange,
+                lumaEpsScale = S5_LUMA_EPS_SCALE,
+                sigmaDm2 = S5_SIGMA_DM2,
+                inverseRange2 = 1f / (whiteRange * whiteRange),
+                calibScale = S5_CALIB_TO_RESIDUAL_SCALE,
+                epsBoost = 1f
+            )
             structureMapFrameIndex = bayerRenderCount
             // Only the armed flag folds this frame into persisted measurement
             // state. A grab-only draw leaves churn, the stabilizer and the
@@ -1560,10 +1579,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // the slider controls a linear blend toward the filtered result so
         // strength 0..100 maps to 0%..100% denoise (0% = identity,
         // 100% = full SWGF at epsY~1.4, epsC~64).
-        val lumaEpsScale = 1.4f
+        val lumaEpsScale = S5_LUMA_EPS_SCALE
         val beta = 0.3f
         // Stage-4 sparse-demosaic residual variance (sigma_dm ~ 3~4 DN).
-        val sigmaDm2 = 10f
+        val sigmaDm2 = S5_SIGMA_DM2
         // epsilon lives in the pixel domain (0..1); sigma_hat^2 and sigma_dm^2 are in raw-DN^2.
         val inverseRange2 = 1f / (whiteRange * whiteRange)
         // Domain normalization factor: the S2 sigma_hat grid (or the Stage-0 ISO model
@@ -1580,7 +1599,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // ~2-6e-6 -> sigma~1.5-2.5 DN). Using the DN^2 floor verbatim makes
         // epsilon~30-100x the true residual -> aY~0.02 -> output collapses to the
         // window mean (brighten + pixel-art). Scale epsilon to the real residual.
-        val calibToResidualScale = 1f / 32f
+        val calibToResidualScale = S5_CALIB_TO_RESIDUAL_SCALE
         // EV PP multiplies the linear scene by exp2(EV) AFTER Stage 5 in the
         // formed picture read, so the noise the viewer sees grows with EV exactly as
         // if the sensor ISO had been raised.  Fold the EV gain (sigma^2 proportional to gain^2)
@@ -1866,8 +1885,25 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
      * than the previous one. A strided readback of the result feeds the
      * stabilizer, the churn log and the anchor advisory. Nothing in the image
      * path reads the map.
+     *
+     * The fold arguments mirror S5's own epsilon fold. Without them the ratio
+     * would divide a raw-DN^2 residual by a raw-DN^2 sigma_hat^2 while calling
+     * the result dimensionless, and 1.0 would stop being the pure-noise anchor
+     * the host thresholds assume. gridW/gridH are kept for the call shape but
+     * no longer reach the shader: sigma is sampled in normalized image
+     * coordinates, so the grid's cell count no longer sets the tap positions.
      */
-    private fun runStructureMapDiagnostic(inputTex: Int, gridW: Int, gridH: Int) {
+    private fun runStructureMapDiagnostic(
+        inputTex: Int,
+        gridW: Int,
+        gridH: Int,
+        whiteRangeForFold: Float,
+        lumaEpsScale: Float,
+        sigmaDm2: Float,
+        inverseRange2: Float,
+        calibScale: Float,
+        epsBoost: Float
+    ) {
         val w = demosaicFboWidth
         val h = demosaicFboHeight
         if (w <= 0 || h <= 0) return
@@ -1878,10 +1914,18 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val cal = StructureMapClassifier.calibrationFor(isoForDenoise)
         gpuTimers.begin("S5.structure_map")
         bindTarget(structureMapFboId, w, h)
+        // Recorded here, not at the call site, so the reported fold is literally
+        // the one draw() received. A ratio line with no fold beside it cannot be
+        // read: every ratio in the census is meaningless without the denominator
+        // that produced it, and this is the only place both are known together.
+        lastStructureMapFold = String.format(
+            "fold lumaEpsScale=%.4f sigmaDm2=%.3f inverseRange2=%.6e calibScale=%.6f epsBoost=%.3f whiteRange=%.1f",
+            lumaEpsScale, sigmaDm2, inverseRange2, calibScale, epsBoost,
+            whiteRangeForFold
+        )
         structureMapShader.draw(
             inputTex = inputTex,
             sigmaTex = sigmaTexId,
-            sigmaW = gridW, sigmaH = gridH,
             outW = w, outH = h,
             rRetain = cal.rRetain,
             plainMax = cal.plainMax,
@@ -1889,7 +1933,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             edgeCoherenceMin = cal.edgeCoherenceMin,
             formedLut = lut.table,
             lutDomainMinStop = lut.domainMinStop,
-            lutDomainMaxStop = lut.domainMaxStop
+            lutDomainMaxStop = lut.domainMaxStop,
+            lumaEpsScale = lumaEpsScale,
+            sigmaDm2 = sigmaDm2,
+            inverseRange2 = inverseRange2,
+            calibScale = calibScale,
+            epsBoost = epsBoost
         )
         logGlError("after structure map", bayerRenderCount)
         gpuTimers.end("S5.structure_map")
@@ -2023,9 +2072,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         if (n == 0) return
         val churn = changed.toFloat() / n.toFloat()
         lastStructureStats = String.format(
-            "structure map sample n=%d stride=%d cadence=1/%d frames meanRatio=%.3f slewLimited=%.1f%% of texels%s",
+            "structure map sample n=%d stride=%d cadence=1/%d frames meanRatio=%.3f slewLimited=%.1f%% of texels%s | %s",
             n, stride, CENSUS_INTERVAL_FRAMES, ratioSum / n, churn * 100f,
-            if (churn > CHURN_WARN) " (ABOVE churn warn - control signal would flicker)" else ""
+            if (churn > CHURN_WARN) " (ABOVE churn warn - control signal would flicker)" else "",
+            lastStructureMapFold
         )
         logStructureChurnWarning(churn)
 
@@ -2169,12 +2219,42 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 sourceFrame = axisBucketFrameIndex
             )
         }
-        if (structureMapTexId != 0 && demosaicFboWidth > 0 && demosaicFboHeight > 0) {
+        if (structureMapTexId != 0 && structureMapWidth > 0 && structureMapHeight > 0) {
+            // Sized from the map's own buffer, not from the demosaic dimensions.
+            // They are equal whenever the map ran, but the buffer is what is
+            // actually bound here, and a readback whose extents disagree with the
+            // attachment is a GL error rather than a slightly wrong plane.
+            val structure = readFloatPlane(
+                structureMapFboId, structureMapWidth, structureMapHeight
+            )
             b.plane(
-                "s5.structureMap", demosaicFboWidth, demosaicFboHeight, 4,
-                readFloatPlane(structureMapFboId, demosaicFboWidth, demosaicFboHeight),
+                "s5.structureMap", structureMapWidth, structureMapHeight, 4,
+                structure,
                 sourceFrame = structureMapFrameIndex
             )
+            // Round-1 output is the noise field the covariance is measured on, and
+            // it ships as a plane in its own right: it is the one buffer in the
+            // grab that lets an offline reader re-derive the measurement instead
+            // of trusting it. Only readable at the map's resolution, which is the
+            // S5 work resolution - a mismatch means the two passes ran at
+            // different sizes and the pairing would be meaningless.
+            val round1 =
+                if (structure != null && outNr1FboId != 0 &&
+                    outNrBufferWidth == structureMapWidth &&
+                    outNrBufferHeight == structureMapHeight
+                ) {
+                    readFloatPlane(outNr1FboId, structureMapWidth, structureMapHeight)
+                } else {
+                    null
+                }
+            b.plane(
+                "s5.round1", structureMapWidth, structureMapHeight, 4, round1,
+                sourceFrame = structureMapFrameIndex
+            )
+            lastCovariance = OutputCovariance.measure(
+                round1, structure, structureMapWidth, structureMapHeight
+            )
+            lastCovarianceReport = lastCovariance?.report() ?: OutputCovariance.NO_SAMPLE
         }
         // States the rule the @frame stamps above follow, so the file explains
         // itself without this class's source in hand.
@@ -2182,9 +2262,24 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             "planeFramePolicy",
             "each plane's @frame is the render frame its contents were computed on; " +
                 "a value equal to frame describes this export, a lower value is an " +
-                "earlier census frame; a grab collects s2.sigma, s2.axisBuckets and " +
-                "s5.structureMap whether or not measurement was armed, and omits a " +
-                "plane only when the pass that produces it could not run"
+                "earlier census frame; a grab collects s2.sigma, s2.axisBuckets, " +
+                "s5.structureMap and s5.round1 whether or not measurement was armed, and " +
+                "omits a plane only when the pass that produces it could not run"
+        )
+        b.meta(
+            "structureMapLayout",
+            "s5.structureMap is (ratio, aLum, class, organization) measured on this " +
+                "frame's S5 round-1 output; class is 0 PLAIN / 1 TEXTURE / 2 EDGE; " +
+                "the ratio denominator is S5's own luma noise prediction, so the " +
+                "ratio is dimensionless and 1.0 is the pure-noise anchor on both " +
+                "host and device"
+        )
+        b.meta(
+            "covarianceBasis",
+            "the output-domain 3x3 RGB covariance is measured on the s5.round1 plane " +
+                "over texels whose whole 3x3 neighbourhood classifies PLAIN, as the " +
+                "second moment of (texel minus its neighbourhood mean); only ratios are " +
+                "reported, so no working-range or DN-scale assumption enters"
         )
         pendingFrameGrab = b.build()
         // Captured here rather than read from pendingFrameGrab at export time,
@@ -3840,6 +3935,17 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // profile sample, so the reported ratio is in the units the chroma
         // branch actually uses.
         private const val CHROMA_EPS_SCALE = 64.0f
+
+        /**
+         * The S5 epsilon fold, hoisted out of runStage5 so the structure map
+         * folds its ratio denominator with the same three numbers the filter
+         * used on that frame instead of a second copy that could drift. Both
+         * are domain folds, not unit conversions: see the derivation on the
+         * runStage5 locals these now back.
+         */
+        private const val S5_LUMA_EPS_SCALE = 1.4f
+        private const val S5_SIGMA_DM2 = 10f
+        private const val S5_CALIB_TO_RESIDUAL_SCALE = 1f / 32f
 
         // Above this per-frame class churn the structure map is reporting its
         // own instability, which would show up as flicker in anything that

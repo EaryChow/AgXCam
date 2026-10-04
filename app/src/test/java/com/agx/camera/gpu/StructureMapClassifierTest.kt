@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.sqrt
 
 /**
  * Structure-map classifier: the five frozen probes, and the SNR ratio
@@ -64,7 +65,8 @@ class StructureMapClassifierTest {
         // A pure-noise patch lands at roughly r_retain * sigma^2, so its ratio
         // is ~1. A bare sigma^2 denominator would make this read 1/r_retain.
         val r = StructureMapClassifier.calibrationFor(1600).rRetain
-        val ratio = StructureMapClassifier.ratio(1.0f * r * sigma2, sigma2, r)
+        val pred = StructureMapClassifier.noisePrediction(sigma2, 0f, 1f, 1f, 1f)
+        val ratio = StructureMapClassifier.ratio(1.0f * r * pred, pred, r)
         assertEquals(1.0f, ratio, 1.0e-4f)
     }
 
@@ -74,6 +76,31 @@ class StructureMapClassifierTest {
         assertEquals(0f, StructureMapClassifier.ratio(10f, 100f, 0f), 0f)
         assertEquals(0f, StructureMapClassifier.ratio(Float.NaN, 100f, 0.3f), 0f)
         assertEquals(0f, StructureMapClassifier.ratio(-5f, 100f, 0.3f), 0f)
+    }
+
+    @Test
+    fun theHostProbeAndTheDeviceAgreeOnWherePureNoiseLands() {
+        // The whole point of the folded denominator: a pure-noise patch has to
+        // land at the same ratio on the host and on the GPU, or the bands are
+        // tuned against a map that does not exist. At the shipped luma_eps_scale
+        // the unfolded form put the probe at 1.0 and the device at 0.714.
+        val sigma2 = 100f
+        val r = StructureMapClassifier.calibrationFor(1600).rRetain
+        val pred = StructureMapClassifier.noisePrediction(sigma2, 0f, 1f, 1f, 1f)
+        val probe = StructureMapClassifier.ratio(pred * r, pred, r)
+        assertEquals(1.0f, probe, 1.0e-4f)
+        // And the fold is not free, which is what the unfolded form hid.
+        assertTrue(
+            "the prediction must actually carry the epsilon scale",
+            pred > sigma2
+        )
+        // The device expression is the same product in the same order, so the
+        // ratio of the two forms is the epsilon scale and nothing else.
+        assertEquals(
+            StructureMapClassifier.LUMA_EPS_SCALE,
+            pred / sigma2,
+            1.0e-4f
+        )
     }
 
     @Test
@@ -133,7 +160,11 @@ class StructureMapClassifierTest {
     fun classificationIsDeterministicForRepeatedCalls() {
         val cal = StructureMapClassifier.calibrationFor(1600)
         val sigma2 = 100f
-        val ratio = StructureMapClassifier.ratio(9f * sigma2, sigma2, cal.rRetain)
+        val ratio = StructureMapClassifier.ratio(
+            9f * StructureMapClassifier.noisePrediction(sigma2, 0f, 1f, 1f, 1f),
+            StructureMapClassifier.noisePrediction(sigma2, 0f, 1f, 1f, 1f),
+            cal.rRetain
+        )
         val first = StructureMapClassifier.classify(1600, ratio, 0.22f, 0.85f)
         for (i in 0 until 50) {
             assertEquals(first, StructureMapClassifier.classify(1600, ratio, 0.22f, 0.85f))
@@ -145,14 +176,22 @@ class StructureMapClassifierTest {
         val cal = StructureMapClassifier.calibrationFor(1600)
         // Low luma-side ratio, high coherence: still EDGE, because that is the
         // case a luma-only criterion misses.
-        val ratio = StructureMapClassifier.ratio(1.0f * 100f, 100f, cal.rRetain)
+        val ratio = StructureMapClassifier.ratio(
+            StructureMapClassifier.noisePrediction(100f, 0f, 1f, 1f, 1f),
+            StructureMapClassifier.noisePrediction(100f, 0f, 1f, 1f, 1f),
+            cal.rRetain
+        )
         assertEquals(StructureMapClassifier.EDGE, StructureMapClassifier.classify(1600, ratio, 0.90f, 0.1f))
     }
 
     @Test
     fun textureNeedsBothRatioAndOrganization() {
         val cal = StructureMapClassifier.calibrationFor(1600)
-        val ratio = StructureMapClassifier.ratio(9f * 100f, 100f, cal.rRetain)
+        val ratio = StructureMapClassifier.ratio(
+            9f * StructureMapClassifier.noisePrediction(100f, 0f, 1f, 1f, 1f),
+            StructureMapClassifier.noisePrediction(100f, 0f, 1f, 1f, 1f),
+            cal.rRetain
+        )
         // High ratio but scattered (noise-like organization) must not be TEXTURE.
         assertEquals(StructureMapClassifier.PLAIN, StructureMapClassifier.classify(1600, ratio, 0.0f, 0.1f))
         // Connected organization with the same ratio is TEXTURE.
@@ -214,6 +253,60 @@ class StructureMapClassifierTest {
     }
 
     @Test
+    fun noisePredictionAppliesTheDomainFoldTheRatioWasMissing() {
+        // The ratio divides a measured formed-image residual by this prediction,
+        // so the prediction has to carry the same folds S5's epsilon carries.
+        // Without them the census read a p99 of 0.004 against a 1.60 ceiling and
+        // the map looked degenerate rather than mis-scaled.
+        val sigmaHat2 = 113f
+        val sigmaDm2 = 10f
+        val whiteRange = 959f
+        val inverseRange2 = 1f / (whiteRange * whiteRange)
+        val calibScale = 1f / 32f
+        val pred = StructureMapClassifier.noisePrediction(sigmaHat2, sigmaDm2, inverseRange2, calibScale, 1f)
+        // A raw DN^2 residual read as if it were already in image units is the
+        // 2.9e7 error the fold removes; without it the prediction is off by
+        // whiteRange^2 / calibScale.
+        val unfolded = 1.4f * (sigmaHat2 + sigmaDm2)
+        assertEquals(unfolded, pred / (inverseRange2 * calibScale), unfolded * 1.0e-3f)
+        // And it lands in the same order of magnitude as the S5 luma epsilon
+        // itself, which is the whole point: the ratio is dimensionless only if
+        // the two sides are the same quantity.
+        val epsY = 1.4f * (sigmaHat2 + sigmaDm2) * inverseRange2 * calibScale
+        assertEquals(epsY, pred, 1.0e-9f)
+    }
+
+    @Test
+    fun noisePredictionRejectsDegenerateInputs() {
+        assertEquals(0f, StructureMapClassifier.noisePrediction(0f, 10f, 1e-6f, 1f / 32f, 1f), 0f)
+        assertEquals(
+            0f,
+            StructureMapClassifier.noisePrediction(Float.NaN, 10f, 1e-6f, 1f / 32f, 1f),
+            0f
+        )
+    }
+
+    @Test
+    fun theProbeAnchorSitsBelowThePlainCeilingWithTheFoldApplied() {
+        // Probe 1 and probe 5 only mean anything if the ratio they construct is
+        // the same ratio the shader computes. Feeding the same-domain residual
+        // through the folded prediction has to land on both sides of plainMax,
+        // which is what makes them a test of the shipped criterion rather than
+        // of a literal.
+        val cal = StructureMapClassifier.calibrationFor(1600)
+        val inverseRange2 = 1f / (959f * 959f)
+        val pred = StructureMapClassifier.noisePrediction(113f, 10f, inverseRange2, 1f / 32f, 1f)
+        val atNoise = StructureMapClassifier.ratio(pred * cal.rRetain, pred, cal.rRetain)
+        assertEquals(1.0f, atNoise, 1.0e-3f)
+        assertTrue(
+            "the pure-noise anchor has to classify PLAIN under the shipped bands",
+            atNoise <= cal.plainMax
+        )
+        val atTexture = StructureMapClassifier.ratio(9f * pred * cal.rRetain, pred, cal.rRetain)
+        assertTrue("a textured patch has to clear the texture band", atTexture >= cal.textureMin)
+    }
+
+    @Test
     fun gammaIsOneForPlainAndTextureUntilTextureIsCalibrated() {
         // Current state, not the design: TEXTURE is meant to sit below 1 so the
         // pass lets texture through, and it has no calibrated value yet, so it
@@ -222,6 +315,29 @@ class StructureMapClassifierTest {
         assertEquals(1f, StructureMapClassifier.gammaFor(StructureMapClassifier.PLAIN), 0f)
         assertEquals(1f, StructureMapClassifier.gammaFor(StructureMapClassifier.TEXTURE), 0f)
         assertTrue(StructureMapClassifier.gammaFor(StructureMapClassifier.EDGE) > 1f)
+        // Nothing in the image path consumes the value today. It is pinned so a
+        // dormant helper that gets "fixed" looks like the calibration change it
+        // is, rather than passing silently because no shader reads it.
+        assertEquals(
+            "stabilizedGamma must stay the slew-limited form of the same table",
+            1.15f,
+            StructureMapStabilizer().let { s ->
+                s.update(1, StructureMapClassifier.EDGE)
+                s.stabilizedGamma(1, StructureMapClassifier.EDGE)
+            },
+            0f
+        )
+    }
+
+    @Test
+    fun classNameNamesEveryClassTheMapCanWrite() {
+        assertEquals("PLAIN", StructureMapClassifier.className(StructureMapClassifier.PLAIN))
+        assertEquals("TEXTURE", StructureMapClassifier.className(StructureMapClassifier.TEXTURE))
+        assertEquals("EDGE", StructureMapClassifier.className(StructureMapClassifier.EDGE))
+        assertEquals(
+            "a class outside the three the map writes must say so rather than borrow a name",
+            "?", StructureMapClassifier.className(3)
+        )
     }
 
     @Test

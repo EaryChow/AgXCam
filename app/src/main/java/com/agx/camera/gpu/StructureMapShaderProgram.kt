@@ -13,7 +13,7 @@ import java.nio.FloatBuffer
  * pass in this phase: nothing consumes its output, so the main path is
  * bit-identical whether or not it runs. What it produces per texel:
  *
- *   R = SNR ratio, residual energy / (sigma^2 * r_retain)
+ *   R = SNR ratio, residual energy / (noise prediction * r_retain)
  *   G = a_lum, the luminance adaptation factor from formed-picture luminance
  *   B = class index (0 PLAIN / 1 TEXTURE / 2 EDGE)
  *   A = gradient direction coherence in 0..1
@@ -32,7 +32,6 @@ class StructureMapShaderProgram {
 
     private var uInputTexLoc = 0
     private var uSigmaTexLoc = 0
-    private var uSigmaSizeLoc = 0
     private var uOutputSizeLoc = 0
     private var uRRetainLoc = 0
     private var uPlainMaxLoc = 0
@@ -44,6 +43,11 @@ class StructureMapShaderProgram {
     private var uLutEntriesLoc = 0
     private var uMidPivotLoc = 0
     private var uWindowRadiusLoc = 0
+    private var uLumaEpsScaleLoc = 0
+    private var uSigmaDm2Loc = 0
+    private var uInverseRange2Loc = 0
+    private var uCalibScaleLoc = 0
+    private var uEpsBoostLoc = 0
 
     private val quadVertices: FloatBuffer = ByteBuffer.allocateDirect(QUAD_COORDS.size * 4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer().put(QUAD_COORDS).also { it.position(0) }
@@ -59,7 +63,6 @@ class StructureMapShaderProgram {
         }
         uInputTexLoc = GLES20.glGetUniformLocation(programId, "u_input_tex")
         uSigmaTexLoc = GLES20.glGetUniformLocation(programId, "u_sigma_tex")
-        uSigmaSizeLoc = GLES20.glGetUniformLocation(programId, "u_sigma_size")
         uOutputSizeLoc = GLES20.glGetUniformLocation(programId, "u_output_size")
         uRRetainLoc = GLES20.glGetUniformLocation(programId, "u_r_retain")
         uPlainMaxLoc = GLES20.glGetUniformLocation(programId, "u_plain_max")
@@ -71,6 +74,11 @@ class StructureMapShaderProgram {
         uLutEntriesLoc = GLES20.glGetUniformLocation(programId, "u_lut_entries")
         uMidPivotLoc = GLES20.glGetUniformLocation(programId, "u_mid_pivot")
         uWindowRadiusLoc = GLES20.glGetUniformLocation(programId, "u_window_radius")
+        uLumaEpsScaleLoc = GLES20.glGetUniformLocation(programId, "u_luma_eps_scale")
+        uSigmaDm2Loc = GLES20.glGetUniformLocation(programId, "u_sigma_dm2")
+        uInverseRange2Loc = GLES20.glGetUniformLocation(programId, "u_inverse_range2")
+        uCalibScaleLoc = GLES20.glGetUniformLocation(programId, "u_calib_scale")
+        uEpsBoostLoc = GLES20.glGetUniformLocation(programId, "u_eps_boost")
         Log.d(TAG, "Structure map shader program created: $programId")
         com.agx.camera.CrashLogger.log(TAG, "Program created: structureMap=$programId")
     }
@@ -83,7 +91,6 @@ class StructureMapShaderProgram {
     fun draw(
         inputTex: Int,
         sigmaTex: Int,
-        sigmaW: Int, sigmaH: Int,
         outW: Int, outH: Int,
         rRetain: Float,
         plainMax: Float,
@@ -93,7 +100,12 @@ class StructureMapShaderProgram {
         lutDomainMinStop: Float,
         lutDomainMaxStop: Float,
         midPivot: Float = 0.45f,
-        windowRadius: Int = 1
+        windowRadius: Int = 1,
+        lumaEpsScale: Float = 1.4f,
+        sigmaDm2: Float = 0f,
+        inverseRange2: Float = 1f,
+        calibScale: Float = 1f,
+        epsBoost: Float = 1f
     ) {
         if (programId == 0) return
         if (formedLut.size > FormedPictureLut.MAX_ENTRIES) {
@@ -115,7 +127,6 @@ class StructureMapShaderProgram {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, sigmaTex)
         GLES20.glUniform1i(uSigmaTexLoc, 1)
 
-        GLES20.glUniform2f(uSigmaSizeLoc, sigmaW.toFloat(), sigmaH.toFloat())
         GLES20.glUniform2f(uOutputSizeLoc, outW.toFloat(), outH.toFloat())
         GLES20.glUniform1f(uRRetainLoc, rRetain)
         GLES20.glUniform1f(uPlainMaxLoc, plainMax)
@@ -127,6 +138,11 @@ class StructureMapShaderProgram {
         )
         GLES20.glUniform1f(uMidPivotLoc, midPivot)
         GLES20.glUniform1i(uWindowRadiusLoc, windowRadius)
+        GLES20.glUniform1f(uLumaEpsScaleLoc, lumaEpsScale)
+        GLES20.glUniform1f(uSigmaDm2Loc, sigmaDm2)
+        GLES20.glUniform1f(uInverseRange2Loc, inverseRange2)
+        GLES20.glUniform1f(uCalibScaleLoc, calibScale)
+        GLES20.glUniform1f(uEpsBoostLoc, epsBoost)
 
         val lutBuf = ByteBuffer.allocateDirect(formedLut.size * 4)
             .order(ByteOrder.nativeOrder()).asFloatBuffer().put(formedLut)
@@ -191,7 +207,16 @@ out vec4 outColor;
 
 uniform sampler2D u_input_tex;
 uniform sampler2D u_sigma_tex;
-uniform vec2 u_sigma_size;
+// The S5 luma epsilon's own domain terms. u_sigma_tex holds sigma_hat^2 in
+// raw-DN^2; the residual below is measured on an S5 output, which is
+// formed-image units. Dividing the two without this fold put every ratio three
+// to four orders of magnitude under the bands, so the census read a live
+// p99 of 0.004 against a plain ceiling of 1.60 and called the map degenerate.
+uniform float u_luma_eps_scale;
+uniform float u_sigma_dm2;
+uniform float u_inverse_range2;
+uniform float u_calib_scale;
+uniform float u_eps_boost;
 uniform vec2 u_output_size;
 uniform float u_r_retain;
 uniform float u_plain_max;
@@ -245,11 +270,20 @@ vec2 gradDir(vec2 p) {
     return vec2(r - l, u - d);
 }
 
+// The luma noise prediction at p, in the same domain the residual is measured
+// in. Mirrors StructureMapClassifier.noisePrediction and the S5 epsilon:
+// same factors, same order, so the ratio means what the thresholds say.
+float noisePrediction(vec2 p) {
+    float sigma2 = max(texture(u_sigma_tex, (p + 0.5) / u_output_size).r, 0.0);
+    return u_luma_eps_scale * (sigma2 + u_sigma_dm2)
+        * u_inverse_range2 * u_calib_scale * u_eps_boost;
+}
+
 // Mean residual over the window at p, divided by the sigma prediction there.
 // Extracted so the organization measure below can evaluate a neighbour's ratio
 // the same way this texel's ratio is evaluated.
 float localRatio(vec2 p) {
-    vec3 c = texture(u_input_tex, p / u_output_size).rgb;
+    vec3 c = texture(u_input_tex, (p + 0.5) / u_output_size).rgb;
     float centerL = lumaSpace(c).x;
     float residual = 0.0;
     int n = 0;
@@ -259,16 +293,14 @@ float localRatio(vec2 p) {
         for (int dx = -1; dx <= 1; dx++) {
             if (dx < -r || dx > r) continue;
             vec2 q = clamp(p + vec2(float(dx), float(dy)), vec2(0.0), u_output_size - vec2(1.0));
-            float l = lumaSpace(texture(u_input_tex, q / u_output_size).rgb).x;
+            float l = lumaSpace(texture(u_input_tex, (q + 0.5) / u_output_size).rgb).x;
             float diff = l - centerL;
             residual += diff * diff;
             n++;
         }
     }
     float meanResidual = n > 0 ? residual / float(n) : 0.0;
-    vec2 gridUv = (p + 0.5) / u_sigma_size;
-    float sigma2 = texture(u_sigma_tex, gridUv).r;
-    return meanResidual / max(sigma2 * u_r_retain, 1.0e-9);
+    return meanResidual / max(noisePrediction(p) * u_r_retain, 1.0e-12);
 }
 
 // Spatial continuity of the above-threshold neighbours in 0..1. Mirrors what

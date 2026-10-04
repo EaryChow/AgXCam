@@ -41,6 +41,17 @@ object CovarianceSensitivity {
     const val LUMA_G = 0.587f
     const val LUMA_B = 0.114f
 
+    // The two chroma basis rows. Hoisted out of the call sites because the
+    // scan below used to allocate two fresh arrays per call, and the sweep calls
+    // this once per (iso, rho) point. They are also the single definition the
+    // output-domain measurement projects onto, so the assumed-rho scan and the
+    // measured covariance cannot drift onto different chroma bases.
+    private val CHROMA_C1 = floatArrayOf(-0.168736f, -0.331264f, 0.5f)
+    private val CHROMA_C2 = floatArrayOf(0.5f, -0.418688f, -0.081312f)
+
+    /** Copies of the two chroma basis rows, C1 then C2. */
+    fun chromaRows(): Array<FloatArray> = arrayOf(CHROMA_C1.copyOf(), CHROMA_C2.copyOf())
+
     data class Point(
         val rho: Float,
         val iso: Int,
@@ -106,20 +117,14 @@ object CovarianceSensitivity {
      * chroma variance is lower than the marginal propagation - which is why
      * chroma runs HOT on the marginal path, the safe direction.
      */
-    fun chromaVarianceMarginal(sigma2R: Float, sigma2G: Float, sigma2B: Float): Float {
+    fun chromaVarianceMarginal(sigma2R: Float, sigma2G: Float, sigma2B: Float): Float =
         // Sum of the two orthogonal chroma basis rows' variances, using the
         // same 1/sqrt(3) scaled Cb/Cr rows the transform uses.
-        val c1 = floatArrayOf(-0.168736f, -0.331264f, 0.5f)
-        val c2 = floatArrayOf(0.5f, -0.418688f, -0.081312f)
-        return dotSq(c1, sigma2R, sigma2G, sigma2B) + dotSq(c2, sigma2R, sigma2G, sigma2B)
-    }
+        dotSq(CHROMA_C1, sigma2R, sigma2G, sigma2B) + dotSq(CHROMA_C2, sigma2R, sigma2G, sigma2B)
 
-    fun chromaVarianceExact(sigmaR: Float, sigmaG: Float, sigmaB: Float, rho: Float): Float {
-        val c1 = floatArrayOf(-0.168736f, -0.331264f, 0.5f)
-        val c2 = floatArrayOf(0.5f, -0.418688f, -0.081312f)
-        return orthogonalVar(c1, sigmaR, sigmaG, sigmaB, rho) +
-            orthogonalVar(c2, sigmaR, sigmaG, sigmaB, rho)
-    }
+    fun chromaVarianceExact(sigmaR: Float, sigmaG: Float, sigmaB: Float, rho: Float): Float =
+        orthogonalVar(CHROMA_C1, sigmaR, sigmaG, sigmaB, rho) +
+            orthogonalVar(CHROMA_C2, sigmaR, sigmaG, sigmaB, rho)
 
     private fun dotSq(w: FloatArray, s2R: Float, s2G: Float, s2B: Float): Float =
         w[0] * w[0] * s2R + w[1] * w[1] * s2G + w[2] * w[2] * s2B
