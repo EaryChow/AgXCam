@@ -31,3 +31,5 @@ extracted_ref/
 app-containing_lost_progress.apk
 app-containing_lost_progress.zip
 extracted_ref_decompiled/
+/white_balance_debug_tests/
+
