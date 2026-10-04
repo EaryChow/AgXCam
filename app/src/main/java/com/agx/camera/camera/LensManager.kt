@@ -508,6 +508,43 @@ class LensManager(private val context: Context) {
         }
     }
 
+    /**
+     * Picks the largest size that fits the cap while keeping the aspect as close
+     * to [targetAspect] as the available sizes allow.
+     *
+     * Both bounds have to hold: the cap is applied to width *and* height, so a
+     * cap that fits no 4:3 size above the smallest one collapses to it (see
+     * MainActivity.getMaxPreviewDimensions, which folds the screen aspect into
+     * the height bound).
+     *
+     * The area-descending tie-break is load-bearing, not cosmetic. Sorting on
+     * aspect error alone was what picked 320x240 over 640x480 on a 4096x3072
+     * sensor: every 4:3 preview size ties at aspect error 0, and a stable
+     * min-then-first picks whichever the HAL happens to list first, which is
+     * the smallest. That preview cost 128x the sensor crop per axis
+     * (zoomK 6.4 -> 12.8) and every structure-map ratio measured at it was
+     * carrying that bias.
+     */
+    private fun bestPreviewSize(
+        sizes: Array<Size>,
+        maxWidth: Int,
+        maxHeight: Int,
+        targetAspect: Float
+    ): Size? {
+        return sizes
+            .filter { it.width <= maxWidth && it.height <= maxHeight }
+            // Primary: aspect error ascending. Secondary: area descending, so an
+            // exact tie resolves to the largest size rather than the first one
+            // the HAL listed.
+            .sortedWith(
+                compareBy(
+                    { kotlin.math.abs(it.width.toFloat() / it.height - targetAspect) },
+                    { -(it.width.toLong() * it.height.toLong()) }
+                )
+            )
+            .firstOrNull()
+    }
+
     fun getBestPreviewSize(lens: LensInfo, maxWidth: Int = 1280, maxHeight: Int = 720): Size {
         val sizes = getPreviewSizes(lens)
         if (sizes.isEmpty()) return Size(640, 480)
@@ -515,12 +552,7 @@ class LensManager(private val context: Context) {
         val activeArray = getSensorActiveArraySize(lens)
         val sensorAspect = activeArray.width().toFloat() / activeArray.height()
 
-        return sizes
-            .filter { it.width <= maxWidth && it.height <= maxHeight }
-            .minByOrNull { size ->
-                val sizeAspect = size.width.toFloat() / size.height
-                kotlin.math.abs(sizeAspect - sensorAspect)
-            }
+        return bestPreviewSize(sizes, maxWidth, maxHeight, sensorAspect)
             ?: sizes.lastOrNull()
             ?: Size(640, 480)
     }
@@ -529,12 +561,7 @@ class LensManager(private val context: Context) {
         val sizes = getPreviewSizes(lens)
         if (sizes.isEmpty()) return Size(640, 480)
 
-        return sizes
-            .filter { it.width <= maxWidth && it.height <= maxHeight }
-            .minByOrNull { size ->
-                val sizeAspect = size.width.toFloat() / size.height
-                kotlin.math.abs(sizeAspect - targetAspect)
-            }
+        return bestPreviewSize(sizes, maxWidth, maxHeight, targetAspect)
             ?: getBestPreviewSize(lens, maxWidth, maxHeight)
     }
 
