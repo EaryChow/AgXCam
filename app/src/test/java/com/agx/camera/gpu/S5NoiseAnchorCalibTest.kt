@@ -36,6 +36,17 @@ private const val SIGMA_SCALE = 1f / 32f
 private const val ROUND2_EPS_MULT = 1.96f // (kappa x 1.4)^2, epsilon proportional to sigma_hat^2
 
 /**
+ * A synthetic DN range, standing in for the device-reported
+ * `SENSOR_INFO_WHITE_LEVEL - blackLevel` that PreviewRenderer reads at runtime.
+ *
+ * It appears here purely as a unit conversion - image units = DN / WHITE_RANGE -
+ * so it is a round synthetic value on purpose. Pinning one handset's white and
+ * black levels would make every attenuation figure below a statement about that
+ * handset rather than about the Stage-5 maths they are testing.
+ */
+private const val WHITE_RANGE = 1000f
+
+/**
  * Pure-noise-block anchor calibration for the Stage-5 double pass
  * plus the double-pass regression guarantees (requirements).
  *
@@ -93,7 +104,7 @@ class S5NoiseAnchorCalibTest {
         val chromaEpsScale: Float = CHROMA_EPS_SCALE,
         val sigmaDm2: Float = SIGMA_DM2,
         val sigmaScale: Float = SIGMA_SCALE,
-        val whiteRange: Float = 959f, // preview effWhite-effBlack (1023-64)
+        val whiteRange: Float = WHITE_RANGE, // device-reported; synthetic stand-in here
         val winScale: Float = 1f,
         val epsBoost: Float = 1f,
         val iso: Int = 800,
@@ -587,7 +598,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         val size = 160
         val lo = 8
         val hi = size - 8
-        val sigmaChPx = 8f / 959f                 // 8 DN noise -> image units
+        val sigmaChPx = 8f / WHITE_RANGE                 // 8 DN noise -> image units
         val sigmaLumaInj = 0.61237244f * sigmaChPx // luma noise of neutral RGB
         val my = sigmaLumaInj.toDouble()
         val sb = StringBuilder()
@@ -763,8 +774,8 @@ vals[k] = img.at(nx, ny, p) * whiteRange
                 for (sig in signals) {
                     // The pipeline sigma_hat model predicts variance on this signal; the
                     // block injects sigma truth = one representative tier (8 DN).
-                    val sigLumaPxInj = 0.61237244f * (8f / 959f)
-                    val img = noiseBlock(path.size, sig.toFloat(), 8f / 959f, seed = 3000L + iso.toLong())
+                    val sigLumaPxInj = 0.61237244f * (8f / WHITE_RANGE)
+                    val img = noiseBlock(path.size, sig.toFloat(), 8f / WHITE_RANGE, seed = 3000L + iso.toLong())
                     val cfg = Cfg(
                         beta = BETA, iso = iso, winScale = path.winScale, epsBoost = path.epsBoost,
                         evGain2 = path.evGain2
@@ -801,9 +812,9 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         rows.append("\n-- ISO 3200 mid-signal sigma-tier scan (preview) --\n")
         rows.append(String.format("%-6s %-8s %-8s %-8s %-9s\n", "sigmaDN", "kappa_eff", "att1", "att2", "casbeta.3"))
         for (sigD in sigmaDnTiers) {
-            val img = noiseBlock(152, 0.5f, (sigD / 959f).toFloat(), seed = 9000L + (sigD * 10).toLong())
+            val img = noiseBlock(152, 0.5f, (sigD / WHITE_RANGE).toFloat(), seed = 9000L + (sigD * 10).toLong())
             val cfg = Cfg(iso = 3200, beta = BETA)
-            val sigL = 0.61237244f * sigD / 959f
+            val sigL = 0.61237244f * sigD / WHITE_RANGE
             val r1 = s5Pass(img, img, cfg)
             val r2 = s5Pass(r1, img, cfg, cfg.round2EpsMult)
             val epsYi = cfgEpsY(cfg, 0.5f)
@@ -824,10 +835,10 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         // the luma-mix fold sqrt(1/0.375)=1.63 (Y=0.25R+0.5G+0.25B -> var_Y=
         // 0.375*var_ch); the calibration table records this realization as-is.
         val cfg3200 = Cfg(iso = 3200)
-        val sigHatDn = sqrt((cfg3200.isoModelA * 0.5f * 959f + cfg3200.isoModelB).toDouble())
+        val sigHatDn = sqrt((cfg3200.isoModelA * 0.5f * WHITE_RANGE + cfg3200.isoModelB).toDouble())
         val sigmaResDn = sigHatDn / sqrt(32.0)
-        val img3200 = noiseBlock(152, 0.5f, (sigmaResDn / 959f).toFloat(), seed = 777L)
-        val sigL = 0.61237244f * (sigmaResDn / 959f).toFloat()
+        val img3200 = noiseBlock(152, 0.5f, (sigmaResDn / WHITE_RANGE).toFloat(), seed = 777L)
+        val sigL = 0.61237244f * (sigmaResDn / WHITE_RANGE).toFloat()
         val epsYi3200 = cfgEpsY(cfg3200, 0.5f)
         val kappa3200 = sqrt((epsYi3200 / (sigL * sigL)).toDouble())
         val r1c = s5Pass(img3200, img3200, cfg3200)
@@ -873,7 +884,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         sb.append("=== Texture preservation (ISO 3200, double pass, beta=0.3) ===\n")
 
         for (sigmaDN in intArrayOf(10, 3)) {
-            val sigmaPx = sigmaDN.toFloat() / 959f
+            val sigmaPx = sigmaDN.toFloat() / WHITE_RANGE
             val img = textureScene(size, bandXs, sigmaPx, pc = 16, ac = 0.03f, pf = 6, af = 0.04f, seed = 4242L)
             val r1 = s5Pass(img, img, cfg)
             val r2 = s5Pass(r1, img, cfg, cfg.round2EpsMult)
@@ -959,7 +970,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
     @Test
     fun strengthZeroBitExactBypass() {
         val size = 96
-        val img = textureScene(size, intArrayOf(0, 32, 64, size), 8f / 959f, 12, 0.02f, 6, 0.03f, seed = 11L)
+        val img = textureScene(size, intArrayOf(0, 32, 64, size), 8f / WHITE_RANGE, 12, 0.02f, 6, 0.03f, seed = 11L)
         val cfg = Cfg(iterations = 2, beta = BETA, strength = 0f)
         val out = runS5(img, cfg)
         // runS5 short-circuits at strength 0 -> out IS img (bit-exact); also
@@ -983,7 +994,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
     @Test
     fun doublePassNoSeams() {
         val size = 129
-        val sigmaPx = 3f / 959f
+        val sigmaPx = 3f / WHITE_RANGE
         val (img, cx, cy) = discScene(size, sigmaPx, seed = 7L)
         val cfg = Cfg(iso = 800, beta = BETA) // full double pass, preview
         val r2 = runS5(img, cfg)
@@ -1073,7 +1084,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
     @Test
     fun thinStrokeS5DissolutionProbe() {
         val size = 160
-        val sigmaPx = 3f / 959f
+        val sigmaPx = 3f / WHITE_RANGE
         val bg = 0.06f
         val fg = 0.95f
         val sb = StringBuilder()
@@ -1185,7 +1196,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
     @Test
     fun captureStrokeS5PitHaloProbe() {
         val size = 192
-        val sigmaPx = 3f / 959f
+        val sigmaPx = 3f / WHITE_RANGE
         val bg = 0.06f
         val fg = 0.95f
         val sb = StringBuilder()
@@ -1342,7 +1353,7 @@ vals[k] = img.at(nx, ny, p) * whiteRange
         // (:201 vals*scale, :227 sig2=mad^2*scale^2), so R holds sigma_hat^2*WR^2; the S5 main
         // then divides by inverse_range2 (=1/WR^2), i.e. the extra scale cancels
         // except sigma_dm^2 -> ~0. Replay must feed R/WR^2 (a DN^2, which the mirror expects).
-        val whiteRangeDev = 959f
+        val whiteRangeDev = WHITE_RANGE
         val devWr2 = whiteRangeDev * whiteRangeDev
         // Domain auto-detect: pre-fix sigma buffer holds sigma_hat^2*WR^2 (the GLSL
         // SigmaHat :227 double-scaled mad); post-fix it holds sigma_hat^2 raw-DN^2.
@@ -1787,10 +1798,10 @@ sb.append(String.format(
         sb.append("=== capture sigma_hat double-domain epsilon collapse (letters) ===\n\n")
 
         // Dark near-black background + thin bright letter strokes, like the
-        // real backlit-sign capture (bg~0.02, letters~0.68, WR=959, iso~1029).
+        // synthetic backlit-sign scene: dark field near 0.02, glyphs near 0.68.
         val size = 256
-        val cfg = Cfg(winScale = 4.0f, epsBoost = 16f, whiteRange = 959f, iso = 1029, evGain2 = 1f)
-        val sigmaPx = 1.2f / 959f
+        val cfg = Cfg(winScale = 4.0f, epsBoost = 16f, whiteRange = WHITE_RANGE, iso = 1029, evGain2 = 1f)
+        val sigmaPx = 1.2f / WHITE_RANGE
         val seed = 4242L
         val rnd = Random(seed)
         // Stroke mask: blocky letters ("IS-OP" style) of varying thickness.
@@ -1928,7 +1939,7 @@ sb.append(String.format(
         } })
         val mirrorSig = madSigma2Dn(inP, cfgDev)
         // Auto-detect the sigma-hat domain (pre-fix dump = sigma_hat^2*WR^2, post-fix = raw).
-        val wr2 = 959f * 959f
+        val wr2 = WHITE_RANGE * WHITE_RANGE
         val darkMir = ArrayList<Float>()
         for (y in margin until h - margin) for (x in margin until w - margin) {
             if (lumaOnDev(inF, x, y) < 0.3f) darkMir.add(mirrorSig[y][x])
@@ -2066,7 +2077,7 @@ sb.append(String.format(
         fun lumaInDev(x: Int, y: Int) = lumaOnDev(inF, x, y)
 
         // Device dump is pre-fix (R = sigma_hat^2*WR^2); align to single domain.
-        val wr2 = 959f * 959f
+        val wr2 = WHITE_RANGE * WHITE_RANGE
         val devSigma = Array(h) { y -> FloatArray(w) { x -> sigF[(y * w + x) * 4] / wr2 } }
 
         // Former pit pixels (from residualPitMechanism) to track sigma_hat^2/epsY/out under each variant.
@@ -2111,8 +2122,8 @@ sb.append(String.format(
         // tuned so edge sigma_hat^2 ~ 10k) reproduces the rounded dot; "flat" shows the
         // texture-free baseline.
         val size = 256
-        val cfgSyn = Cfg(winScale = 4.0f, epsBoost = 16f, whiteRange = 959f, iso = 1029, evGain2 = 1f)
-        val sigmaPx = 1.2f / 959f
+        val cfgSyn = Cfg(winScale = 4.0f, epsBoost = 16f, whiteRange = WHITE_RANGE, iso = 1029, evGain2 = 1f)
+        val sigmaPx = 1.2f / WHITE_RANGE
         val lx0 = 64; val ly0 = 88
         fun buildLetterScene(texGrain: Float, texCheck: Float): Pair<Pln, Array<IntArray>> {
             val rnd = Random(4242L)
@@ -2224,7 +2235,7 @@ sb.append(String.format(
         stroke(lx0, ly0 + 88, 64, 4)
         val c = Array(size) { FloatArray(size * 3) }
         for (y in 0 until size) for (x in 0 until size) {
-            var v = if (mask[y][x]) 0.68f else 0.02f + gauss(rnd) * (1.2f / 959f)
+            var v = if (mask[y][x]) 0.68f else 0.02f + gauss(rnd) * (1.2f / WHITE_RANGE)
             if (mask[y][x] && texGrain > 0f) {
                 v += gauss(rnd) * texGrain
                 if (((x ushr 1) + (y ushr 1)) and 1 == 0) v += texCheck else v -= texCheck
@@ -2260,7 +2271,7 @@ sb.append(String.format(
     @Test
     fun sigmaHatAxisMinResidualL1() {
         val size = 256
-        val cfg = Cfg(winScale = 4.0f, epsBoost = 16f, whiteRange = 959f, iso = 1029, evGain2 = 1f)
+        val cfg = Cfg(winScale = 4.0f, epsBoost = 16f, whiteRange = WHITE_RANGE, iso = 1029, evGain2 = 1f)
         val (scene, bright) = texturedLetterScene(size, 0.05f, 0.035f)
         val sb = StringBuilder()
         sb.append("=== sigmaHat axis-min: residual + calibration guard ===\n")

@@ -361,6 +361,14 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     // The domain fold the map's ratio denominator last ran with, reported beside
     // the ratio itself. Empty until the map has drawn once.
     private var lastStructureMapFold = ""
+    // Census rows keyed by the geometry they were measured at, newest write per
+    // key. lastStructureStats alone made the ratio a moving target: switching
+    // the preview resolution reinitialises the map, the next census overwrites
+    // the row, and a sweep over resolutions could only ever export whichever
+    // geometry happened to be live last. Keying by geometry makes a resolution
+    // sweep survive one export.
+    private val structureCensusHistory = LinkedHashMap<String, String>()
+    @Volatile private var currentZoomK = 0f
     private var lastCovariance: OutputCovariance.Measurement? = null
     private var lastCovarianceReport = OutputCovariance.NO_SAMPLE
     // Advisory only; null means no anchor sample has been taken yet, which the
@@ -570,6 +578,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             sb.append("no classification: the structure map runs only with a measurement consumer live\n")
         } else {
             sb.append("no classification: the structure map pass produced no sample this session\n")
+        }
+        if (structureCensusHistory.isNotEmpty()) {
+            sb.append("census by geometry (survives a resolution sweep; newest row per key)\n")
+            structureCensusHistory.values.forEach { sb.append(it).append('\n') }
         }
         sb.append(lastCovarianceReport).append('\n')
         sb.append('\n')
@@ -1068,6 +1080,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             crop[2] / demosaicFboWidth.toFloat(),
             crop[3] / demosaicFboHeight.toFloat()
         )
+        currentZoomK = previewZoomK
 
         // Measurement consumers read statistics rather than filtering the
         // displayed image, so they need the sparse chain and the sigma-hat
@@ -1590,8 +1603,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // while this pass sees the post-S3 + 4x4-boxAA-demosaic residual in the
         // formed-image domain. The 32x is an operating-point fold - 16 (4x4
         // boxAA) x ~2 (S3 alpha~0.5 blend) - NOT a unit conversion: whiteRange
-        // enters exactly once via inverseRange2 (12-bit would give 16x, the
-        // 1023-vs-959 mirror slip is 7%). It therefore absorbs scene/alpha
+        // enters exactly once via inverseRange2, so this fold is not sensitive to
+        // the sensor's bit depth except through that one factor (a 12-bit range
+        // read against a 10-bit one rescales inverseRange2 by ~16x). It therefore
+        // absorbs scene/alpha
         // dependence and is retained + documented as known debt rather than re-derived at the source.
         // Observed S5D crash evidence: sigma_hat^2 is the sparse-grid DN^2 noise floor
         // (readNoiseVariance(3200)=111.5 -> sig2~113), but the filter actually
@@ -2104,7 +2119,35 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             probeIso = isoForAnchor,
             sceneFlat = AnchorAdvisory.isFlatAnchorScene(sample, isoForAnchor)
         )
+
+        // Same numbers again, filed under the geometry they belong to. The row
+        // carries the flat-anchor verdict because that verdict is a function of
+        // the geometry's own ratio distribution, and a sweep needs each
+        // geometry's verdict rather than the last one's.
+        structureCensusHistory[geometryKey()] = String.format(
+            "  %-9s iso=%-5d n=%-5d meanRatio=%-11.3f p99=%-11.3f max=%-14.3f PLAIN=%-5d TEXTURE=%-5d EDGE=%-5d churn=%-5.1f%% %s",
+            geometryKey(),
+            isoForAnchor,
+            n,
+            ratioSum / n,
+            p99,
+            sorted.lastOrNull() ?: 0f,
+            n - nonPlain,
+            textureTexels,
+            edgeTexels,
+            churn * 100f,
+            if (AnchorAdvisory.isFlatAnchorScene(sample, isoForAnchor)) "FLAT-ANCHOR-ELIGIBLE" else "not-flat"
+        )
     }
+
+    /**
+     * Identifies the geometry a census row belongs to: the map's own pixel size
+     * and the zoom factor it implies. Both are needed because two different
+     * preview sizes can share a map size, and the zoom factor is the quantity
+     * the k-gain work is parameterised by.
+     */
+    private fun geometryKey(): String =
+        "${structureMapWidth}x$structureMapHeight k=${"%.2f".format(currentZoomK)}"
 
     /**
      * Logs the churn warning on the way past the threshold and then on a slow

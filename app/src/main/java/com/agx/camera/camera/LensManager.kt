@@ -518,12 +518,12 @@ class LensManager(private val context: Context) {
      * the height bound).
      *
      * The area-descending tie-break is load-bearing, not cosmetic. Sorting on
-     * aspect error alone was what picked 320x240 over 640x480 on a 4096x3072
-     * sensor: every 4:3 preview size ties at aspect error 0, and a stable
-     * min-then-first picks whichever the HAL happens to list first, which is
-     * the smallest. That preview cost 128x the sensor crop per axis
-     * (zoomK 6.4 -> 12.8) and every structure-map ratio measured at it was
-     * carrying that bias.
+     * aspect error alone leaves every size of the requested aspect tied at
+     * error zero, and a stable min-then-first then returns whichever size the
+     * HAL happened to list first. HALs commonly enumerate smallest-first, so
+     * the single-key rule reliably chose the *worst* size the bounds allowed -
+     * a halved linear resolution, and a correspondingly larger zoomK, which
+     * every downstream ratio then inherited.
      */
     private fun bestPreviewSize(
         sizes: Array<Size>,
@@ -531,8 +531,8 @@ class LensManager(private val context: Context) {
         maxHeight: Int,
         targetAspect: Float
     ): Size? {
-        return sizes
-            .filter { it.width <= maxWidth && it.height <= maxHeight }
+        val withinBounds = sizes.filter { it.width <= maxWidth && it.height <= maxHeight }
+        val picked = withinBounds
             // Primary: aspect error ascending. Secondary: area descending, so an
             // exact tie resolves to the largest size rather than the first one
             // the HAL listed.
@@ -543,6 +543,21 @@ class LensManager(private val context: Context) {
                 )
             )
             .firstOrNull()
+
+        // Decides the two ways this can go wrong: a 4:3 size the HAL never offers,
+        // versus one the bounds filtered out. Without this the smallest ladder
+        // entry looks like the picker "chose" it.
+        val ladder = sizes.filter { it.width * 3 == it.height * 4 }
+            .sortedBy { it.width }
+            .joinToString { "${it.width}x${it.height}" }
+        CrashLogger.log(
+            TAG,
+            "preview pick bounds=${maxWidth}x$maxHeight target=${"%.4f".format(targetAspect)} " +
+                "hal=${sizes.size} inBounds=${withinBounds.size} " +
+                "picked=${picked?.width}x${picked?.height} sensor4:3ladder=[$ladder]"
+        )
+
+        return picked
     }
 
     fun getBestPreviewSize(lens: LensInfo, maxWidth: Int = 1280, maxHeight: Int = 720): Size {

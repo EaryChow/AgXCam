@@ -4814,7 +4814,18 @@ override fun onResume() {
         val screenWidth = metrics.widthPixels
         val screenHeight = metrics.heightPixels
         val maxDim = previewResCapMaxDim
-        return Pair(maxDim, maxDim * screenHeight / screenWidth)
+        val bounds = Pair(maxDim, maxDim * screenHeight / screenWidth)
+        // The height bound is cap * screenAspect. On a tall screen that lands
+        // below the sensor's own 4:3 ladder (cap 854 on 20:9 -> 854x384), which
+        // filters out every size except the smallest and pins the preview at
+        // 320x240 / zoomK 12.8. Log the resolved numbers so that failure mode is
+        // visible instead of having to be inferred from the chosen size.
+        CrashLogger.log(
+            TAG,
+            "preview cap=$maxDim screen=${screenWidth}x$screenHeight -> bounds=" +
+                "${bounds.first}x${bounds.second}; 4:3 needs maxHeight>=480 -> cap>=${(480 * screenWidth + screenHeight - 1) / screenHeight}"
+        )
+        return bounds
     }
 
     companion object {
