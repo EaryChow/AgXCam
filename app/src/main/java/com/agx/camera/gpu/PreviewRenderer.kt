@@ -6,6 +6,7 @@ import android.util.Log
 import android.view.TextureView
 import android.graphics.Bitmap
 import com.agx.camera.CrashLogger
+import com.agx.camera.camera.GreyWorldEstimate
 import com.agx.camera.camera.ZoomController
 import com.agx.camera.io.JpegEncoder
 import java.nio.ByteBuffer
@@ -383,6 +384,38 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     @Volatile var wbGainR = 1f
     @Volatile var wbGainG = 1f
     @Volatile var wbGainB = 1f
+
+    // The white balance gain for each CFA phase. The grey world estimate solves
+    // every phase on its own, because the two green sites are different filters
+    // and the demosaic merges them into a single channel; it hands that answer
+    // over here. Null means the source only speaks red/green/blue - sensor
+    // profile, HAL state, Kelvin settings - which maps onto the mosaic through
+    // the colour map of the frame being drawn.
+    @Volatile var wbPhaseGains: FloatArray? = null
+
+    // The total gain for each phase, applied exactly once wherever a phase is
+    // finally scaled. The S3 pack divides by it, so its trimmed means are taken
+    // on one scale with every phase neutral; the demosaic multiplies by it on
+    // the way back out, which is what cancels that division.
+    private fun totalPhaseGains(colorMap: IntArray): FloatArray {
+        wbPhaseGains?.let { return it }
+        return FloatArray(GreyWorldEstimate.PHASE_COUNT) { p ->
+            when (colorMap.getOrElse(p) { 1 }) {
+                0 -> wbGainR
+                2 -> wbGainB
+                else -> wbGainG
+            }
+        }
+    }
+
+    // Only the green sites are scaled before the demosaic merges sites. Red and
+    // blue keep the single multiply after the merge they have always had, so no
+    // phase is scaled twice and the two halves of the split still add up to
+    // totalPhaseGains(). A null wbPhaseGains means the source only speaks
+    // red/green/blue, and the estimator decides that leaves every phase at 1.
+    private fun preMergeGains(colorMap: IntArray): FloatArray =
+        GreyWorldEstimate.preMergeGains(wbPhaseGains, colorMap)
+
     @Volatile var ccMatrix: FloatArray? = null
     // Luminance (Y) coefficients of the camera-native RGB space; used by the
     // demosaic shader's clipping-neutralization step. Defaults to the Rec.709
@@ -1180,7 +1213,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 bayerShader.drawS3Pack(
                     previewTransform, effBlack, effBitDepth, effWhite, effBlackLevel, s1, s3, isoModelA, isoModelB,
                     cellGridW.toFloat(), cellGridH.toFloat(),
-                    floatArrayOf(wbGainR, wbGainG, wbGainB)
+                    totalPhaseGains(effColorMap)
                 )
                 demosaicDenoisedId = s3PackTexId
                 logGlError("after drawS3Pack", bayerRenderCount)
@@ -1351,6 +1384,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             nrRadius = previewNrRadius,
             boxBlend = boxBlend,
             wbGains = floatArrayOf(wbGainR, wbGainG, wbGainB),
+            wbGains4 = preMergeGains(effColorMap),
             colorMat = ccMatrix,
             denoisedTextureId = demosaicDenoisedId,
             denoiseActive = demosaicDenoisedId != 0,
@@ -2761,6 +2795,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         rawCaptureReq.agxWhiteLevel, rawCaptureReq.agxBlackLevel,
                         boxAA = captureBoxAA,
                         wbGains = floatArrayOf(wbGainR, wbGainG, wbGainB),
+                        wbGains4 = preMergeGains(bayerColorMap),
                         colorMat = ccMatrix,
                         denoisedTextureId = if (legacyRawDenoiseActive) captureDenoisedTexId else 0,
                         denoiseActive = legacyRawDenoiseActive,

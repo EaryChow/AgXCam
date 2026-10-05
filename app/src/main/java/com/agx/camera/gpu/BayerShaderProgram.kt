@@ -71,6 +71,7 @@ class BayerShaderProgram {
     private var dUNrRadiusLoc = 0
     private var dUBoxBlendLoc = 0
     private var dUWbGainsLoc = 0
+    private var dUWbGains4Loc = 0
     private var dUColorMatLoc = 0
     private var dUWhiteLevelLoc = 0
     private var dUBlackLevelLoc = 0
@@ -183,6 +184,7 @@ class BayerShaderProgram {
         dUNrRadiusLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_nr_radius")
         dUBoxBlendLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_box_blend")
         dUWbGainsLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_wb_gains")
+        dUWbGains4Loc = GLES20.glGetUniformLocation(demosaicProgramId, "u_wb_gains4")
         dUColorMatLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_color_mat")
         dUWhiteLevelLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_white_level")
         dUBlackLevelLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_black_level")
@@ -398,6 +400,7 @@ class BayerShaderProgram {
         nrRadius: Int = 4,
         boxBlend: Float = 0f,
         wbGains: FloatArray = floatArrayOf(1f, 1f, 1f),
+        wbGains4: FloatArray = floatArrayOf(1f, 1f, 1f, 1f),
         colorMat: FloatArray? = null,
         denoisedTextureId: Int = 0,
         denoiseActive: Boolean = false,
@@ -453,6 +456,8 @@ class BayerShaderProgram {
         GLES20.glUniform1i(dUNrRadiusLoc, nrRadius)
         GLES20.glUniform1f(dUBoxBlendLoc, boxBlend)
         GLES20.glUniform3f(dUWbGainsLoc, wbGains[0], wbGains[1], wbGains[2])
+        GLES20.glUniform4f(dUWbGains4Loc,
+            wbGains4[0], wbGains4[1], wbGains4[2], wbGains4[3])
         GLES20.glUniformMatrix3fv(dUColorMatLoc, 1, true, colorMat ?: COLOR_IDENTITY_9, 0)
         GLES20.glUniform1f(dUWhiteLevelLoc, whiteLevel)
         GLES20.glUniform1f(dUBlackLevelLoc, blackLevel)
@@ -507,7 +512,10 @@ class BayerShaderProgram {
         isoModelB: Float,
         outputWidth: Float,
         outputHeight: Float,
-        wbGains: FloatArray = floatArrayOf(1f, 1f, 1f)
+        // One gain per CFA phase, already resolved for this mosaic: the pack decides its
+        // trimmed means in photometrically neutral space, so it needs the whole
+        // white balance solution at once.
+        packWbGains: FloatArray = floatArrayOf(1f, 1f, 1f, 1f)
     ) {
         if (s3PackProgramId == 0) return
         GLES20.glUseProgram(s3PackProgramId)
@@ -531,7 +539,8 @@ class BayerShaderProgram {
         GLES20.glUniform1f(pUIsoModelBLoc, isoModelB)
         GLES20.glUniform1f(pUWhiteLevelLoc, whiteLevel)
         GLES20.glUniform1f(pUBlackLevelLoc, blackLevel)
-        GLES20.glUniform4f(pUPackWbGainsLoc, wbGains[0], wbGains[1], wbGains[1], wbGains[2])
+        GLES20.glUniform4f(pUPackWbGainsLoc,
+            packWbGains[0], packWbGains[1], packWbGains[2], packWbGains[3])
 
         val posHandle = GLES20.glGetAttribLocation(s3PackProgramId, "a_position")
         val texHandle = GLES20.glGetAttribLocation(s3PackProgramId, "a_texCoord")
@@ -827,6 +836,12 @@ uniform float u_box_blend;
 uniform float u_white_level;
 uniform float u_black_level;
 uniform vec3 u_wb_gains;
+// Per-CFA-phase gains, indexed by safePhase(). Only the two green sites carry a
+// value: they are separate filters whose answers under a neutral illuminant need
+// not match, so each is brought to their shared reference before the demosaic
+// merges sites. Red and blue stay at 1 here and are applied once, after the
+// merge, by u_wb_gains.
+uniform vec4 u_wb_gains4;
 uniform mat3 u_color_mat;
 uniform vec3 u_luma_coeffs;
 uniform float u_clip_atten_factor;
@@ -873,6 +888,14 @@ vec2 clampSensor(vec2 v) {
 float lsGain(vec2 lsNeighborUV) {
     ivec2 c = ivec2(clampSensor(lsNeighborUV));
     return texture(u_lens_shading_map, vec2(c) / u_sensorSize)[safePhase(c.x, c.y)];
+}
+
+float wbPhaseGain(ivec2 coord) {
+    int p = safePhase(coord.x, coord.y);
+    if (p == 0) return u_wb_gains4.x;
+    if (p == 1) return u_wb_gains4.y;
+    if (p == 2) return u_wb_gains4.z;
+    return u_wb_gains4.w;
 }
 
 // Reverse-map a clamped sensor coordinate onto the denoised output grid.
@@ -1244,17 +1267,17 @@ vec3 demosaicAt(ivec2 sensorCoord, vec2 lsSensorUV, int ring, float mCoarse) {
     vec2 lsSW = lsSensorUV + vec2(-1.0,  1.0);
     vec2 lsSE = lsSensorUV + vec2( 1.0,  1.0);
 
-    float nN  = denoisedSampleRawRing(nN_coord, ring, mCoarse)  * lsGain(lsN);
-    float nS  = denoisedSampleRawRing(nS_coord, ring, mCoarse)  * lsGain(lsS);
-    float nW  = denoisedSampleRawRing(nW_coord, ring, mCoarse)  * lsGain(lsW);
-    float nE  = denoisedSampleRawRing(nE_coord, ring, mCoarse)  * lsGain(lsE);
+    float nN  = wbPhaseGain(nN_coord) * denoisedSampleRawRing(nN_coord, ring, mCoarse)  * lsGain(lsN);
+    float nS  = wbPhaseGain(nS_coord) * denoisedSampleRawRing(nS_coord, ring, mCoarse)  * lsGain(lsS);
+    float nW  = wbPhaseGain(nW_coord) * denoisedSampleRawRing(nW_coord, ring, mCoarse)  * lsGain(lsW);
+    float nE  = wbPhaseGain(nE_coord) * denoisedSampleRawRing(nE_coord, ring, mCoarse)  * lsGain(lsE);
 
-    float nNW = denoisedSampleRawRing(nNW_coord, ring, mCoarse) * lsGain(lsNW);
-    float nNE = denoisedSampleRawRing(nNE_coord, ring, mCoarse) * lsGain(lsNE);
-    float nSW = denoisedSampleRawRing(nSW_coord, ring, mCoarse) * lsGain(lsSW);
-    float nSE = denoisedSampleRawRing(nSE_coord, ring, mCoarse) * lsGain(lsSE);
+    float nNW = wbPhaseGain(nNW_coord) * denoisedSampleRawRing(nNW_coord, ring, mCoarse) * lsGain(lsNW);
+    float nNE = wbPhaseGain(nNE_coord) * denoisedSampleRawRing(nNE_coord, ring, mCoarse) * lsGain(lsNE);
+    float nSW = wbPhaseGain(nSW_coord) * denoisedSampleRawRing(nSW_coord, ring, mCoarse) * lsGain(lsSW);
+    float nSE = wbPhaseGain(nSE_coord) * denoisedSampleRawRing(nSE_coord, ring, mCoarse) * lsGain(lsSE);
 
-    float center = denoisedSampleRawRing(sensorCoord, ring, mCoarse) * gain;
+    float center = wbPhaseGain(sensorCoord) * denoisedSampleRawRing(sensorCoord, ring, mCoarse) * gain;
     float r = 0.0, g = 0.0, b = 0.0;
 
     if (color == 0) {
@@ -1453,15 +1476,24 @@ void demosaicAtDual(ivec2 sensorCoord, vec2 lsSensorUV, float mCoarse, out vec3 
     float lN,  hN,  lS,  hS,  lW,  hW,  lE,  hE;
     float lNW, hNW, lNE, hNE, lSW, hSW, lSE, hSE;
     float lC,  hC;
-    denoisedDualRing(nN_coord, mCoarse, lN, hN);  lN *= lsGain(lsN); hN *= lsGain(lsN);
-    denoisedDualRing(nS_coord, mCoarse, lS, hS);  lS *= lsGain(lsS); hS *= lsGain(lsS);
-    denoisedDualRing(nW_coord, mCoarse, lW, hW);  lW *= lsGain(lsW); hW *= lsGain(lsW);
-    denoisedDualRing(nE_coord, mCoarse, lE, hE);  lE *= lsGain(lsE); hE *= lsGain(lsE);
-    denoisedDualRing(nNW_coord, mCoarse, lNW, hNW); lNW *= lsGain(lsNW); hNW *= lsGain(lsNW);
-    denoisedDualRing(nNE_coord, mCoarse, lNE, hNE); lNE *= lsGain(lsNE); hNE *= lsGain(lsNE);
-    denoisedDualRing(nSW_coord, mCoarse, lSW, hSW); lSW *= lsGain(lsSW); hSW *= lsGain(lsSW);
-    denoisedDualRing(nSE_coord, mCoarse, lSE, hSE); lSE *= lsGain(lsSE); hSE *= lsGain(lsSE);
-    denoisedDualRing(sensorCoord, mCoarse, lC, hC); lC *= gain; hC *= gain;
+    float gN = wbPhaseGain(nN_coord) * lsGain(lsN);
+    float gS = wbPhaseGain(nS_coord) * lsGain(lsS);
+    float gW = wbPhaseGain(nW_coord) * lsGain(lsW);
+    float gE = wbPhaseGain(nE_coord) * lsGain(lsE);
+    float gNW = wbPhaseGain(nNW_coord) * lsGain(lsNW);
+    float gNE = wbPhaseGain(nNE_coord) * lsGain(lsNE);
+    float gSW = wbPhaseGain(nSW_coord) * lsGain(lsSW);
+    float gSE = wbPhaseGain(nSE_coord) * lsGain(lsSE);
+    float gC = wbPhaseGain(sensorCoord) * gain;
+    denoisedDualRing(nN_coord, mCoarse, lN, hN);  lN *= gN; hN *= gN;
+    denoisedDualRing(nS_coord, mCoarse, lS, hS);  lS *= gS; hS *= gS;
+    denoisedDualRing(nW_coord, mCoarse, lW, hW);  lW *= gW; hW *= gW;
+    denoisedDualRing(nE_coord, mCoarse, lE, hE);  lE *= gE; hE *= gE;
+    denoisedDualRing(nNW_coord, mCoarse, lNW, hNW); lNW *= gNW; hNW *= gNW;
+    denoisedDualRing(nNE_coord, mCoarse, lNE, hNE); lNE *= gNE; hNE *= gNE;
+    denoisedDualRing(nSW_coord, mCoarse, lSW, hSW); lSW *= gSW; hSW *= gSW;
+    denoisedDualRing(nSE_coord, mCoarse, lSE, hSE); lSE *= gSE; hSE *= gSE;
+    denoisedDualRing(sensorCoord, mCoarse, lC, hC); lC *= gC; hC *= gC;
 
     float loR = 0.0, loG = 0.0, loB = 0.0;
     float hiR = 0.0, hiG = 0.0, hiB = 0.0;

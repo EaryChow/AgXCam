@@ -2626,90 +2626,117 @@ class MainActivity : AppCompatActivity() {
                 ccGains.size >= 4 &&
                 ccGains.all { it.isFinite() && it > 0f }
 
-            // Grey-world fallback for devices that report no HAL gains. It
-            // feeds a sensor neutral into the profile path; the legacy gain
-            // path below keeps consuming its smoothed channel gains directly.
-            val useEstimator = !gainsOk && currentWbMode != WhiteBalanceMode.KELVIN
+            // AUTO is the app's own estimate: it works on every CFA phase separately,
+            // which no HAL or profile answer can express, so it is preferred over
+            // the HAL. The fixed presets leave the HAL in charge - it is already
+            // pinned to the chosen illuminant - and KELVIN is the app's own CAT.
+            val useEstimator = currentWbMode == WhiteBalanceMode.AUTO ||
+                (!gainsOk && currentWbMode != WhiteBalanceMode.KELVIN)
             if (useEstimator && wbEstimateFrame % 15 == 0) {
                 estimateAutoWhiteBalance(dest, rawW, rawH)
             }
 
             wbEstimateFrame++
 
-val neutral: FloatArray? = if (gainsOk) {
-            // The as-shot neutral is the inverse of the HAL's
-            // COLOR_CORRECTION_GAINS in every WB mode. In KELVIN the HAL is
-            // pinned to the D65 DAYLIGHT preset, so these gains describe the
-            // *scene* neutral under that fixed illuminant -- the profile must
-            // whiten it, then the app's relative Bradford CAT shifts D65 ->
-            // user Kelvin on top. Feeding SENSOR_NEUTRAL_COLOR_POINT here
-            // instead would white-bias by the D50(NCP)->D65(DAYLIGHT) gap and
-            // overcast the whole image green.
-            floatArrayOf(
-                1f / ccGains[0],
-                1f / ((ccGains[1] + ccGains[2]) * 0.5f),
-                1f / ccGains[3]
-            )
-        } else if (currentWbMode != WhiteBalanceMode.KELVIN) {
-            estimatorNeutral ?: rawNeutralSeed
-        } else {
-            rawNeutralSeed
-        }
+            // Once the estimator has an answer it keeps the gains until the lens
+            // changes; it only steps every 15th frame, so the gains outlive the
+            // call that produced them.
+            val estimatorOwnsGains = currentWbMode == WhiteBalanceMode.AUTO && estimatorReady
+
+            val neutral: FloatArray? = if (useEstimator) {
+                // The estimator's smoothed gains inverted: the sensor neutral the
+                // profile path needs, so it whitens what the app measured rather
+                // than what the HAL measured.
+                estimatorNeutral ?: rawNeutralSeed
+            } else if (gainsOk) {
+                // The as-shot neutral is the inverse of the HAL's
+                // COLOR_CORRECTION_GAINS. In KELVIN the HAL is pinned to the D65
+                // DAYLIGHT preset, so these gains describe the *scene* neutral
+                // under that fixed illuminant -- the profile must whiten it, then
+                // the app's relative Bradford CAT shifts D65 -> user Kelvin on
+                // top. Feeding SENSOR_NEUTRAL_COLOR_POINT here instead would
+                // white-bias by the D50(NCP)->D65(DAYLIGHT) gap and overcast the
+                // whole image green.
+                floatArrayOf(
+                    1f / ccGains[0],
+                    1f / ((ccGains[1] + ccGains[2]) * 0.5f),
+                    1f / ccGains[3]
+                )
+            } else {
+                rawNeutralSeed
+            }
 
             val profileTransform = neutral?.let { rawColorProfile?.neutralTransformForNeutral(it) }
 
+            // Colour correction and gains are chosen separately: in AUTO the
+            // estimator owns the gains while the profile still owns the matrix,
+            // since only the matrix carries the camera-native primaries.
             if (profileTransform != null) {
-                // Profile path: split into sensor-space white-balance gains and
-                // the WB-removed native->sRGB matrix so the demosaic shader can
-                // neutralize clipped regions between the two stages. The
-                // matrix no longer folds in the WB, and its Y row provides the
-                // camera-native luminance coefficients for the neutralization.
                 previewRenderer.ccMatrix = profileTransform.colorMatrix.m
-                previewRenderer.wbGainR = profileTransform.wbGains[0]
-                previewRenderer.wbGainG = profileTransform.wbGains[1]
-                previewRenderer.wbGainB = profileTransform.wbGains[2]
                 previewRenderer.nativeLumaCoeffs = profileTransform.lumaCoeffs
-                if (wbEstimateFrame <= 3 || wbEstimateFrame % 60 == 0) {
-                    val temp = rawColorProfile?.temperatureForNeutral(neutral)
-                    CrashLogger.log(
-                        TAG, "dcp cc: frame=$wbEstimateFrame " +
-                            "temp=${temp?.toInt() ?: -1} " +
-                            "neutral=[${neutral.joinToString { String.format("%.3f", it) }}] " +
-                            "wb=[${previewRenderer.wbGainR}, ${previewRenderer.wbGainG}, ${previewRenderer.wbGainB}] " +
-                            "mat=[${profileTransform.colorMatrix.m.joinToString { String.format("%.4f", it) }}] " +
-                            "luma=[${previewRenderer.nativeLumaCoeffs.joinToString { String.format("%.4f", it) }}]"
-                    )
-                }
-            } else if (gainsOk) {
-                val gMean = (ccGains[1] + ccGains[2]) * 0.5f
-                if (gMean > 0f) {
-                    previewRenderer.wbGainR = (ccGains[0] / gMean).coerceIn(0.3f, 8f)
-                    previewRenderer.wbGainG = 1f
-                    previewRenderer.wbGainB = (ccGains[3] / gMean).coerceIn(0.3f, 8f)
-                }
-                previewRenderer.ccMatrix = ccMat
-                previewRenderer.nativeLumaCoeffs = luminanceFromSrgbMatrix(ccMat)
-                if (wbEstimateFrame % 60 == 0) {
-                    CrashLogger.log(
-                        TAG, "hal cc: frame=$wbEstimateFrame " +
-                            "gainsR=${String.format("%.3f", previewRenderer.wbGainR)} " +
-                            "gainsB=${String.format("%.3f", previewRenderer.wbGainB)} " +
-                            "raw=[${ccGains.joinToString { String.format("%.3f", it) }}] " +
-                            "mat=[${ccMat?.joinToString { String.format("%.4f", it) }}]"
-                    )
-                }
-            } else if (currentWbMode == WhiteBalanceMode.KELVIN) {
-                // Manual Kelvin without a profile or HAL gains: stay neutral -
-                // the illumination comes from the app's Kelvin CAT. Never run
-                // the scene-adaptive estimator while in manual WB.
-                previewRenderer.wbGainR = 1f
-                previewRenderer.wbGainG = 1f
-                previewRenderer.wbGainB = 1f
+            } else if (ccMat != null) {
                 previewRenderer.ccMatrix = ccMat
                 previewRenderer.nativeLumaCoeffs = luminanceFromSrgbMatrix(ccMat)
             } else {
                 previewRenderer.ccMatrix = null
                 previewRenderer.nativeLumaCoeffs = DEFAULT_LUMA_COEFFS.copyOf()
+            }
+
+            if (!estimatorOwnsGains) {
+                if (profileTransform != null) {
+                    // Profile path: split into sensor-space white-balance gains
+                    // and the WB-removed native->sRGB matrix so the demosaic
+                    // shader can neutralize clipped regions between the two
+                    // stages. The matrix no longer folds in the WB, and its Y row
+                    // provides the camera-native luminance coefficients for the
+                    // neutralization.
+                    previewRenderer.wbGainR = profileTransform.wbGains[0]
+                    previewRenderer.wbGainG = profileTransform.wbGains[1]
+                    previewRenderer.wbGainB = profileTransform.wbGains[2]
+                    if (wbEstimateFrame <= 3 || wbEstimateFrame % 60 == 0) {
+                        val temp = rawColorProfile?.temperatureForNeutral(neutral)
+                        CrashLogger.log(
+                            TAG, "dcp cc: frame=$wbEstimateFrame " +
+                                "temp=${temp?.toInt() ?: -1} " +
+                                "neutral=[${neutral.joinToString { String.format("%.3f", it) }}] " +
+                                "wb=[${previewRenderer.wbGainR}, ${previewRenderer.wbGainG}, " +
+                                "${previewRenderer.wbGainB}] " +
+                                "mat=[${profileTransform.colorMatrix.m.joinToString { String.format("%.4f", it) }}]"
+                        )
+                    }
+                } else if (gainsOk) {
+                    val gMean = (ccGains[1] + ccGains[2]) * 0.5f
+                    if (gMean > 0f) {
+                        previewRenderer.wbGainR = (ccGains[0] / gMean).coerceIn(0.3f, 8f)
+                        previewRenderer.wbGainG = 1f
+                        previewRenderer.wbGainB = (ccGains[3] / gMean).coerceIn(0.3f, 8f)
+                    }
+                    if (wbEstimateFrame % 60 == 0) {
+                        CrashLogger.log(
+                            TAG, "hal cc: frame=$wbEstimateFrame " +
+                                "gainsR=${String.format("%.3f", previewRenderer.wbGainR)} " +
+                                "gainsB=${String.format("%.3f", previewRenderer.wbGainB)} " +
+                                "raw=[${ccGains.joinToString { String.format("%.3f", it) }}] " +
+                                "mat=[${ccMat?.joinToString { String.format("%.4f", it) }}]"
+                        )
+                    }
+                } else {
+                    // No usable source at all: stay neutral.
+                    previewRenderer.wbGainR = 1f
+                    previewRenderer.wbGainG = 1f
+                    previewRenderer.wbGainB = 1f
+                }
+                // The per-phase solution belongs to the estimator alone.
+                previewRenderer.wbPhaseGains = null
+            } else if (wbEstimateFrame % 60 == 0) {
+                // The estimator wrote them; log which source owns the gains, so a
+                // capture can be traced back to one or the other.
+                CrashLogger.log(
+                    TAG, "estimator cc: frame=$wbEstimateFrame " +
+                        "wb=[${previewRenderer.wbGainR}, ${previewRenderer.wbGainG}, " +
+                        "${previewRenderer.wbGainB}] " +
+                        "phase=[${previewRenderer.wbPhaseGains?.joinToString { String.format("%.3f", it) }}]"
+                )
             }
             previewRenderer.setBayerFrame(dest, rawW, rawH, rawW)
         }
@@ -2911,6 +2938,11 @@ val neutral: FloatArray? = if (gainsOk) {
                 previewRenderer.nativeLumaCoeffs = DEFAULT_LUMA_COEFFS.copyOf()
             }
             wbEstimateFrame = 0
+            // The green sites belong to this sensor, so the smoothed pair starts
+            // over with the lens rather than carrying the previous one's balance.
+            smoothedPhaseGains = floatArrayOf(1f, 1f, 1f, 1f)
+            previewRenderer.wbPhaseGains = smoothedPhaseGains.copyOf()
+            estimatorReady = false
             // A new lens on the same renderer: start from the identity no-op
             // until its own shading map arrives with the first CaptureResults.
             previewRenderer.resetLensShading()
@@ -2971,6 +3003,9 @@ val neutral: FloatArray? = if (gainsOk) {
         previewRenderer.wbGainR = 1f
         previewRenderer.wbGainG = 1f
         previewRenderer.wbGainB = 1f
+        smoothedPhaseGains = floatArrayOf(1f, 1f, 1f, 1f)
+        previewRenderer.wbPhaseGains = smoothedPhaseGains.copyOf()
+        estimatorReady = false
         previewRenderer.nativeLumaCoeffs = DEFAULT_LUMA_COEFFS.copyOf()
         rawColorProfile = null
         rawNeutralSeed = floatArrayOf(1f, 1f, 1f)
@@ -3023,6 +3058,15 @@ val neutral: FloatArray? = if (gainsOk) {
     private var rawNeutralSeed = floatArrayOf(1f, 1f, 1f)
     private var estimatorNeutral: FloatArray? = null
 
+    // Smoothed per-CFA-phase grey world gains. Only the two green sites reach the
+    // demosaic from here; red and blue leave as the post-merge colorGains.
+    private var smoothedPhaseGains = floatArrayOf(1f, 1f, 1f, 1f)
+
+    // Sticky: the estimator steps every 15th frame, so its gains have to outlive
+    // the call that produced them. Cleared with the lens, and ignored whenever
+    // the mode is not AUTO.
+    private var estimatorReady = false
+
     private fun acquireRawBuffer(width: Int, height: Int): ByteBuffer {
         val needed = width * height * 2
         if (rawBuffers.isNotEmpty() && rawBuffers[0].capacity() != needed) {
@@ -3038,88 +3082,65 @@ val neutral: FloatArray? = if (gainsOk) {
     }
 
     private fun estimateAutoWhiteBalance(buffer: java.nio.ByteBuffer, w: Int, h: Int) {
-        val step = 32
+        // 16 cells is a 32-pixel step, matching the stride this walk used before
+        // it started dropping clipped cells: the sample density is unchanged, only
+        // the grouping is.
+        val cellStride = 16
         val colorMap = previewRenderer.bayerColorMap
-        val black = previewRenderer.bayerBlackLevelPattern
-        val cnt = IntArray(4)
-        val sum = DoubleArray(4)
-        for (p in 0 until 4) {
-            val startR = p / 2
-            val startC = p % 2
-            var r = startR
-            while (r < h) {
-                var c = startC
-                while (c < w) {
-                    val idx = (r * w + c) * 2
-                    val v = (buffer.get(idx).toInt() and 0xFF) or
-                        ((buffer.get(idx + 1).toInt() and 0xFF) shl 8)
-                    sum[p] += v
-                    cnt[p]++
-                    c += step
-                }
-                r += step
-            }
-        }
-
-        var rPhase = 0
-        var bPhase = 3
-        for (p in 0 until 4) {
-            when (colorMap.getOrElse(p) { 1 }) {
-                0 -> rPhase = p
-                2 -> bPhase = p
-            }
-        }
-
-        val avg = DoubleArray(4)
-        for (i in 0 until 4) {
-            avg[i] = if (cnt[i] > 0) sum[i] / cnt[i] - black[i] else 0.0
-        }
-        var gSum = 0.0
-        var gCount = 0
-        for (p in 0 until 4) {
-            if (colorMap.getOrElse(p) { 1 } == 1) {
-                gSum += avg[p]
-                gCount++
-            }
-        }
-        val gAvg = if (gCount > 0) gSum / gCount else (avg[1] + avg[2]) / 2.0
+        val scan = GreyWorldEstimate.scan(
+            buffer, w, h, previewRenderer.bayerBlackLevelPattern,
+            cellStride, rawWhiteLevel
+        )
+        val phaseMeans = scan.means
+        val target = GreyWorldEstimate.phaseGains(phaseMeans, colorMap)
         val logNow = wbEstimateFrame % 90 == 0 || wbEstimateFrame <= 3
-        if (gAvg <= 1.0 || avg[rPhase] <= 1.0 || avg[bPhase] <= 1.0) {
+        if (target == null) {
             if (logNow) {
                 CrashLogger.log(
                     TAG, "wb estimate: skip frame=$wbEstimateFrame " +
-                        "gAvg=${String.format("%.1f", gAvg)} rAvg=${String.format("%.1f", avg[rPhase])} " +
-                        "bAvg=${String.format("%.1f", avg[bPhase])} " +
-                        "cnt=[${cnt[0]},${cnt[1]},${cnt[2]},${cnt[3]}]"
+                        "cells=${scan.cellsUsed} clipped=${scan.cellsClipped} " +
+                        "means=[${phaseMeans.joinToString { String.format("%.1f", it) }}]"
                 )
             }
             return
         }
 
-        val targetR = (gAvg / avg[rPhase]).toFloat().coerceIn(0.5f, 8f)
-        val targetB = (gAvg / avg[bPhase]).toFloat().coerceIn(0.5f, 8f)
-
         val a = 0.4f
-        previewRenderer.wbGainR = previewRenderer.wbGainR + a * (targetR - previewRenderer.wbGainR)
-        previewRenderer.wbGainB = previewRenderer.wbGainB + a * (targetB - previewRenderer.wbGainB)
+        for (p in 0 until GreyWorldEstimate.PHASE_COUNT) {
+            smoothedPhaseGains[p] += a * (target[p] - smoothedPhaseGains[p])
+        }
+        // A fresh array per frame: the render thread reads it while this thread
+        // keeps smoothing into the working copy above.
+        previewRenderer.wbPhaseGains = smoothedPhaseGains.copyOf()
+        estimatorReady = true
+
+        // The renderer splits this per phase on its own: the two green sites
+        // before the demosaic merges them, red and blue after.
+        val colorGains = GreyWorldEstimate.colorGains(smoothedPhaseGains, colorMap)
+        previewRenderer.wbGainR = colorGains[0]
+        previewRenderer.wbGainG = colorGains[1]
+        previewRenderer.wbGainB = colorGains[2]
 
         // Feed the smoothed grey-world result as a sensor-space neutral
         // (the inverse of the gains) for the profile-derived matrix path.
         val prevNeutral = estimatorNeutral ?: floatArrayOf(1f, 1f, 1f)
         estimatorNeutral = floatArrayOf(
-            prevNeutral[0] + a * (1f / targetR - prevNeutral[0]),
+            prevNeutral[0] + a * (1f / colorGains[0] - prevNeutral[0]),
             1f,
-            prevNeutral[2] + a * (1f / targetB - prevNeutral[2])
+            prevNeutral[2] + a * (1f / colorGains[2] - prevNeutral[2])
         )
 
         if (logNow) {
+            val greens = GreyWorldEstimate.greenPhases(colorMap)
             CrashLogger.log(
                 TAG, "wb estimate: frame=$wbEstimateFrame " +
-                    "rAvg=${String.format("%.1f", avg[rPhase])} gAvg=${String.format("%.1f", gAvg)} " +
-                    "bAvg=${String.format("%.1f", avg[bPhase])} " +
-                    "gains=${String.format("%.2f", previewRenderer.wbGainR)}," +
-                    "${String.format("%.2f", previewRenderer.wbGainG)}," +
-                    "${String.format("%.2f", previewRenderer.wbGainB)}" +
+                        "cells=${scan.cellsUsed} clipped=${scan.cellsClipped} " +
+                        "means=[${phaseMeans.joinToString { String.format("%.1f", it) }}] " +
+                        "phaseGains=[${smoothedPhaseGains.joinToString { String.format("%.3f", it) }}] " +
+                    "greenSites=[${greens[0]},${greens[1]}] " +
+                    "colorGains=[${String.format("%.2f", colorGains[0])}," +
+                    "${String.format("%.2f", colorGains[1])}," +
+                    "${String.format("%.2f", colorGains[2])}] " +
                     "neutral=[${estimatorNeutral?.joinToString { String.format("%.3f", it) } ?: "null"}]"
             )
         }
