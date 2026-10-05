@@ -93,9 +93,11 @@ class WhiteBalanceMathTest {
 
     @Test
     fun kelvinToXy_defaultD65() {
-        val (x, y) = WhiteBalanceMath.kelvinToXy(6300f, -14f)
-        assertEquals("default x near D65", 0.3127f, x, 0.003f)
-        assertEquals("default y near D65", 0.3290f, y, 0.003f)
+        // The default Kelvin/Tint pair must resolve to D65 itself so that the
+        // Bradford CAT applied in Kelvin mode is the identity.
+        val (x, y) = WhiteBalanceMath.kelvinToXy(6504f, 9.6f)
+        assertEquals("default x near D65", 0.3127f, x, 0.001f)
+        assertEquals("default y near D65", 0.3290f, y, 0.001f)
         val cat = WhiteBalanceMath.chromaticAdaptationBradford(
             Pair(x, y), Pair(ColorMatrix.D65_X, ColorMatrix.D65_Y)
         )
@@ -104,17 +106,54 @@ class WhiteBalanceMathTest {
     }
 
     @Test
+    fun kelvinToXy_positiveTintMovesTowardGreen() {
+        // Duv = tint / 3000, and positive Duv is the green side of the locus.
+        var prev = WhiteBalanceMath.kelvinToXy(6504f, -60f).second
+        for (tint in -40..60 step 10) {
+            val cur = WhiteBalanceMath.kelvinToXy(6504f, tint.toFloat()).second
+            assertTrue("y should increase with tint (tint=$tint: $cur <= $prev)", cur > prev)
+            prev = cur
+        }
+    }
+
+    @Test
+    fun kelvinToXy_tintIsPerpendicularToLocus() {
+        // The Duv offset is applied along the locus normal, so shifting tint at a
+        // fixed CCT must not move the point along the locus. The CCT read back
+        // from the locus is unchanged, hence the locus normal component dominates
+        // the motion: comparing symmetric tint swings, the two results must sit on
+        // opposite sides of the locus point in v while x moves toward the locus.
+        val locus = WhiteBalanceMath.kelvinToXy(6504f, 0f)
+        val green = WhiteBalanceMath.kelvinToXy(6504f, 12f)
+        val magenta = WhiteBalanceMath.kelvinToXy(6504f, -12f)
+        assertTrue("green side raises y", green.second > locus.second)
+        assertTrue("magenta side lowers y", magenta.second < locus.second)
+        // The normal direction is stable, so the midpoint of a symmetric swing
+        // returns to the locus point rather than drifting along it.
+        val midX = (green.first + magenta.first) / 2f
+        val midY = (green.second + magenta.second) / 2f
+        assertEquals("midpoint x", locus.first, midX, 0.0005f)
+        assertEquals("midpoint y", locus.second, midY, 0.0005f)
+    }
+
+    @Test
     fun kelvinToXy_planckianAnchors() {
+        // CIE Planckian locus reference chromaticities (CIE 018:2019 table).
         val illuminantA = WhiteBalanceMath.kelvinToXy(2856f)
-        assertEquals("Illuminant A x", 0.4476f, illuminantA.first, 0.01f)
-        assertEquals("Illuminant A y", 0.4074f, illuminantA.second, 0.01f)
+        assertEquals("Illuminant A x", 0.4476f, illuminantA.first, 0.002f)
+        assertEquals("Illuminant A y", 0.4074f, illuminantA.second, 0.002f)
 
         val sixFive = WhiteBalanceMath.kelvinToXy(6500f)
-        assertEquals("6500K x", 0.3135f, sixFive.first, 0.01f)
-        assertEquals("6500K y", 0.3236f, sixFive.second, 0.01f)
+        assertEquals("6500K x", 0.3135f, sixFive.first, 0.002f)
+        assertEquals("6500K y", 0.3236f, sixFive.second, 0.002f)
 
         val twoK = WhiteBalanceMath.kelvinToXy(2000f)
-        assertEquals("2000K x", 0.5267f, twoK.first, 0.01f)
+        assertEquals("2000K x", 0.5267f, twoK.first, 0.002f)
+        assertEquals("2000K y", 0.4133f, twoK.second, 0.002f)
+
+        val tenK = WhiteBalanceMath.kelvinToXy(10000f)
+        assertEquals("10000K x", 0.2807f, tenK.first, 0.002f)
+        assertEquals("10000K y", 0.2884f, tenK.second, 0.002f)
     }
 
     @Test

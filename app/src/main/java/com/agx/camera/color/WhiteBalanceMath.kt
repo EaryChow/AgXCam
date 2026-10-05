@@ -55,14 +55,50 @@ object WhiteBalanceMath {
     private const val CIE_CMF_STEP_NM = 5.0
     private const val PLANCK_C2_KELVIN_METERS = 1.438776877e-2
 
-    fun kelvinToXy(kelvin: Float, tint: Float = 0f): Pair<Float, Float> {
-        val k = kelvin.coerceIn(2000f, 10000f).toDouble()
-        val (x, y) = planckianLocusXy(k)
+    private fun xyToUv(x: Double, y: Double): Pair<Double, Double> {
+        val d = -2.0 * x + 12.0 * y + 3.0
+        if (d <= 0.0) return Pair(0.0, 0.0)
+        return Pair(4.0 * x / d, 6.0 * y / d)
+    }
 
-        val t = tint / 1000.0f
-        val xShift = x.toFloat() + t * 0.3f
-        val yShift = (y.toFloat() - t * 0.15f).coerceIn(0f, 1f)
-        return Pair(xShift, yShift)
+    private fun uvToXy(u: Double, v: Double): Pair<Double, Double> {
+        val d = 2.0 * u - 8.0 * v + 4.0
+        if (Math.abs(d) < 1e-12) return Pair(ColorMatrix.D65_X.toDouble(), ColorMatrix.D65_Y.toDouble())
+        val x = 3.0 * u / d
+        val y = 2.0 * v / d
+        return Pair(x, y)
+    }
+
+    // Unit vector normal to the Planckian locus in CIE 1960 uv, oriented so that
+    // positive Duv points to the green side of the locus, where D65 lies.
+    private fun planckianLocusNormal(tempK: Double): Pair<Double, Double> {
+        val dt = max(0.5, tempK * 1.0e-4)
+        val lo = planckianLocusUv(tempK - dt)
+        val hi = planckianLocusUv(tempK + dt)
+        val du = hi.first - lo.first
+        val dv = hi.second - lo.second
+        val len = sqrt(du * du + dv * dv)
+        if (len < 1.0e-12) return Pair(0.0, 1.0)
+        val nu = -dv / len
+        val nv = du / len
+        return if (nv >= 0.0) Pair(nu, nv) else Pair(-nu, -nv)
+    }
+
+    private fun planckianLocusUv(tempK: Double): Pair<Double, Double> {
+        val (x, y) = planckianLocusXy(tempK)
+        return xyToUv(x, y)
+    }
+
+    // kelvin picks the CCT on the Planckian locus, tint is an Adobe style
+    // green/magenta control with tint = 3000 * Duv, so a positive tint walks away
+    // from the locus toward green.
+    fun kelvinToXy(kelvin: Float, tint: Float = 0f): Pair<Float, Float> {
+        val k = kelvin.coerceIn(1667f, 25000f).toDouble()
+        val (u, v) = planckianLocusUv(k)
+        val duv = tint / 3000.0
+        val (nu, nv) = planckianLocusNormal(k)
+        val (xShift, yShift) = uvToXy(u + nu * duv, v + nv * duv)
+        return Pair(xShift.toFloat().coerceIn(0f, 1f), yShift.toFloat().coerceIn(0f, 1f))
     }
 
     // Planck's law (2*h*c^2 factor dropped; only relative SPD matters):

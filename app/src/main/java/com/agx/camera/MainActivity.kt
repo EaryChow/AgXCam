@@ -1021,6 +1021,12 @@ class MainActivity : AppCompatActivity() {
     private var lastClickTime = 0L
     private var clickCount = 0
 
+    private fun kelvinSliderIndex(kelvin: Float): Int =
+        KelvinState.kelvinToSliderIndex(kelvin).coerceIn(0, kelvinSlider.max)
+
+    private fun tintSliderIndex(tint: Float): Int =
+        KelvinState.tintToSliderIndex(tint).coerceIn(0, tintSlider.max)
+
     private fun setupSettingsPanel() {
         // Double-click reset helper
         fun setupDoubleClickReset(label: TextView, resetAction: () -> Unit) {
@@ -1433,32 +1439,34 @@ class MainActivity : AppCompatActivity() {
         }
 
         kelvinSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
-            kelvinState = kelvinState.copy(kelvin = 2000f + v * 100f)
+            kelvinState = kelvinState.copy(
+                kelvin = KelvinState.sliderIndexToKelvin(v)
+            )
             kelvinLabel.text = String.format("Kelvin  %.0fK", kelvinState.kelvin)
             if (currentWbMode == WhiteBalanceMode.KELVIN) {
                 uploadAgxUniforms()
                 persistWbMode()
             }
         })
-        setupSliderDoubleClickReset(kelvinSlider, 43) {
-            kelvinState = kelvinState.copy(kelvin = 6300f)
-            kelvinLabel.text = "Kelvin  6300K"
+        setupSliderDoubleClickReset(kelvinSlider, kelvinSliderIndex(DEFAULT_WB_KELVIN)) {
+            kelvinState = kelvinState.copy(kelvin = DEFAULT_WB_KELVIN)
+            kelvinLabel.text = String.format("Kelvin  %.0fK", kelvinState.kelvin)
             if (currentWbMode == WhiteBalanceMode.KELVIN) {
                 uploadAgxUniforms()
                 persistWbMode()
             }
         }
         tintSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
-            kelvinState = kelvinState.copy(tint = (v - 100).toFloat())
+            kelvinState = kelvinState.copy(tint = KelvinState.sliderIndexToTint(v))
             tintLabel.text = String.format("Tint  %.0f", kelvinState.tint)
             if (currentWbMode == WhiteBalanceMode.KELVIN) {
                 uploadAgxUniforms()
                 persistWbMode()
             }
         })
-        setupSliderDoubleClickReset(tintSlider, 86) {
-            kelvinState = kelvinState.copy(tint = -14f)
-            tintLabel.text = "Tint  -14"
+        setupSliderDoubleClickReset(tintSlider, tintSliderIndex(DEFAULT_WB_TINT)) {
+            kelvinState = kelvinState.copy(tint = DEFAULT_WB_TINT)
+            tintLabel.text = String.format("Tint  %.0f", kelvinState.tint)
             if (currentWbMode == WhiteBalanceMode.KELVIN) {
                 uploadAgxUniforms()
                 persistWbMode()
@@ -1671,9 +1679,9 @@ class MainActivity : AppCompatActivity() {
         clipAttenSlider.progress = (clipAttenFactor * 100).toInt().coerceIn(0, 100)
         clipAttenLabel.text = String.format("Neutralize  %.2f", clipAttenFactor)
 
-        kelvinSlider.progress = ((kelvinState.kelvin - 2000f) / 100f).toInt().coerceIn(0, 80)
+        kelvinSlider.progress = kelvinSliderIndex(kelvinState.kelvin)
         kelvinLabel.text = String.format("Kelvin  %.0fK", kelvinState.kelvin)
-        tintSlider.progress = (kelvinState.tint + 100).toInt().coerceIn(0, 200)
+        tintSlider.progress = tintSliderIndex(kelvinState.tint)
         tintLabel.text = String.format("Tint  %.0f", kelvinState.tint)
 
         jpegSlider.progress = photoOutput.jpegQuality
@@ -2958,8 +2966,8 @@ val neutral: FloatArray? = if (gainsOk) {
     private fun resetRawMetadata() {
         previewRenderer.bayerColorMap = intArrayOf(0, 1, 1, 2)
         previewRenderer.bayerBlackLevelPattern = intArrayOf(64, 64, 64, 64)
-        previewRenderer.agxWhiteLevel = 1023f
-        previewRenderer.agxBlackLevel = 64f
+        previewRenderer.agxWhiteLevel = rawWhiteLevel.toFloat()
+        previewRenderer.agxBlackLevel = rawBlackLevel
         previewRenderer.wbGainR = 1f
         previewRenderer.wbGainG = 1f
         previewRenderer.wbGainB = 1f
@@ -3606,19 +3614,24 @@ val neutral: FloatArray? = if (gainsOk) {
                 // (see Camera2Manager.applyAwb), and the raw path mirrors the
                 // HAL's WB gains, so input is already balanced exactly like the
                 // preset. Here we only apply the relative chromatic adaptation
-                // (user illuminant -> D65); the default 6300K/-14 is chosen so
+                // (user illuminant -> D65); the default 6504K/9.6 is chosen so
                 // userXY == D65, making this matrix identity - which must
                 // therefore not change the Sun/DAYLIGHT visual.
-                val bradford = WhiteBalanceMath.chromaticAdaptationBradford(userXY, d65xy)
-                val m = bradford.m
+                val cat = WhiteBalanceMath.chromaticAdaptationBradford(userXY, d65xy)
+                // Bradford is XYZ-domain; convert to linear Rec709 domain for shader
+                val m = ColorMatrix.multiply(
+                    ColorMatrix.multiply(ColorMatrix.xyzToRGB(ColorMatrix.REC709), cat),
+                    ColorMatrix.rgbToXYZ(ColorMatrix.REC709)
+                )
+                val mm = m.m
                 CrashLogger.log(TAG, "uploadAgxUniforms KELVIN: kelvin=${kelvinState.kelvin} tint=${kelvinState.tint} " +
                     "userXY=(${String.format("%.6f", userXY.first)}, ${String.format("%.6f", userXY.second)}) " +
                     "d65XY=(${String.format("%.6f", d65xy.first)}, ${String.format("%.6f", d65xy.second)}) " +
-                    "bradford=[${String.format("%.6f", m[0])},${String.format("%.6f", m[1])},${String.format("%.6f", m[2])}, " +
-                    "${String.format("%.6f", m[3])},${String.format("%.6f", m[4])},${String.format("%.6f", m[5])}, " +
-                    "${String.format("%.6f", m[6])},${String.format("%.6f", m[7])},${String.format("%.6f", m[8])}] " +
+                    "m=[${String.format("%.6f", mm[0])},${String.format("%.6f", mm[1])},${String.format("%.6f", mm[2])}, " +
+                    "${String.format("%.6f", mm[3])},${String.format("%.6f", mm[4])},${String.format("%.6f", mm[5])}, " +
+                    "${String.format("%.6f", mm[6])},${String.format("%.6f", mm[7])},${String.format("%.6f", mm[8])}] " +
                     "awbMode=$currentWbMode")
-                bradford
+                m
             }
             WhiteBalanceMode.DAYLIGHT -> ColorMatrix.identity()
             WhiteBalanceMode.CLOUDY -> ColorMatrix.identity()
@@ -3629,7 +3642,7 @@ val neutral: FloatArray? = if (gainsOk) {
         }
 
         val insetParams = agxParams.toInsetParams()
-        val agx = AgxPrecomputer.compute(insetParams, sceneLinearTo709, whiteLevel = 1023f, blackLevel = 64f, middleGrayPercent = agxParams.middleGray)
+        val agx = AgxPrecomputer.compute(insetParams, sceneLinearTo709, whiteLevel = rawWhiteLevel.toFloat(), blackLevel = rawBlackLevel, middleGrayPercent = agxParams.middleGray)
 
         previewRenderer.agxSceneLinearTo709 = agx.sceneLinearTo709
         previewRenderer.agxInsetMat = agx.insetMat
@@ -4830,6 +4843,8 @@ override fun onResume() {
 
     companion object {
         private const val TAG = "MainActivity"
+        const val DEFAULT_WB_KELVIN = KelvinState.DEFAULT_KELVIN
+        const val DEFAULT_WB_TINT = KelvinState.DEFAULT_TINT
         // Rec.709 Y row of RGB->XYZ(D65); fallback camera-native luminance
         // coefficients when no native->XYZ map is available.
         private val DEFAULT_LUMA_COEFFS = floatArrayOf(0.2126f, 0.7152f, 0.0722f)
