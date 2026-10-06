@@ -89,8 +89,23 @@ class MainActivity : AppCompatActivity() {
     private var limitedAutoWb = false
     @Volatile
     private var smoothedAdaptation = 1f
+    // The estimator's latest product, stored for the dispatch to write
+    // into the renderer when (and only when) the estimator owns the
+    // render. Gains are sticky across estimator steps.
+    private var lastEstimatorColorGains = floatArrayOf(1f, 1f, 1f)
+    private var lastEstimatorPhaseGains: FloatArray? = null
+    // Sticky latch: the limited path has acquired its reference and
+    // drives the render until the session resets. Gate distance ring
+    // for the min-of-N outlier rejection.
     @Volatile
-    private var lastSceneGreenLevel = -1f
+    private var limitedHasReference = false
+    // The floored Planckian assertion target, refreshed on estimator
+    // steps and held between them so the per-frame transform rebuild
+    // sees a stable target.
+    @Volatile
+    private var limitedTargetXy: FloatArray? = null
+    private val limitedDistWindow = DoubleArray(3) { 1.0 }
+    private var limitedDistIndex = 0
     @Volatile
     private var aeConvergedOnce = false
     private var photoOutput = PhotoOutputSettings()
@@ -2721,7 +2736,6 @@ class MainActivity : AppCompatActivity() {
             // Once the estimator has an answer it keeps the gains until the lens
             // changes; it only steps every 15th frame, so the gains outlive the
             // call that produced them.
-            val estimatorOwnsGains = currentWbMode == WhiteBalanceMode.AUTO && estimatorReady
 
             // The one thing every mode shares: gains that take a neutral object to level
             // codes, and a matrix built from that same neutral to put the level
@@ -2798,28 +2812,42 @@ class MainActivity : AppCompatActivity() {
                 else -> currentWbMode.sceneXy()
             }
 
+            // Limited AWB takes the render over from the estimator: it drives
+            // the exact KELVIN-at-4000K reference (below), so the estimator's
+            // own gains must not also be applied - they would route the clip
+            // neutralization differently and the result would drift off the
+            // reference (the render is only folded-equal to the matrix when
+            // the gains match the transform's neutral exactly). The drive is
+            // sticky from the first valid estimate: a momentarily missing
+            // chromaticity must not flip the renderer back to the estimator's
+            // state for a frame, which reads as a flicker.
+            val limitedDrivesRender = limitedAutoWb &&
+                currentWbMode == WhiteBalanceMode.AUTO &&
+                rawColorProfile != null && limitedHasReference
+            val estimatorOwnsGains = currentWbMode == WhiteBalanceMode.AUTO &&
+                estimatorReady && !limitedDrivesRender
+
             // Limited auto white balance: gate the scene->D65 correction by the
             // degree of adaptation the estimated light earns. Highly chromatic
             // light (party LEDs) sits far off the Planckian locus and earns
             // zero, so the scene keeps its light untouched; near-locus light
-            // partially adapts. Presets and the plain mode keep full correction.
+            // fully adapts to the 4000 K reference. Presets and the plain mode
+            // keep full correction.
             val adaptation: Float = when {
                 !limitedAutoWb -> 1f
                 currentWbMode != WhiteBalanceMode.AUTO -> 1f
-                sceneXy == null -> 1f
+                // A momentarily unresolvable chromaticity holds the last
+                // degree of adaptation rather than jumping to full: in a
+                // chromatic-LED scene this branch is the only thing
+                // standing between the light and full adaptation.
+                sceneXy == null -> smoothedAdaptation
                 // The locus scan and the low-pass only run on estimator steps:
                 // the estimate, and the degree of adaptation derived from it,
                 // cannot change faster than the estimator updates.
                 !estimatorStep -> smoothedAdaptation
-                else -> {
-                    // First trusted estimate: adopt its degree of adaptation
-                    // exactly, like the illuminant snap; the EMA tracks from
-                    // there.
-                    if (awbSmoother.consumeSnapAdaptation()) {
-                        smoothedAdaptation = limitedAdaptationTarget(sceneXy)
-                    }
-                    smoothedLimitedAdaptation(sceneXy)
-                }
+                else -> smoothedLimitedAdaptation(
+                    sceneXy, awbSmoother.consumeSnapAdaptation()
+                )
             }
 
             // The white balance is ours, so the matrix is the WB-removed one and the
@@ -2827,7 +2855,17 @@ class MainActivity : AppCompatActivity() {
             // cannot be resolved is a miss, not a reason to invent a temperature:
             // the profile's own solve is tried instead.
             val profileTransform = if (sceneXy != null) {
-                rawColorProfile?.neutralTransformForSceneXy(neutral, sceneXy, adaptation)
+                // Limited AWB drives an exact preset render through the
+                // KELVIN-parity path: the daylight anchor as the neutral,
+                // the limited target (KELVIN ADAPT_TARGET_K for warm scenes, exact
+                // D65 - the daylight render - for cool ones), and the
+                // gated adaptation. At 0 (the chromatic gate) the blend
+                // lands on D65 either way.
+                val transformNeutral =
+                    if (limitedDrivesRender) rawColorProfile?.daylightWhite() ?: neutral else neutral
+                val effectiveXy =
+                    if (limitedDrivesRender) limitedTargetXy ?: sceneXy else sceneXy
+                rawColorProfile?.neutralTransformForSceneXy(transformNeutral, effectiveXy, adaptation)
             } else {
                 rawColorProfile?.neutralTransformForNeutral(neutral)
             }
@@ -2864,7 +2902,8 @@ class MainActivity : AppCompatActivity() {
                                 "neutral=[${neutral.joinToString { String.format("%.3f", it) }}] " +
                                 "wb=[${previewRenderer.wbGainR}, ${previewRenderer.wbGainG}, " +
                                 "${previewRenderer.wbGainB}] " +
-                                "mat=[${profileTransform.colorMatrix.m.joinToString { String.format("%.4f", it) }}]"
+                                "mat=[${profileTransform.colorMatrix.m.joinToString { String.format("%.4f", it) }}]" +
+                        (if (limitedAutoWb && currentWbMode == WhiteBalanceMode.AUTO) " adapt=$adaptation" else "")
                         )
                     }
                 } else if (gainsOk) {
@@ -2891,7 +2930,15 @@ class MainActivity : AppCompatActivity() {
                 }
                 // The per-phase solution belongs to the estimator alone.
                 previewRenderer.wbPhaseGains = null
-            } else if (wbEstimateFrame % 60 == 0) {
+            } else {
+                // The estimator owns the render: its latest stored result
+                // drives the renderer, written here so the dispatch is
+                // the single writer of the WB state.
+                previewRenderer.wbPhaseGains = lastEstimatorPhaseGains
+                previewRenderer.wbGainR = lastEstimatorColorGains[0]
+                previewRenderer.wbGainG = lastEstimatorColorGains[1]
+                previewRenderer.wbGainB = lastEstimatorColorGains[2]
+                if (wbEstimateFrame % 60 == 0) {
                 // The estimator wrote them; log which source owns the gains, so a
                 // capture can be traced back to one or the other.
                 CrashLogger.log(
@@ -2901,7 +2948,13 @@ class MainActivity : AppCompatActivity() {
                         "phase=[${previewRenderer.wbPhaseGains?.joinToString { String.format("%.3f", it) }}]" +
                         (if (currentWbMode == WhiteBalanceMode.AUTO) " adapt=$adaptation" else "")
                 )
+                }
             }
+            // Flicker forensics: in a static scene the renderer's white
+            // balance inputs must be identical frame to frame. Log any
+            // change above threshold so a captured flicker can be traced
+            // to the field that moved.
+            logRenderDrift()
             previewRenderer.setBayerFrame(dest, rawW, rawH, rawW)
         }
 
@@ -3074,6 +3127,11 @@ class MainActivity : AppCompatActivity() {
             // is trusted yet, and stale smoothing state must not cross lenses.
             awbSmoother.reset()
             aeConvergedOnce = false
+            smoothedAdaptation = 1f
+            limitedHasReference = false
+            limitedTargetXy = null
+            for (i in limitedDistWindow.indices) limitedDistWindow[i] = 1.0
+            limitedDistIndex = 0
             rawColorProfile = profile
             // The daylight gain is a sensor property, so it is resolved once per lens
             // here rather than per frame. AUTO's estimator takes it off the raw
@@ -3212,8 +3270,11 @@ class MainActivity : AppCompatActivity() {
             daylightAnchorPersisted = false
             mainHandler.post { updateDaylightAnchorUI() }
         }
-        lastSceneGreenLevel = -1f
         smoothedAdaptation = 1f
+        limitedHasReference = false
+        limitedTargetXy = null
+        for (i in limitedDistWindow.indices) limitedDistWindow[i] = 1.0
+        limitedDistIndex = 0
         aeConvergedOnce = false
     }
 
@@ -3296,11 +3357,6 @@ class MainActivity : AppCompatActivity() {
             cellStride, rawWhiteLevel
         )
         val phaseMeans = scan.means
-        // Scene luminance proxy for the limited auto white balance: the green
-        // level normalized to the sensor white, mapped to an adapting
-        // luminance estimate by a tunable gain.
-        lastSceneGreenLevel =
-            ((phaseMeans[1] + phaseMeans[2]) * 0.5f / rawWhiteLevel.coerceAtLeast(1)).toFloat()
         // The sensor's daylight response comes off before the estimate, so what
         // the estimator reports is the light's departure from D65 rather than the
         // CFA's own green bias, which every D65 scene shares. Without a profile
@@ -3334,15 +3390,17 @@ class MainActivity : AppCompatActivity() {
         // frame rather than carried as state: combine returns a fresh array, so
         // this thread can go on smoothing while the render thread holds this one.
         val phaseGains = GreyWorldEstimate.combine(awbSmoother.gains, estimate.daylight)
-        previewRenderer.wbPhaseGains = phaseGains
         estimatorReady = true
 
-        // The renderer splits this per phase on its own: the two green sites
-        // before the demosaic merges them, red and blue after.
+        // The renderer splits this per phase on its own: the two green
+        // sites before the demosaic merges them, red and blue after.
+        // Stored, not written to the renderer: the dispatch is the
+        // single writer of the renderer's WB state, so no write
+        // ordering can expose a mismatched gains+matrix pair for a
+        // frame.
         val colorGains = GreyWorldEstimate.colorGains(phaseGains, colorMap)
-        previewRenderer.wbGainR = colorGains[0]
-        previewRenderer.wbGainG = colorGains[1]
-        previewRenderer.wbGainB = colorGains[2]
+        lastEstimatorPhaseGains = phaseGains
+        lastEstimatorColorGains = colorGains
 
         // The sensor response to a neutral object under the estimated illuminant, which
         // is what the profile path needs. AUTO measures the illuminant's chromaticity
@@ -3735,6 +3793,47 @@ class MainActivity : AppCompatActivity() {
             TAG, "daylightAnchor: bootstrap done state=${daylightAnchorEstimator.state} " +
                 "frames=$daylightBootstrapFrames"
         )
+    }
+
+    // Frame-to-frame render-state forensics (see the call in the render loop).
+    private var driftPrevWbR = Float.NaN
+    private var driftPrevWbB = Float.NaN
+    private var driftPrevAdapt = Float.NaN
+    private var driftPrevMat: FloatArray? = null
+    private var driftPrevTarget: FloatArray? = null
+
+    private fun moved(a: Float, b: Float): Boolean =
+        a.isNaN() || b.isNaN() || kotlin.math.abs(a - b) > 0.005f
+
+    private fun movedArr(a: FloatArray?, b: FloatArray?): Boolean {
+        if (a == null || b == null) return a !== b
+        if (a.size != b.size) return true
+        for (i in a.indices) if (kotlin.math.abs(a[i] - b[i]) > 0.005f) return true
+        return false
+    }
+
+    private fun logRenderDrift() {
+        val mat = previewRenderer.ccMatrix
+        val tgt = limitedTargetXy
+        val drift = moved(driftPrevWbR, previewRenderer.wbGainR) ||
+            moved(driftPrevWbB, previewRenderer.wbGainB) ||
+            moved(driftPrevAdapt, smoothedAdaptation) ||
+            movedArr(driftPrevMat, mat) ||
+            movedArr(driftPrevTarget, tgt)
+        if (drift) {
+            CrashLogger.log(
+                TAG, "render drift: frame=$wbEstimateFrame " +
+                    "wb=[${previewRenderer.wbGainR}, ${previewRenderer.wbGainB}] " +
+                    "adapt=$smoothedAdaptation " +
+                    "target=[${tgt?.joinToString { String.format("%.4f", it) }}] " +
+                    "mat=[${mat?.joinToString { String.format("%.4f", it) }}]"
+            )
+        }
+        driftPrevWbR = previewRenderer.wbGainR
+        driftPrevWbB = previewRenderer.wbGainB
+        driftPrevAdapt = smoothedAdaptation
+        driftPrevMat = mat?.copyOf()
+        driftPrevTarget = tgt?.copyOf()
     }
 
     // Feeds the anchor sampler from the per-frame HAL readback. Only converged
@@ -4147,23 +4246,34 @@ class MainActivity : AppCompatActivity() {
         return floatArrayOf(x, y)
     }
 
-    // Raw degree of adaptation for a scene chromaticity, from the current
-    // estimate and scene luminance proxy.
-    private fun limitedAdaptationTarget(sceneXy: FloatArray): Float {
-        val (distanceUv, nearestCct) = WhiteBalanceMath.locusDistanceUv(sceneXy[0], sceneXy[1])
-        val la = if (lastSceneGreenLevel > 0f) {
-            lastSceneGreenLevel.toDouble() * LIMITED_WB_LA_GAIN
-        } else {
-            200.0
-        }
-        return WhiteBalanceMath.limitedAdaptation(la, nearestCct, distanceUv)
-    }
-
     // Degree of adaptation for the limited auto white balance, low-passed so
     // the correction eases in and out over about a second and a half instead
     // of stepping with each estimator update.
-    private fun smoothedLimitedAdaptation(sceneXy: FloatArray): Float {
-        smoothedAdaptation += LIMITED_WB_SMOOTHING * (limitedAdaptationTarget(sceneXy) - smoothedAdaptation)
+    private fun smoothedLimitedAdaptation(sceneXy: FloatArray, snap: Boolean = false): Float {
+        limitedHasReference = true
+        val (distanceUv, nearestCct) = WhiteBalanceMath.locusDistanceUv(sceneXy[0], sceneXy[1])
+        // The gate distance is the minimum of the last few estimator
+        // steps: a single noisy frame (clipped cells shifting the
+        // estimate) must not dip the adaptation, while a genuinely
+        // chromatic light stays far from the locus on every step and
+        // still gates within a step or two of arriving.
+        limitedDistWindow[limitedDistIndex] = distanceUv
+        limitedDistIndex = (limitedDistIndex + 1) % limitedDistWindow.size
+        val gateDist = limitedDistWindow.minOrNull() ?: distanceUv
+        val target = WhiteBalanceMath.limitedAdaptation(gateDist)
+        // The assertion target follows the estimate's nearest-locus CCT
+        // through WhiteBalanceMath.limitedBlendTargetXy: floored at
+        // ADAPT_TARGET_K for warm scenes, gliding up the locus and easing
+        // onto exact D65 near 6504 K, so walking between rooms never snaps.
+        val (tx, ty) = WhiteBalanceMath.limitedBlendTargetXy(nearestCct)
+        limitedTargetXy = floatArrayOf(tx, ty)
+        smoothedAdaptation = if (snap) {
+            // First trusted estimate: adopt it exactly, like the
+            // illuminant snap; the EMA tracks from there.
+            target
+        } else {
+            smoothedAdaptation + LIMITED_WB_SMOOTHING * (target - smoothedAdaptation)
+        }
         return smoothedAdaptation.coerceIn(0f, 1f)
     }
 
@@ -5403,8 +5513,6 @@ override fun onResume() {
         // Limited auto white balance: gate the scene->D65 correction by how
         // much adaptation the estimated light earns (chromatic LEDs earn none).
         private const val PREF_LIMITED_WB = "limited_auto_wb"
-        // Normalized scene luminance -> adapting luminance estimate in cd/m2.
-        private const val LIMITED_WB_LA_GAIN = 1000.0
         // Low-pass on the degree of adaptation: ~1.5 s at the estimator's
         // ~0.5 s update cadence.
         private const val LIMITED_WB_SMOOTHING = 0.28f

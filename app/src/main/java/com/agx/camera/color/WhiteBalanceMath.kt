@@ -123,35 +123,17 @@ object WhiteBalanceMath {
         return Pair(best, bestCct)
     }
 
-    // Degree of partial adaptation for limited auto white balance, after
-    // Zhu, Ma, Liu, Wang and Song, "Modeling the adapted illumination color
-    // considering the degree of chromatic adaptation", Opt. Express 34(2),
-    // 1340 (2026): the luminance factor is the paper's Eq. (9),
-    // fL(La) = 1 - exp(-0.0038*La - 0.3471), capped at its 200 cd/m2 value so
-    // luminance can only un-throttle, never push past the chromatic anchors.
-    // The chromatic curve is piecewise-linear in ln(CCT) tuned generous:
-    // white-ish and warm light (the everyday household range) earns strong
-    // correction, because eyes fully accept those lights as white within
-    // seconds. The distance attenuation is a flat plateau out to DUV_PLATEAU,
-    // then a smoothstep decay into the seamless hard gate at T_chroma = 0.02
-    // in CIE 1960 uv, which still drops highly chromatic light (party LEDs)
-    // to exactly zero adaptation. 1 = full correction, 0 = none.
-    fun limitedAdaptation(la: Double, nearestLocusCct: Double, distanceUv: Double): Float {
+    // Degree of partial adaptation for limited auto white balance: on-locus
+    // light is white-ish and earns FULL adaptation to the measured
+    // illuminant - partial adaptation of a warm scene passes through a
+    // yellow phase on the way from its orange cast to white, so there is no
+    // "a little adapted" endpoint that keeps the cast's hue. The only
+    // attenuation is distance-based: a flat plateau out to DUV_PLATEAU, then
+    // a smoothstep decay into the seamless hard gate at T_chroma = 0.02 in
+    // CIE 1960 uv, which drops highly chromatic light (party LEDs) to
+    // exactly zero adaptation. 1 = full correction, 0 = none.
+    fun limitedAdaptation(distanceUv: Double): Float {
         if (distanceUv >= T_CHROMA) return 0f
-        val laC = la.coerceIn(50.0, 1000.0)
-        val fL = 1.0 - kotlin.math.exp(-0.0038 * laC - 0.3471)
-        val fL200 = 1.0 - kotlin.math.exp(-0.0038 * 200.0 - 0.3471)
-        val lum = (fL / fL200).coerceAtMost(1.0)
-        val x = kotlin.math.ln(nearestLocusCct.coerceIn(1667.0, 12000.0))
-        var g = ADAPTATION_KNOTS.last().second
-        for (i in 0 until ADAPTATION_KNOTS.size - 1) {
-            val (x0, y0) = ADAPTATION_KNOTS[i]
-            val (x1, y1) = ADAPTATION_KNOTS[i + 1]
-            if (x <= x1) {
-                g = y0 + (x - x0) / (x1 - x0) * (y1 - y0)
-                break
-            }
-        }
         val duv = if (distanceUv <= DUV_PLATEAU) {
             1.0
         } else {
@@ -159,22 +141,32 @@ object WhiteBalanceMath {
                 .coerceIn(0.0, 1.0)
             1.0 - t * t * (3.0 - 2.0 * t)
         }
-        return (lum * g * duv).toFloat().coerceIn(0f, 1f)
+        return duv.toFloat().coerceIn(0f, 1f)
+    }
+
+    // The illuminant limited AWB asserts: the estimate's nearest Planckian
+    // point, floored at ADAPT_TARGET_K. Warm scenes adapt up to a 5000 K
+    // Kelvin assertion (the tuning reference: cool enough to read red-
+    // ish-neutral to the eye rather than green); scenes at or above the
+    // floor adapt to their own light, so a genuinely D65-lit scene is
+    // not pushed blue.
+    fun limitedBlendTargetXy(nearestLocusCct: Double): Pair<Float, Float> {
+        val k = nearestLocusCct.coerceAtLeast(ADAPT_TARGET_K)
+        val (lx, ly) = kelvinToXy(k.toFloat(), 0f)
+        // Ease onto exact D65 near 6504 K: the Planckian point is
+        // greener than D65 itself, and the daylight render (exact D65)
+        // is the correct one there. The blend keeps the target
+        // continuous across the whole range, so walking between rooms
+        // glides instead of snapping at any boundary.
+        val w = ((k - 5500.0) / (6504.0 - 5500.0)).coerceIn(0.0, 1.0)
+        val x = (lx + (ColorMatrix.D65_X.toDouble() - lx) * w).toFloat()
+        val y = (ly + (ColorMatrix.D65_Y.toDouble() - ly) * w).toFloat()
+        return x to y
     }
 
     private const val T_CHROMA = 0.02
     private const val DUV_PLATEAU = 0.008
-    private val ADAPTATION_KNOTS = arrayOf(
-        kotlin.math.ln(1667.0) to 0.05,
-        kotlin.math.ln(2500.0) to 0.22,
-        kotlin.math.ln(3000.0) to 0.45,
-        kotlin.math.ln(3500.0) to 0.75,
-        kotlin.math.ln(4000.0) to 0.97,
-        kotlin.math.ln(4700.0) to 1.0,
-        kotlin.math.ln(6504.0) to 1.0,
-        kotlin.math.ln(10000.0) to 0.95,
-        kotlin.math.ln(12000.0) to 0.90,
-    )
+    const val ADAPT_TARGET_K = 5000.0
 
     // Planck's law (2*h*c^2 factor dropped; only relative SPD matters):
     //   L(lambda, T) ~ lambda^-5 / (exp(c2 / (lambda * T)) - 1),  c2 = h*c/k = 1.438776877e-2 m K.

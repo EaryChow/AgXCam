@@ -175,45 +175,54 @@ class WhiteBalanceMathTest {
     @Test
     fun limitedAdaptation_chromaticLightEarnsNothing() {
         // The acceptance test of the feature: highly chromatic light is not
-        // adapted at all, at any luminance.
-        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(200.0, 6504.0, 0.05), 0f)
-        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(1000.0, 6504.0, 0.021), 0f)
-        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(200.0, 6504.0, 0.02), 0f)
+        // adapted at all.
+        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.05), 0f)
+        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.021), 0f)
+        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.02), 0f)
     }
 
     @Test
-    fun limitedAdaptation_anchors() {
-        // White-ish and warm household light earns strong correction; only
-        // genuinely warm light keeps a cast.
-        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(200.0, 6504.0, 0.0), 0.01f)
-        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(200.0, 5000.0, 0.0), 0.01f)
-        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(200.0, 4700.0, 0.0), 0.01f)
-        assertEquals(0.97f, WhiteBalanceMath.limitedAdaptation(200.0, 4000.0, 0.0), 0.02f)
-        assertEquals(0.45f, WhiteBalanceMath.limitedAdaptation(200.0, 3000.0, 0.0), 0.02f)
-        assertEquals(0.95f, WhiteBalanceMath.limitedAdaptation(200.0, 10000.0, 0.0), 0.02f)
-        val tungsten = WhiteBalanceMath.limitedAdaptation(200.0, 2856.0, 0.0)
-        assertTrue("tungsten keeps a warm cast ($tungsten)", tungsten in 0.35f..0.42f)
+    fun limitedAdaptation_fullInsideTheGate() {
+        // On-locus light earns full adaptation; the blend target's 4000 K
+        // floor, not this number, is what throttles warm scenes.
+        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(0.0), 0.01f)
+        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(0.008), 0.01f)
     }
 
     @Test
-    fun limitedAdaptation_smallDuvIsFree() {
-        // Ordinary white LEDs sit slightly off the locus (|Duv| ~0.003-0.008)
-        // and must not be throttled for it: the attenuation is a flat plateau
-        // out to DUV_PLATEAU.
-        val onLocus = WhiteBalanceMath.limitedAdaptation(200.0, 4700.0, 0.0)
-        val slightlyOff = WhiteBalanceMath.limitedAdaptation(200.0, 4700.0, 0.006)
-        assertEquals("plateau is free", onLocus, slightlyOff, 1e-6f)
+    fun limitedBlendTargetIsFlooredAtADAPT_TARGET_K() {
+        // Warm scenes assert the floor reference exactly (the tuning
+        // calibration); scenes at or above the floor keep their own
+        // Planckian point, so a D65-lit scene is not pushed blue.
+        val (lx, ly) = WhiteBalanceMath.limitedBlendTargetXy(2375.0)
+        val (k5x, k5y) = WhiteBalanceMath.kelvinToXy(WhiteBalanceMath.ADAPT_TARGET_K.toFloat(), 0f)
+        assertEquals("warm scene asserts the floor", k5x, lx, 1e-6f)
+        assertEquals("warm scene asserts the floor", k5y, ly, 1e-6f)
+        // Daylight scenes ease onto exact D65 (the daylight render):
+        // the Planckian 6504 K point is greener than D65 itself.
+        val (dx, dy) = WhiteBalanceMath.limitedBlendTargetXy(6504.0)
+        assertEquals("daylight scene asserts exact D65", ColorMatrix.D65_X, dx, 1e-6f)
+        assertEquals("daylight scene asserts exact D65", ColorMatrix.D65_Y, dy, 1e-6f)
+        // Continuity: no jump anywhere across the range. The bound sits
+        // above the Planckian locus's own slope near 5000 K (~0.0035 in
+        // xy per 100 K) but far below the 0.036 floor-to-D65 pop this
+        // glide replaced.
+        var prev = WhiteBalanceMath.limitedBlendTargetXy(2000.0)
+        var cct = 2100.0
+        while (cct <= 12000.0) {
+            val cur = WhiteBalanceMath.limitedBlendTargetXy(cct)
+            val d = kotlin.math.hypot(cur.first - prev.first, cur.second - prev.second)
+            assertTrue("target jump at ${cct.toInt()}K: $d", d < 0.006f)
+            prev = cur
+            cct += 100.0
+        }
     }
 
     @Test
-    fun limitedAdaptation_luminanceScaling() {
-        // Luminance can only un-throttle: dim scenes keep more of the cast,
-        // bright scenes are capped at the chromatic anchor, never beyond.
-        val dim = WhiteBalanceMath.limitedAdaptation(50.0, 2856.0, 0.0)
-        val mid = WhiteBalanceMath.limitedAdaptation(200.0, 2856.0, 0.0)
-        val bright = WhiteBalanceMath.limitedAdaptation(1000.0, 2856.0, 0.0)
-        assertTrue("dim $dim < mid $mid", dim < mid)
-        assertEquals("bright is capped at the anchor", mid, bright, 1e-6f)
+    fun limitedAdaptation_isLuminanceIndependent() {
+        // No luminance argument exists: dim-room throttling read as
+        // under-correction in practice.
+        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(0.0), 0f)
     }
 
     @Test
@@ -221,8 +230,18 @@ class WhiteBalanceMathTest {
         // Just inside the gate the quadratic window has already taken the
         // adaptation to nearly nothing, so the hard drop to zero at T_chroma
         // is a rounding, not a step.
-        val justInside = WhiteBalanceMath.limitedAdaptation(200.0, 6504.0, 0.0199)
+        val justInside = WhiteBalanceMath.limitedAdaptation(0.0199)
         assertTrue("just inside the gate D $justInside", justInside in 0.000001f..0.05f)
-        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(200.0, 6504.0, 0.02), 0f)
+        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.02), 0f)
+    }
+
+    @Test
+    fun limitedAdaptation_smallDuvIsFree() {
+        // Ordinary white LEDs sit slightly off the locus (|Duv| ~0.003-0.008)
+        // and must not be throttled for it: the attenuation is a flat plateau
+        // out to DUV_PLATEAU.
+        val onLocus = WhiteBalanceMath.limitedAdaptation(0.0)
+        val slightlyOff = WhiteBalanceMath.limitedAdaptation(0.006)
+        assertEquals("plateau is free", onLocus, slightlyOff, 1e-6f)
     }
 }
