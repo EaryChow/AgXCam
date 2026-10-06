@@ -75,6 +75,11 @@ class Camera2Manager(private val context: Context) {
     @Volatile
     var latestAwbState: Int? = null
 
+    // Result-side AE state. The AWB estimator refuses untrusted input while
+    // AE is still hunting
+    @Volatile
+    var latestAeState: Int? = null
+
     // While set, the preview request is pinned to the HAL's fixed DAYLIGHT
     // mode regardless of the user white balance mode, so the daylight anchor
     // sampler gets converged daylight readbacks to calibrate from. The app's
@@ -1480,6 +1485,11 @@ class Camera2Manager(private val context: Context) {
         availableAfModes = intArrayOf()
         availableAeModes = intArrayOf()
         availableAwbModes = emptySet()
+        // Session-scoped result state: a stale CONVERGED from a
+        // previous session would defeat the AWB input gate's AE check
+        // on the first frames of the next one.
+        latestAeState = null
+        latestAwbState = null
     }
 
     fun close() {
@@ -1512,6 +1522,11 @@ class Camera2Manager(private val context: Context) {
         availableAfModes = intArrayOf()
         availableAeModes = intArrayOf()
         availableAwbModes = emptySet()
+        // Session-scoped result state: a stale CONVERGED from a
+        // previous session would defeat the AWB input gate's AE check
+        // on the first frames of the next one.
+        latestAeState = null
+        latestAwbState = null
     }
 
     private fun safeAfMode(preferred: Int): Int {
@@ -1579,6 +1594,7 @@ CaptureRequest.CONTROL_AWB_MODE_SHADE -> "SHADE"
             }
             latestAwbMode = result.get(CaptureResult.CONTROL_AWB_MODE)
             latestAwbState = result.get(CaptureResult.CONTROL_AWB_STATE)
+            latestAeState = result.get(CaptureResult.CONTROL_AE_STATE)
             ccLogCount++
             if (ccLogCount % 60 == 0) {
                 CrashLogger.log(TAG,

@@ -91,6 +91,8 @@ class MainActivity : AppCompatActivity() {
     private var smoothedAdaptation = 1f
     @Volatile
     private var lastSceneGreenLevel = -1f
+    @Volatile
+    private var aeConvergedOnce = false
     private var photoOutput = PhotoOutputSettings()
     // Leading factor of the demosaic clipping-neutralization exponent (factor * 5).
     private var clipAttenFactor = 0.1f
@@ -2694,7 +2696,23 @@ class MainActivity : AppCompatActivity() {
             // rest, parameterized by the slider pair.
             val useEstimator = currentWbMode == WhiteBalanceMode.AUTO || !gainsOk
             val estimatorStep = useEstimator && wbEstimateFrame % 15 == 0
-            if (estimatorStep) {
+            // The estimate is only genuine once AE has converged: while AE
+            // hunts, overexposed frames clip the green channel first, the
+            // clipped cells are dropped, and the surviving means tilt the
+            // estimate magenta. The latch sticks so later AE hunting does not
+            // freeze AUTO, and a timeout keeps AUTO alive if AE never
+            // converges at all. When no daylight transform exists the
+            // estimator still runs: the estimate falls back to the raw
+            // signal, its documented no-profile behavior.
+            val aeState = camera2Manager.latestAeState
+            if (aeState == CaptureResult.CONTROL_AE_STATE_CONVERGED ||
+                aeState == CaptureResult.CONTROL_AE_STATE_LOCKED
+            ) {
+                aeConvergedOnce = true
+            }
+            val awbInputReady =
+                aeConvergedOnce || wbEstimateFrame > AWB_INPUT_TIMEOUT_FRAMES
+            if (estimatorStep && awbInputReady) {
                 estimateAutoWhiteBalance(dest, rawW, rawH)
             }
 
@@ -2793,7 +2811,15 @@ class MainActivity : AppCompatActivity() {
                 // the estimate, and the degree of adaptation derived from it,
                 // cannot change faster than the estimator updates.
                 !estimatorStep -> smoothedAdaptation
-                else -> smoothedLimitedAdaptation(sceneXy)
+                else -> {
+                    // First trusted estimate: adopt its degree of adaptation
+                    // exactly, like the illuminant snap; the EMA tracks from
+                    // there.
+                    if (awbSmoother.consumeSnapAdaptation()) {
+                        smoothedAdaptation = limitedAdaptationTarget(sceneXy)
+                    }
+                    smoothedLimitedAdaptation(sceneXy)
+                }
             }
 
             // The white balance is ours, so the matrix is the WB-removed one and the
@@ -3044,6 +3070,10 @@ class MainActivity : AppCompatActivity() {
             previewRenderer.agxBlackLevel = meta.blackLevelAverage
             rawNeutralSeed = meta.neutralColorPoint
             estimatorNeutral = meta.neutralColorPoint
+            // Fresh session for the estimator and its smoother: no estimate
+            // is trusted yet, and stale smoothing state must not cross lenses.
+            awbSmoother.reset()
+            aeConvergedOnce = false
             rawColorProfile = profile
             // The daylight gain is a sensor property, so it is resolved once per lens
             // here rather than per frame. AUTO's estimator takes it off the raw
@@ -3090,9 +3120,9 @@ class MainActivity : AppCompatActivity() {
             }
             wbEstimateFrame = 0
             // The green sites belong to this sensor, so the smoothed illuminant
-            // starts over with the lens rather than carrying the previous one's
-            // balance. The renderer goes to identity with it.
-            smoothedIlluminantGains = floatArrayOf(1f, 1f, 1f, 1f)
+            // starts over with the lens (AwbIlluminantSmoother.reset above)
+            // rather than carrying the previous one's balance. The renderer
+            // goes to identity with it.
             previewRenderer.wbPhaseGains = null
             estimatorReady = false
             // A new lens on the same renderer: start from the identity no-op
@@ -3156,7 +3186,7 @@ class MainActivity : AppCompatActivity() {
         previewRenderer.wbGainR = 1f
         previewRenderer.wbGainG = 1f
         previewRenderer.wbGainB = 1f
-        smoothedIlluminantGains = floatArrayOf(1f, 1f, 1f, 1f)
+        awbSmoother.reset()
         previewRenderer.wbPhaseGains = null
         estimatorReady = false
         previewRenderer.nativeLumaCoeffs = DEFAULT_LUMA_COEFFS.copyOf()
@@ -3184,6 +3214,7 @@ class MainActivity : AppCompatActivity() {
         }
         lastSceneGreenLevel = -1f
         smoothedAdaptation = 1f
+        aeConvergedOnce = false
     }
 
     // Luminance (Y) coefficients of the camera-native RGB space, derived from a
@@ -3227,12 +3258,13 @@ class MainActivity : AppCompatActivity() {
     private var rawNeutralSeed = floatArrayOf(1f, 1f, 1f)
     private var estimatorNeutral: FloatArray? = null
 
-    // Smoothed per-CFA-phase grey world gains. Only the two green sites reach the
-    // demosaic from here; red and blue leave as the post-merge colorGains.
-    // The illuminant stage is what gets smoothed: it is the part that varies with
-    // the scene. The daylight reference is fixed per lens and is reapplied on top,
-    // so it never enters the smoothing history and cannot drift.
-    private var smoothedIlluminantGains = floatArrayOf(1f, 1f, 1f, 1f)
+    // Smoothed per-CFA-phase grey world gains, owned by the dual-rate
+    // smoother: only the two green sites reach the demosaic from here; red
+    // and blue leave as the post-merge colorGains. The illuminant stage is
+    // what gets smoothed: it is the part that varies with the scene. The
+    // daylight reference is fixed per lens and is reapplied on top, so it
+    // never enters the smoothing history and cannot drift.
+    private val awbSmoother = AwbIlluminantSmoother()
 
     // Sticky: the estimator steps every 15th frame, so its gains have to outlive
     // the call that produced them. Cleared with the lens, and ignored whenever
@@ -3288,20 +3320,20 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // Smoothed on the illuminant stage alone, not the product. The daylight
-        // reference is fixed per lens and smoothing it would only let a stale
-        // sensor response drift in on top of a scene that has not changed.
-        val a = 0.4f
-        for (p in 0 until GreyWorldEstimate.PHASE_COUNT) {
-            smoothedIlluminantGains[p] += a * (estimate.illuminant[p] - smoothedIlluminantGains[p])
-        }
+        // Smoothed on the illuminant stage alone, not the product: the
+        // daylight reference is fixed per lens and smoothing it would only
+        // let a stale sensor response drift in on top of a scene that has
+        // not changed. The dual-rate state machine (acquire, handover,
+        // slow pole, fast re-acquire) lives in AwbIlluminantSmoother.
+        val now = SystemClock.elapsedRealtimeNanos()
+        awbSmoother.step(estimate.illuminant, now)
         // Clamped as the product, through the estimator's own combine, so the array
         // the renderer holds is the one Estimate.phaseGains would describe for these
         // two stages. Multiplying here instead would leave the product unclamped
         // while estimate() clamps it, and the two would disagree. Derived every
         // frame rather than carried as state: combine returns a fresh array, so
         // this thread can go on smoothing while the render thread holds this one.
-        val phaseGains = GreyWorldEstimate.combine(smoothedIlluminantGains, estimate.daylight)
+        val phaseGains = GreyWorldEstimate.combine(awbSmoother.gains, estimate.daylight)
         previewRenderer.wbPhaseGains = phaseGains
         estimatorReady = true
 
@@ -3324,12 +3356,24 @@ class MainActivity : AppCompatActivity() {
         // Reachable outside AUTO too: a fixed preset on a HAL reporting no
         // COLOR_CORRECTION_GAINS still runs the estimator, does not own the gains,
         // and has its profile transform built from this value.
-        val prevNeutral = estimatorNeutral ?: floatArrayOf(1f, 1f, 1f)
-        estimatorNeutral = floatArrayOf(
-            prevNeutral[0] + a * (1f / colorGains[0] - prevNeutral[0]),
-            1f,
-            prevNeutral[2] + a * (1f / colorGains[2] - prevNeutral[2])
-        )
+        //
+        // Smoothed on its own fixed rate, not the illuminant stage's dual-rate
+        // dynamics: the color gains are already smoothed, so this is a
+        // derivation of a settled signal, and inheriting the slow pole would
+        // leave the profile's neutral crawling for tens of seconds after any
+        // change - which is a visible cast while limited AWB blends from it.
+        // The first trusted estimate is adopted exactly, like the illuminant
+        // snap.
+        if (awbSmoother.consumeSnapNeutral()) {
+            estimatorNeutral = floatArrayOf(1f / colorGains[0], 1f, 1f / colorGains[2])
+        } else {
+            val prevNeutral = estimatorNeutral ?: floatArrayOf(1f, 1f, 1f)
+            estimatorNeutral = floatArrayOf(
+                prevNeutral[0] + ESTIMATOR_NEUTRAL_SMOOTHING * (1f / colorGains[0] - prevNeutral[0]),
+                1f,
+                prevNeutral[2] + ESTIMATOR_NEUTRAL_SMOOTHING * (1f / colorGains[2] - prevNeutral[2])
+            )
+        }
 
         if (logNow) {
             val greens = GreyWorldEstimate.greenPhases(colorMap)
@@ -3338,7 +3382,7 @@ class MainActivity : AppCompatActivity() {
                         "cells=${scan.cellsUsed} clipped=${scan.cellsClipped} " +
                         "daylight=${if (daylight != null) "yes" else "no"} " +
                         "means=[${phaseMeans.joinToString { String.format("%.1f", it) }}] " +
-                        "illuminant=[${smoothedIlluminantGains.joinToString { String.format("%.3f", it) }}] " +
+                        "illuminant=[${awbSmoother.gains.joinToString { String.format("%.3f", it) }}] " +
                         "phaseGains=[${phaseGains.joinToString { String.format("%.3f", it) }}] " +
                     "greenSites=[${greens[0]},${greens[1]}] " +
                     "colorGains=[${String.format("%.2f", colorGains[0])}," +
@@ -3675,7 +3719,9 @@ class MainActivity : AppCompatActivity() {
         rawColorProfile?.daylightCorrection = floatArrayOf(1f, 1f, 1f)
         val oldDaylight = rawDaylightGains
         rawDaylightGains = rawColorProfile?.daylightTransform()?.wbGains
-        retargetDaylightSmoothing(oldDaylight, rawDaylightGains)
+        // The renderer holds a product of both stages; rescale the smoothed
+        // stage so it stays put across the swap.
+        awbSmoother.retarget(oldDaylight, rawDaylightGains, previewRenderer.bayerColorMap)
         if (lens != null) deleteDaylightAnchorPersistence(lens.cameraId)
         CrashLogger.log(TAG, "daylightAnchor: reset")
         mainHandler.post { updateDaylightAnchorUI() }
@@ -3752,34 +3798,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // The estimator smooths the illuminant stage while the daylight reference
-    // is fixed; when the sampled anchor replaces that reference, rescale the
-    // smoothed stage so the product the renderer applies does not jump.
-    // illuminant = level / (means * daylight) exactly, so each phase moves by
-    // old/new and the product is preserved. Only meaningful while the
-    // estimator owns the smoothing state; right after a lens init the state
-    // was just reset and there is nothing to carry over.
-    private fun retargetDaylightSmoothing(oldDaylight: FloatArray?, newDaylight: FloatArray?) {
-        if (!estimatorReady) return
-        if (oldDaylight == null || newDaylight == null) return
-        val colorMap = previewRenderer.bayerColorMap
-        for (p in 0 until GreyWorldEstimate.PHASE_COUNT) {
-            val oldG = when (colorMap.getOrElse(p) { 1 }) {
-                0 -> oldDaylight[0]
-                2 -> oldDaylight[2]
-                else -> 1f
-            }
-            val newG = when (colorMap.getOrElse(p) { 1 }) {
-                0 -> newDaylight[0]
-                2 -> newDaylight[2]
-                else -> 1f
-            }
-            smoothedIlluminantGains[p] =
-                (smoothedIlluminantGains[p] * oldG / newG)
-                    .coerceIn(GreyWorldEstimate.MIN_GAIN, GreyWorldEstimate.MAX_GAIN)
-        }
-    }
-
     private fun applyDaylightAnchor() {
         val profile = rawColorProfile ?: return
         val gains = daylightAnchorGains ?: return
@@ -3798,7 +3816,9 @@ class MainActivity : AppCompatActivity() {
         // so the applied product stays put.
         val oldDaylight = rawDaylightGains
         rawDaylightGains = profile.daylightTransform()?.wbGains
-        retargetDaylightSmoothing(oldDaylight, rawDaylightGains)
+        // The renderer holds a product of both stages; rescale the smoothed
+        // stage so it stays put across the swap.
+        awbSmoother.retarget(oldDaylight, rawDaylightGains, previewRenderer.bayerColorMap)
         CrashLogger.log(
             TAG, "daylightAnchor: applied d=[${d.joinToString { String.format("%.4f", it) }}] " +
                 "daylight wb=[${rawDaylightGains?.joinToString { String.format("%.3f", it) }}]"
@@ -4127,19 +4147,23 @@ class MainActivity : AppCompatActivity() {
         return floatArrayOf(x, y)
     }
 
-    // Degree of adaptation for the limited auto white balance. Called only on
-    // estimator steps (~0.5 s apart), where the EMA's 0.28 factor is the ~1.5 s
-    // low-pass the constant documents; between steps the dispatch holds the
-    // smoothed value, so the correction eases rather than steps.
-    private fun smoothedLimitedAdaptation(sceneXy: FloatArray): Float {
+    // Raw degree of adaptation for a scene chromaticity, from the current
+    // estimate and scene luminance proxy.
+    private fun limitedAdaptationTarget(sceneXy: FloatArray): Float {
         val (distanceUv, nearestCct) = WhiteBalanceMath.locusDistanceUv(sceneXy[0], sceneXy[1])
         val la = if (lastSceneGreenLevel > 0f) {
             lastSceneGreenLevel.toDouble() * LIMITED_WB_LA_GAIN
         } else {
             200.0
         }
-        val target = WhiteBalanceMath.limitedAdaptation(la, nearestCct, distanceUv)
-        smoothedAdaptation += LIMITED_WB_SMOOTHING * (target - smoothedAdaptation)
+        return WhiteBalanceMath.limitedAdaptation(la, nearestCct, distanceUv)
+    }
+
+    // Degree of adaptation for the limited auto white balance, low-passed so
+    // the correction eases in and out over about a second and a half instead
+    // of stepping with each estimator update.
+    private fun smoothedLimitedAdaptation(sceneXy: FloatArray): Float {
+        smoothedAdaptation += LIMITED_WB_SMOOTHING * (limitedAdaptationTarget(sceneXy) - smoothedAdaptation)
         return smoothedAdaptation.coerceIn(0f, 1f)
     }
 
@@ -5387,6 +5411,13 @@ override fun onResume() {
         private const val RAW_BUFFER_POOL = 3
         // Leading factor of the demosaic clipping-neutralization exponent.
         private const val PREF_CLIP_ATTEN = "clip_atten_factor"
+        // If AE has not converged within this many frames, run the estimator
+        // anyway so a permanently hunting AE cannot disable AUTO.
+        private const val AWB_INPUT_TIMEOUT_FRAMES = 90
+        // Fixed per-estimator-step rate for the profile-path neutral derived
+        // from the color gains. Deliberately independent of the illuminant
+        // stage's dual-rate alpha.
+        private const val ESTIMATOR_NEUTRAL_SMOOTHING = 0.4f
         // Multi-stage denoise strengths, 0..1 each.
         private const val PREF_S1_DPC = "stage1_dpc_strength"
         private const val PREF_S3_RAW = "stage3_raw_strength"
