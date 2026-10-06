@@ -147,10 +147,11 @@ class Camera2Manager(private val context: Context) {
     // White balance
     private var currentAwbMode = CaptureRequest.CONTROL_AWB_MODE_AUTO
 
-    // Kelvin never sends AWB-OFF: several vendor HALs (incl. Xiaomi) silently
-    // ignore OFF and keep running adaptive AWB. Instead applyAwb holds the HAL
-    // at its fixed D65 preset (DAYLIGHT) with CONTROL_AWB_LOCK so physical D65
-    // light maps to D65, and the app's relative Kelvin CAT does the shift.
+    // Kelvin never sends AWB-OFF: several vendor HALs silently ignore OFF and
+    // keep running adaptive AWB. Instead applyAwb holds the HAL at its fixed
+    // D65 preset (DAYLIGHT) with the lock released, so the HAL state stays
+    // stable; the app renders Kelvin as a parameterized preset through the
+    // profile path, which does not read HAL state.
     var isAwbLocked = false
         private set
 
@@ -633,9 +634,9 @@ class Camera2Manager(private val context: Context) {
             // Kelvin: hold the HAL at its fixed D65 preset. A fixed preset is
             // non-adaptive, so no AWB lock is needed; explicitly release any
             // stray latch so the HAL recomputes at the new mode (otherwise the
-            // previous mode's converged gains persist into Kelvin). The app's
-            // relative Bradford CAT then shifts D65 -> user Kelvin on top of
-            // balanced input, keeping Kelvin fully manual but device-accurate.
+            // previous mode's converged gains persist into Kelvin). The render
+            // itself is the profile path with the slider-pair illuminant, so
+            // this hold only keeps the HAL state stable; nothing reads it.
             set(CaptureRequest.CONTROL_AWB_MODE, effectiveAwbMode())
             set(CaptureRequest.CONTROL_AWB_LOCK, effectiveAwbMode() == CaptureRequest.CONTROL_AWB_MODE_AUTO)
         } else {

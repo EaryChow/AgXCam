@@ -4,11 +4,6 @@ import kotlin.math.*
 
 object WhiteBalanceMath {
 
-    data class KelvinResult(
-        val xy: Pair<Float, Float>,
-        val sceneLinearTo709: ColorMatrix.Mat3
-    )
-
     // CIE 1931 2-deg standard observer colour matching functions (x_bar, y_bar, z_bar),
     // sampled every 5 nm from 380 nm to 780 nm (81 entries). Table I(3.3.1) of
     // Wyszecki & Stiles, "Color Science" (2nd ed., 1982); values per CIE 018:2019.
@@ -122,88 +117,5 @@ object WhiteBalanceMath {
         val total = xSum + ySum + zSum
         if (total <= 0.0) return Pair(ColorMatrix.D65_X.toDouble(), ColorMatrix.D65_Y.toDouble())
         return Pair(xSum / total, ySum / total)
-    }
-
-    fun chromaticAdaptationBradford(
-        srcWhiteXY: Pair<Float, Float>,
-        dstWhiteXY: Pair<Float, Float>
-    ): ColorMatrix.Mat3 {
-        val srcXyzVec = xyToXyzVector(srcWhiteXY.first, srcWhiteXY.second)
-        val dstXyzVec = xyToXyzVector(dstWhiteXY.first, dstWhiteXY.second)
-
-        val mBradford = ColorMatrix.Mat3(
-            floatArrayOf(
-                0.8951f, 0.2664f, -0.1614f,
-                -0.7502f, 1.7135f, 0.0367f,
-                0.0389f, -0.0685f, 1.0296f
-            )
-        )
-        val mBradfordInv = ColorMatrix.inverse(mBradford)
-
-        val srcLms = ColorMatrix.mulMatVec(mBradford, srcXyzVec)
-        val dstLms = ColorMatrix.mulMatVec(mBradford, dstXyzVec)
-
-        val ratio = ColorMatrix.diagonal(
-            dstLms[0] / srcLms[0],
-            dstLms[1] / srcLms[1],
-            dstLms[2] / srcLms[2]
-        )
-
-        return ColorMatrix.multiply(
-            ColorMatrix.multiply(mBradfordInv, ratio),
-            mBradford
-        )
-    }
-
-    fun buildSceneLinearTo709(
-        kelvin: Float,
-        tint: Float = 0f,
-        calibrationMatrix: ColorMatrix.Mat3 = ColorMatrix.identity(),
-        referenceToXyz: ColorMatrix.Mat3 = ColorMatrix.identity()
-    ): ColorMatrix.Mat3 {
-        val d65xy = Pair(ColorMatrix.D65_X, ColorMatrix.D65_Y)
-        val userXY = kelvinToXy(kelvin, tint)
-
-        val catMatrix = chromaticAdaptationBradford(userXY, d65xy)
-
-        return ColorMatrix.multiply(
-            ColorMatrix.multiply(
-                ColorMatrix.multiply(
-                    ColorMatrix.xyzToRGB(ColorMatrix.REC709),
-                    catMatrix
-                ),
-                referenceToXyz
-            ),
-            calibrationMatrix
-        )
-    }
-
-    fun buildAutoSceneLinearTo709(
-        colorCorrectionTransform: android.hardware.camera2.params.ColorSpaceTransform?,
-        calibrationMatrix: ColorMatrix.Mat3 = ColorMatrix.identity()
-    ): ColorMatrix.Mat3 {
-        val refToXyz = ColorMatrix.colorSpaceTransformToMatrix(colorCorrectionTransform)
-            ?: ColorMatrix.identity()
-
-        return ColorMatrix.multiply(
-            ColorMatrix.multiply(
-                ColorMatrix.xyzToRGB(ColorMatrix.REC709),
-                refToXyz
-            ),
-            calibrationMatrix
-        )
-    }
-
-    private fun xyToXyzVector(x: Float, y: Float): FloatArray {
-        return floatArrayOf(x / y, 1.0f, (1 - x - y) / y)
-    }
-
-    private fun xyToXyz(x: Float, y: Float): ColorMatrix.Mat3 {
-        val xyz = xyToXyzVector(x, y)
-        return ColorMatrix.Mat3(floatArrayOf(
-            xyz[0], 0f, 0f,
-            0f, xyz[1], 0f,
-            0f, 0f, xyz[2]
-        ))
     }
 }

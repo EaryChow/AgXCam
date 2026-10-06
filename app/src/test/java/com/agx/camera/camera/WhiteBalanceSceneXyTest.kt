@@ -2,6 +2,7 @@ package com.agx.camera.camera
 
 import com.agx.camera.color.ColorMatrix
 import com.agx.camera.color.ColorMatrix.Mat3
+import com.agx.camera.color.WhiteBalanceMath
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -52,6 +53,23 @@ class WhiteBalanceSceneXyTest {
         }
         assertNull(WhiteBalanceMode.AUTO.sceneXy())
         assertNull(WhiteBalanceMode.KELVIN.sceneXy())
+    }
+
+    @Test
+    fun kelvinAtAPresetTemperatureNamesThatPresetsIlluminant() {
+        // KELVIN is a preset whose table entry is computed: the slider pair
+        // names an illuminant chromaticity, and at a preset's own temperature
+        // the computed name must agree with the preset's constant.
+        val (kx, ky) = WhiteBalanceMath.kelvinToXy(2856f)
+        val a = xyOf(WhiteBalanceMode.INCANDESCENT)
+        assertEquals("kelvin 2856K x == CIE A x", a[0], kx, 5e-3f)
+        assertEquals("kelvin 2856K y == CIE A y", a[1], ky, 5e-3f)
+
+        // The defaults land on D65, the DAYLIGHT preset's entry.
+        val (dx, dy) = WhiteBalanceMath.kelvinToXy(6504f, 9.6f)
+        val d65 = xyOf(WhiteBalanceMode.DAYLIGHT)
+        assertEquals("kelvin default x == D65 x", d65[0], dx, 1e-3f)
+        assertEquals("kelvin default y == D65 y", d65[1], dy, 1e-3f)
     }
 
     @Test

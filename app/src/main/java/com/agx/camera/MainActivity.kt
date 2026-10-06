@@ -2670,8 +2670,7 @@ class MainActivity : AppCompatActivity() {
             // which no HAL or profile answer can express, so it is preferred over
             // the HAL. The fixed presets leave the HAL in charge - it is already
             // pinned to the chosen illuminant - and KELVIN is the app's own CAT.
-            val useEstimator = currentWbMode == WhiteBalanceMode.AUTO ||
-                (!gainsOk && currentWbMode != WhiteBalanceMode.KELVIN)
+            val useEstimator = currentWbMode == WhiteBalanceMode.AUTO || !gainsOk
             if (useEstimator && wbEstimateFrame % 15 == 0) {
                 estimateAutoWhiteBalance(dest, rawW, rawH)
             }
@@ -2705,10 +2704,11 @@ class MainActivity : AppCompatActivity() {
             // its neutral: the gains solved from that are the sensor's own daylight
             // whitening, which is a property of the sensor and not of the frame, and
             // the illuminant the preset asserts is left entirely to the matrix built
-            // below from the mode's table. AUTO measures this number instead of
-            // asserting it and KELVIN parametrizes it, so neither takes this branch.
+            // below from the mode's table. KELVIN is a preset with a parameterized
+            // table entry, so it takes this branch too; AUTO measures this number
+            // instead of asserting it, so AUTO alone falls through.
             val presetDaylightWhite =
-                if (currentWbMode != WhiteBalanceMode.AUTO && currentWbMode != WhiteBalanceMode.KELVIN) {
+                if (currentWbMode != WhiteBalanceMode.AUTO) {
                     rawColorProfile?.daylightWhite()
                 } else {
                     null
@@ -2720,14 +2720,9 @@ class MainActivity : AppCompatActivity() {
                 // than what the HAL measured.
                 estimatorNeutral ?: rawNeutralSeed
             } else if (gainsOk) {
-                // The as-shot neutral is the inverse of the HAL's
-                // COLOR_CORRECTION_GAINS. In KELVIN the HAL is pinned to the D65
-                // DAYLIGHT preset, so these gains describe the *scene* neutral
-                // under that fixed illuminant -- the profile must whiten it, then
-                // the app's relative Bradford CAT shifts D65 -> user Kelvin on
-                // top. Feeding SENSOR_NEUTRAL_COLOR_POINT here instead would
-                // white-bias by the D50(NCP)->D65(DAYLIGHT) gap and overcast the
-                // whole image green.
+                // No profile to name the sensor's daylight response, and the
+                // estimator not standing in: the as-shot neutral is the
+                // inverse of the HAL's COLOR_CORRECTION_GAINS.
                 floatArrayOf(
                     1f / ccGains[0],
                     1f / ((ccGains[1] + ccGains[2]) * 0.5f),
@@ -2752,20 +2747,20 @@ class MainActivity : AppCompatActivity() {
             // AUTO measures by pushing the estimated neutral through the D65
             // camera->XYZ map. The reference matrices stay read at D65 on this path,
             // so that map is the sensor's response and not a function of the light,
-            // and no temperature is involved anywhere. KELVIN supplies nothing here
-            // yet, so it keeps falling through to the profile's own temperature
-            // solve below.
+            // and no temperature is involved anywhere. KELVIN parametrizes the same
+            // number: the slider pair maps to a chromaticity on the Planckian locus,
+            // tint walking perpendicular to it, which makes KELVIN exactly a preset
+            // whose table entry is computed instead of constant.
             val sceneXy: FloatArray? = when (currentWbMode) {
                 WhiteBalanceMode.AUTO -> rawColorProfile?.sceneXyForNeutral(neutral)
-                WhiteBalanceMode.KELVIN -> null
+                WhiteBalanceMode.KELVIN -> kelvinSceneXy()
                 else -> currentWbMode.sceneXy()
             }
 
             // The white balance is ours, so the matrix is the WB-removed one and the
             // gains the transform hands back are unused. A scene chromaticity that
             // cannot be resolved is a miss, not a reason to invent a temperature:
-            // the profile's own solve is tried instead, which is the path KELVIN
-            // still takes.
+            // the profile's own solve is tried instead.
             val profileTransform = if (sceneXy != null) {
                 rawColorProfile?.neutralTransformForSceneXy(neutral, sceneXy)
             } else {
@@ -4076,46 +4071,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // KELVIN as a parameterized preset: the slider pair names an illuminant
+    // chromaticity (kelvin picks the CCT on the Planckian locus, tint walks
+    // perpendicular to it), and the profile path adapts from it exactly like
+    // from a table preset's constant.
+    private fun kelvinSceneXy(): FloatArray {
+        val (x, y) = WhiteBalanceMath.kelvinToXy(kelvinState.kelvin, kelvinState.tint)
+        return floatArrayOf(x, y)
+    }
+
     private fun uploadAgxUniforms() {
-        // For YUV path: camera already handles CCM/AWB, so AUTO is identity.
-        // KELVIN applies only the relative chromatic adaptation (user illuminant -> D65),
-        // not the absolute xyzToRGB conversion which is for raw sensor data.
-        val sceneLinearTo709 = when (currentWbMode) {
-            WhiteBalanceMode.AUTO -> ColorMatrix.identity()
-            WhiteBalanceMode.KELVIN -> {
-                val d65xy = Pair(ColorMatrix.D65_X, ColorMatrix.D65_Y)
-                val userXY = WhiteBalanceMath.kelvinToXy(kelvinState.kelvin, kelvinState.tint)
-                // Kelvin is fully manual: the HAL white-balance is pinned to the
-                // same fixed DAYLIGHT reference the Sun preset uses and locked
-                // (see Camera2Manager.applyAwb), and the raw path mirrors the
-                // HAL's WB gains, so input is already balanced exactly like the
-                // preset. Here we only apply the relative chromatic adaptation
-                // (user illuminant -> D65); the default 6504K/9.6 is chosen so
-                // userXY == D65, making this matrix identity - which must
-                // therefore not change the Sun/DAYLIGHT visual.
-                val cat = WhiteBalanceMath.chromaticAdaptationBradford(userXY, d65xy)
-                // Bradford is XYZ-domain; convert to linear Rec709 domain for shader
-                val m = ColorMatrix.multiply(
-                    ColorMatrix.multiply(ColorMatrix.xyzToRGB(ColorMatrix.REC709), cat),
-                    ColorMatrix.rgbToXYZ(ColorMatrix.REC709)
-                )
-                val mm = m.m
-                CrashLogger.log(TAG, "uploadAgxUniforms KELVIN: kelvin=${kelvinState.kelvin} tint=${kelvinState.tint} " +
-                    "userXY=(${String.format("%.6f", userXY.first)}, ${String.format("%.6f", userXY.second)}) " +
-                    "d65XY=(${String.format("%.6f", d65xy.first)}, ${String.format("%.6f", d65xy.second)}) " +
-                    "m=[${String.format("%.6f", mm[0])},${String.format("%.6f", mm[1])},${String.format("%.6f", mm[2])}, " +
-                    "${String.format("%.6f", mm[3])},${String.format("%.6f", mm[4])},${String.format("%.6f", mm[5])}, " +
-                    "${String.format("%.6f", mm[6])},${String.format("%.6f", mm[7])},${String.format("%.6f", mm[8])}] " +
-                    "awbMode=$currentWbMode")
-                m
-            }
-            WhiteBalanceMode.DAYLIGHT -> ColorMatrix.identity()
-            WhiteBalanceMode.CLOUDY -> ColorMatrix.identity()
-            WhiteBalanceMode.INCANDESCENT -> ColorMatrix.identity()
-            WhiteBalanceMode.FLUORESCENT -> ColorMatrix.identity()
-            WhiteBalanceMode.TWILIGHT -> ColorMatrix.identity()
-            WhiteBalanceMode.SHADE -> ColorMatrix.identity()
-        }
+        // All white balance, KELVIN included, lives in the profile path: gains
+        // plus the WB-removed matrix through the Bayer pipeline, with the
+        // illuminant adapted in the camera-native domain. KELVIN is a preset
+        // whose table entry is computed from the sliders, so nothing is
+        // adapted here after sRGB anymore; this stays identity.
+        val sceneLinearTo709 = ColorMatrix.identity()
 
         val insetParams = agxParams.toInsetParams()
         val agx = AgxPrecomputer.compute(insetParams, sceneLinearTo709, whiteLevel = rawWhiteLevel.toFloat(), blackLevel = rawBlackLevel, middleGrayPercent = agxParams.middleGray)
