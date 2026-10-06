@@ -1105,6 +1105,69 @@
 
             <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
 
+            <!-- Daylight Anchor (user-facing) -->
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Daylight Anchor" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
+
+            <TextView
+                android:id="@+id/daylight_anchor_status_pill"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="#FF444444"
+                android:gravity="center"
+                android:paddingHorizontal="10dp"
+                android:paddingVertical="3dp"
+                android:text="Idle"
+                android:textColor="#FFFFFFFF"
+                android:textSize="11sp"
+                android:layout_marginBottom="4dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="4dp">
+
+                <TextView
+                    android:id="@+id/daylight_anchor_start_btn"
+                    android:layout_width="0dp"
+                    android:layout_height="32dp"
+                    android:layout_weight="1"
+                    android:background="#444444"
+                    android:gravity="center"
+                    android:text="Start"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="11sp"
+                    android:paddingHorizontal="6dp"
+                    android:clickable="true"
+                    android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/daylight_anchor_reset_btn"
+                    android:layout_width="0dp"
+                    android:layout_height="32dp"
+                    android:layout_weight="1"
+                    android:layout_marginStart="4dp"
+                    android:background="#444444"
+                    android:gravity="center"
+                    android:text="Reset"
+                    android:textColor="#FFFF6666"
+                    android:textSize="11sp"
+                    android:paddingHorizontal="6dp"
+                    android:clickable="true"
+                    android:focusable="true" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Samples the sensor's daylight response to calibrate the white balance presets. Start re-samples; Reset clears the saved sample."
+                android:textColor="#FF888888"
+                android:textSize="10sp"
+                android:layout_marginBottom="8dp" />
+
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
+
             <!-- Thermal Settings -->
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Thermal Settings" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
 

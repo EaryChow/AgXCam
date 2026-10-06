@@ -1,5 +1,7 @@
 package com.agx.camera.camera
 
+import com.agx.camera.color.ColorMatrix
+
 enum class WhiteBalanceMode {
     AUTO,
     KELVIN,
@@ -8,7 +10,39 @@ enum class WhiteBalanceMode {
     INCANDESCENT,
     FLUORESCENT,
     TWILIGHT,
-    SHADE
+    SHADE;
+
+    // The scene illuminant each preset asserts, as a CIE 1931 2-degree chromaticity.
+    // A preset is the user naming the light rather than the frame being measured for
+    // it, so this is the one number the mode contributes; the gains whiten the
+    // sensor's response to this light and the matrix adapts this light onto D65, and
+    // both come from here. That makes a preset the same mechanism as AUTO with the
+    // measurement replaced by a constant, and KELVIN the same mechanism with the
+    // constant replaced by a parametrization (kelvinToXy).
+    //
+    // Grounded in the CIE 1931 2-degree table. Three of them follow the
+    // illuminant mapping the DNG specification gives for these light sources,
+    // so a HAL's preset gains and this chromaticity describe the same light:
+    //   INCANDESCENT -> A, FLUORESCENT -> F2, DAYLIGHT -> D65.
+    // The rest have no CIE standard; these are documented choices, each a defined
+    // illuminant chosen to sit in the right direction from D65 (cooler/bluer, the way
+    // these scenes actually read) rather than a number pulled from the air:
+    //   CLOUDY  -> C, north-sky/overcast daylight, a shade cooler than D65.
+    //   SHADE   -> D75, open shade lit by blue sky, cooler again.
+    //   TWILIGHT-> a design point below D75, blue-hour light, which is off the
+    //              Planckian locus and has no standard at all.
+    // DAYLIGHT references the pipeline's own D65 constant rather than repeating the
+    // CIE digits, so the daylight preset is exactly the identity adaptation against
+    // the same white the renderer adapts to.
+    fun sceneXy(): FloatArray? = when (this) {
+        AUTO, KELVIN -> null
+        DAYLIGHT -> floatArrayOf(ColorMatrix.D65_X, ColorMatrix.D65_Y)      // CIE D65
+        INCANDESCENT -> floatArrayOf(0.44757f, 0.40745f)  // CIE A
+        FLUORESCENT -> floatArrayOf(0.37208f, 0.37529f)   // CIE F2
+        CLOUDY -> floatArrayOf(0.31006f, 0.31616f)        // CIE C
+        SHADE -> floatArrayOf(0.29902f, 0.31485f)         // CIE D75
+        TWILIGHT -> floatArrayOf(0.28f, 0.29f)            // design choice, blue hour
+    }
 }
 
 data class KelvinState(

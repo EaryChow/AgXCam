@@ -117,6 +117,18 @@ class MainActivity : AppCompatActivity() {
     // estimator map. The source is user-selectable (Auto/Stock/Sampled), but
     // a device that can't emit a non-identity HAL map is pinned to Sampled.
     private lateinit var lensShadingEstimator: LensShadingEstimator
+    // Daylight anchor sampler: reduces the HAL's fixed-mode daylight gains to
+    // the diagonal bridge RawColorProfile needs between its reported color
+    // matrices and the live RAW gain space. Persisted per lens like the lens
+    // shading map; the correction stays identity until a sample arrives.
+    private lateinit var daylightAnchorEstimator: DaylightAnchorEstimator
+    private var daylightAnchorGains: FloatArray? = null
+    private var daylightAnchorApplied: FloatArray? = null
+    private var daylightAnchorPersisted = false
+    private var daylightAnchorLastState = DaylightAnchorEstimator.State.IDLE
+    private var daylightBootstrapActive = false
+    private var daylightBootstrapFrames = 0
+    private var daylightAnchorNoticeShown = false
     @Volatile private var lensShadingSourceMode: LensShadingSourceMode? = null
     @Volatile private var halMapStatus = HalMapStatus.UNKNOWN
     @Volatile private var lensShadingStrength = 1f
@@ -149,6 +161,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var lensShadingStockBtn: TextView
     private lateinit var lensShadingSampledBtn: TextView
     private lateinit var lensShadingNoticeOverlay: TextView
+    private lateinit var daylightAnchorStatusPill: TextView
+    private lateinit var daylightAnchorStartBtn: TextView
+    private lateinit var daylightAnchorResetBtn: TextView
 
     private lateinit var orientationListener: OrientationEventListener
 
@@ -407,6 +422,9 @@ class MainActivity : AppCompatActivity() {
         lensShadingStockBtn = findViewById(R.id.lens_shading_stock_btn)
         lensShadingSampledBtn = findViewById(R.id.lens_shading_sampled_btn)
         lensShadingNoticeOverlay = findViewById(R.id.lens_shading_notice_overlay)
+        daylightAnchorStatusPill = findViewById(R.id.daylight_anchor_status_pill)
+        daylightAnchorStartBtn = findViewById(R.id.daylight_anchor_start_btn)
+        daylightAnchorResetBtn = findViewById(R.id.daylight_anchor_reset_btn)
         finishingCaptureOverlay = findViewById(R.id.finishing_capture_overlay)
         lensSwitchOverlay = findViewById(R.id.lens_switch_overlay)
         lensInfoOverlay = findViewById(R.id.lens_info_overlay)
@@ -1068,6 +1086,27 @@ class MainActivity : AppCompatActivity() {
 
         // --- Lens Shading Correction controls (user-facing) ---
         lensShadingEstimator = LensShadingEstimator()
+        daylightAnchorEstimator = DaylightAnchorEstimator()
+
+        daylightAnchorStartBtn.setOnClickListener {
+            if (!cameraReady) {
+                Toast.makeText(this, "Open the camera first", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            if (rawColorProfile == null) {
+                Toast.makeText(this, "No sensor color profile on this lens", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            if (!camera2Manager.supportsDaylightMode) {
+                Toast.makeText(this, "This device has no fixed daylight mode to sample", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            restartDaylightAnchorSampling()
+        }
+
+        daylightAnchorResetBtn.setOnClickListener {
+            resetDaylightAnchor()
+        }
 
         // null source mode = auto: stock map when the device provides one, sampled otherwise.
         lensShadingSourceMode = when (previewResPrefs.getInt(PREF_LS_SOURCE_MODE, -1)) {
@@ -2619,6 +2658,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             feedLensShadingEstimator(dest, rawW, rawH)
+            feedDaylightAnchorEstimator()
 
             val ccGains = camera2Manager.latestColorCorrectionGains
             val ccMat = camera2Manager.latestColorCorrectionMatrix
@@ -2643,7 +2683,38 @@ class MainActivity : AppCompatActivity() {
             // call that produced them.
             val estimatorOwnsGains = currentWbMode == WhiteBalanceMode.AUTO && estimatorReady
 
-            val neutral: FloatArray? = if (useEstimator) {
+            // The one thing every mode shares: gains that take a neutral object to level
+            // codes, and a matrix built from that same neutral to put the level
+            // codes on D65. The matrix is the human-vision adaptation from the
+            // illuminant the gains were solved against, so it has to be solved
+            // from the illuminant and not held fixed - a daylight matrix against
+            // non-daylight gains would render every scene neutral and throw the
+            // adaptation away.
+            //
+            // AUTO's illuminant is the estimate, so the daylight transform is
+            // only the first stage of the estimate (it removes the CFA's green bias
+            // before grey world sees the frame); the daylight *matrix* it also
+            // carries is not used, because the illuminant the matrix has to adapt
+            // from is the estimated one, not D65.
+            //
+            // Always defined: every branch falls back to the seeded neutral rather than
+            // to nothing, so there is a sensor neutral to read the CCT from even
+            // before the estimator or the HAL has produced one.
+            //
+            // A preset names the light, so it takes the profile's daylight white as
+            // its neutral: the gains solved from that are the sensor's own daylight
+            // whitening, which is a property of the sensor and not of the frame, and
+            // the illuminant the preset asserts is left entirely to the matrix built
+            // below from the mode's table. AUTO measures this number instead of
+            // asserting it and KELVIN parametrizes it, so neither takes this branch.
+            val presetDaylightWhite =
+                if (currentWbMode != WhiteBalanceMode.AUTO && currentWbMode != WhiteBalanceMode.KELVIN) {
+                    rawColorProfile?.daylightWhite()
+                } else {
+                    null
+                }
+
+            val neutral: FloatArray = presetDaylightWhite ?: if (useEstimator) {
                 // The estimator's smoothed gains inverted: the sensor neutral the
                 // profile path needs, so it whitens what the app measured rather
                 // than what the HAL measured.
@@ -2666,11 +2737,41 @@ class MainActivity : AppCompatActivity() {
                 rawNeutralSeed
             }
 
-            val profileTransform = neutral?.let { rawColorProfile?.neutralTransformForNeutral(it) }
+            // Every mode reduces to one scene chromaticity, and that number is the
+            // only thing that differs between them: AUTO measures it, a preset reads
+            // it off the mode's table, KELVIN parametrizes it. The gains whiten the
+            // sensor's response to that light and the matrix adapts it onto D65, so
+            // the two halves are always built from one answer and cannot disagree.
+            //
+            // The chromaticity follows the *mode*, not the gain source. useEstimator
+            // is also true for a preset whose HAL reports no COLOR_CORRECTION_GAINS,
+            // where the estimator is standing in for the gains - but the user picking
+            // "tungsten" is still asserting the light is tungsten, so that preset's
+            // illuminant is what the matrix adapts from, measured or not.
+            //
+            // AUTO measures by pushing the estimated neutral through the D65
+            // camera->XYZ map. The reference matrices stay read at D65 on this path,
+            // so that map is the sensor's response and not a function of the light,
+            // and no temperature is involved anywhere. KELVIN supplies nothing here
+            // yet, so it keeps falling through to the profile's own temperature
+            // solve below.
+            val sceneXy: FloatArray? = when (currentWbMode) {
+                WhiteBalanceMode.AUTO -> rawColorProfile?.sceneXyForNeutral(neutral)
+                WhiteBalanceMode.KELVIN -> null
+                else -> currentWbMode.sceneXy()
+            }
 
-            // Colour correction and gains are chosen separately: in AUTO the
-            // estimator owns the gains while the profile still owns the matrix,
-            // since only the matrix carries the camera-native primaries.
+            // The white balance is ours, so the matrix is the WB-removed one and the
+            // gains the transform hands back are unused. A scene chromaticity that
+            // cannot be resolved is a miss, not a reason to invent a temperature:
+            // the profile's own solve is tried instead, which is the path KELVIN
+            // still takes.
+            val profileTransform = if (sceneXy != null) {
+                rawColorProfile?.neutralTransformForSceneXy(neutral, sceneXy)
+            } else {
+                rawColorProfile?.neutralTransformForNeutral(neutral)
+            }
+
             if (profileTransform != null) {
                 previewRenderer.ccMatrix = profileTransform.colorMatrix.m
                 previewRenderer.nativeLumaCoeffs = profileTransform.lumaCoeffs
@@ -2697,6 +2798,8 @@ class MainActivity : AppCompatActivity() {
                         val temp = rawColorProfile?.temperatureForNeutral(neutral)
                         CrashLogger.log(
                             TAG, "dcp cc: frame=$wbEstimateFrame " +
+                                "auto=${if (currentWbMode == WhiteBalanceMode.AUTO) "yes" else "no"} " +
+                                "daylight=${if (rawDaylightGains != null) "yes" else "no"} " +
                                 "temp=${temp?.toInt() ?: -1} " +
                                 "neutral=[${neutral.joinToString { String.format("%.3f", it) }}] " +
                                 "wb=[${previewRenderer.wbGainR}, ${previewRenderer.wbGainG}, " +
@@ -2907,6 +3010,19 @@ class MainActivity : AppCompatActivity() {
             rawNeutralSeed = meta.neutralColorPoint
             estimatorNeutral = meta.neutralColorPoint
             rawColorProfile = profile
+            // The daylight gain is a sensor property, so it is resolved once per lens
+            // here rather than per frame. AUTO's estimator takes it off the raw
+            // frame first, so grey world reads the illuminant rather than the
+            // CFA's green bias. Only the gains are kept: the matrix from the same
+            // call adapts D65 to D65, and what the renderer needs is the CAT from
+            // the estimated illuminant, which is built per frame from that estimate.
+            rawDaylightGains = profile.daylightTransform()?.wbGains
+            if (rawDaylightGains != null) {
+                CrashLogger.log(
+                    TAG, "daylight cc: frame=$wbEstimateFrame " +
+                        "wb=[${rawDaylightGains!!.joinToString { String.format("%.3f", it) }}]"
+                )
+            }
             if (profile.available) {
                 val tr = profile.neutralTransformForNeutral(meta.neutralColorPoint)
                 if (tr != null) {
@@ -2938,10 +3054,11 @@ class MainActivity : AppCompatActivity() {
                 previewRenderer.nativeLumaCoeffs = DEFAULT_LUMA_COEFFS.copyOf()
             }
             wbEstimateFrame = 0
-            // The green sites belong to this sensor, so the smoothed pair starts
-            // over with the lens rather than carrying the previous one's balance.
-            smoothedPhaseGains = floatArrayOf(1f, 1f, 1f, 1f)
-            previewRenderer.wbPhaseGains = smoothedPhaseGains.copyOf()
+            // The green sites belong to this sensor, so the smoothed illuminant
+            // starts over with the lens rather than carrying the previous one's
+            // balance. The renderer goes to identity with it.
+            smoothedIlluminantGains = floatArrayOf(1f, 1f, 1f, 1f)
+            previewRenderer.wbPhaseGains = null
             estimatorReady = false
             // A new lens on the same renderer: start from the identity no-op
             // until its own shading map arrives with the first CaptureResults.
@@ -2975,6 +3092,7 @@ class MainActivity : AppCompatActivity() {
                 maybeShowLensShadingNotice()
                 mainHandler.post { updateLensShadingUI() }
             }
+            initDaylightAnchorForLens(lens)
             CrashLogger.log(
                 TAG, "applyRawMetadata: ${meta.sensorWidth}x${meta.sensorHeight} white=${meta.whiteLevel} " +
                     "blackAvg=${meta.blackLevelAverage} pattern=${meta.bayerPattern.label} " +
@@ -3003,11 +3121,12 @@ class MainActivity : AppCompatActivity() {
         previewRenderer.wbGainR = 1f
         previewRenderer.wbGainG = 1f
         previewRenderer.wbGainB = 1f
-        smoothedPhaseGains = floatArrayOf(1f, 1f, 1f, 1f)
-        previewRenderer.wbPhaseGains = smoothedPhaseGains.copyOf()
+        smoothedIlluminantGains = floatArrayOf(1f, 1f, 1f, 1f)
+        previewRenderer.wbPhaseGains = null
         estimatorReady = false
         previewRenderer.nativeLumaCoeffs = DEFAULT_LUMA_COEFFS.copyOf()
         rawColorProfile = null
+        rawDaylightGains = null
         rawNeutralSeed = floatArrayOf(1f, 1f, 1f)
         estimatorNeutral = null
         mainHandler.removeCallbacks(lensShadingGraceRunnable)
@@ -3018,6 +3137,15 @@ class MainActivity : AppCompatActivity() {
             rawSensorWidth = 0
             rawSensorHeight = 0
             mainHandler.post { updateLensShadingUI() }
+        }
+        if (::daylightAnchorEstimator.isInitialized) {
+            stopDaylightAnchorBootstrap()
+            daylightAnchorEstimator.reset()
+            daylightAnchorLastState = DaylightAnchorEstimator.State.IDLE
+            daylightAnchorGains = null
+            daylightAnchorApplied = null
+            daylightAnchorPersisted = false
+            mainHandler.post { updateDaylightAnchorUI() }
         }
     }
 
@@ -3055,12 +3183,19 @@ class MainActivity : AppCompatActivity() {
     // neutral varies frame to frame). Null when the device reports no usable
     // sensor color transforms -- then the HAL COLOR_CORRECTION_* state is used.
     private var rawColorProfile: RawColorProfile? = null
+    // The fixed daylight gain, green bias removal for the estimator. Only its
+    // wbGains are used: the color matrix the same call also produces would adapt
+    // D65 to D65, which is the identity and not the CAT the render needs.
+    private var rawDaylightGains: FloatArray? = null
     private var rawNeutralSeed = floatArrayOf(1f, 1f, 1f)
     private var estimatorNeutral: FloatArray? = null
 
     // Smoothed per-CFA-phase grey world gains. Only the two green sites reach the
     // demosaic from here; red and blue leave as the post-merge colorGains.
-    private var smoothedPhaseGains = floatArrayOf(1f, 1f, 1f, 1f)
+    // The illuminant stage is what gets smoothed: it is the part that varies with
+    // the scene. The daylight reference is fixed per lens and is reapplied on top,
+    // so it never enters the smoothing history and cannot drift.
+    private var smoothedIlluminantGains = floatArrayOf(1f, 1f, 1f, 1f)
 
     // Sticky: the estimator steps every 15th frame, so its gains have to outlive
     // the call that produced them. Cleared with the lens, and ignored whenever
@@ -3092,9 +3227,15 @@ class MainActivity : AppCompatActivity() {
             cellStride, rawWhiteLevel
         )
         val phaseMeans = scan.means
-        val target = GreyWorldEstimate.phaseGains(phaseMeans, colorMap)
+        // The sensor's daylight response comes off before the estimate, so what
+        // the estimator reports is the light's departure from D65 rather than the
+        // CFA's own green bias, which every D65 scene shares. Without a profile
+        // there is no response to take off and this falls back to estimating
+        // straight off the raw signal.
+        val daylight = rawDaylightGains
+        val estimate = GreyWorldEstimate.estimate(phaseMeans, colorMap, daylight)
         val logNow = wbEstimateFrame % 90 == 0 || wbEstimateFrame <= 3
-        if (target == null) {
+        if (estimate == null) {
             if (logNow) {
                 CrashLogger.log(
                     TAG, "wb estimate: skip frame=$wbEstimateFrame " +
@@ -3105,24 +3246,42 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // Smoothed on the illuminant stage alone, not the product. The daylight
+        // reference is fixed per lens and smoothing it would only let a stale
+        // sensor response drift in on top of a scene that has not changed.
         val a = 0.4f
         for (p in 0 until GreyWorldEstimate.PHASE_COUNT) {
-            smoothedPhaseGains[p] += a * (target[p] - smoothedPhaseGains[p])
+            smoothedIlluminantGains[p] += a * (estimate.illuminant[p] - smoothedIlluminantGains[p])
         }
-        // A fresh array per frame: the render thread reads it while this thread
-        // keeps smoothing into the working copy above.
-        previewRenderer.wbPhaseGains = smoothedPhaseGains.copyOf()
+        // Clamped as the product, through the estimator's own combine, so the array
+        // the renderer holds is the one Estimate.phaseGains would describe for these
+        // two stages. Multiplying here instead would leave the product unclamped
+        // while estimate() clamps it, and the two would disagree. Derived every
+        // frame rather than carried as state: combine returns a fresh array, so
+        // this thread can go on smoothing while the render thread holds this one.
+        val phaseGains = GreyWorldEstimate.combine(smoothedIlluminantGains, estimate.daylight)
+        previewRenderer.wbPhaseGains = phaseGains
         estimatorReady = true
 
         // The renderer splits this per phase on its own: the two green sites
         // before the demosaic merges them, red and blue after.
-        val colorGains = GreyWorldEstimate.colorGains(smoothedPhaseGains, colorMap)
+        val colorGains = GreyWorldEstimate.colorGains(phaseGains, colorMap)
         previewRenderer.wbGainR = colorGains[0]
         previewRenderer.wbGainG = colorGains[1]
         previewRenderer.wbGainB = colorGains[2]
 
-        // Feed the smoothed grey-world result as a sensor-space neutral
-        // (the inverse of the gains) for the profile-derived matrix path.
+        // The sensor response to a neutral object under the estimated illuminant, which
+        // is what the profile path needs. AUTO measures the illuminant's chromaticity
+        // off this directly, through the D65 camera->XYZ map; the presets instead
+        // hand it to neutralTransformForNeutral to solve for a temperature, and
+        // temperatureForNeutral reads the CCT off that same solve. Either way it is
+        // read as a full sensor response, so this is the inverse of the whole product
+        // rather than of the illuminant stage alone - the daylight stage is part of
+        // what the sensor actually answered.
+        //
+        // Reachable outside AUTO too: a fixed preset on a HAL reporting no
+        // COLOR_CORRECTION_GAINS still runs the estimator, does not own the gains,
+        // and has its profile transform built from this value.
         val prevNeutral = estimatorNeutral ?: floatArrayOf(1f, 1f, 1f)
         estimatorNeutral = floatArrayOf(
             prevNeutral[0] + a * (1f / colorGains[0] - prevNeutral[0]),
@@ -3135,8 +3294,10 @@ class MainActivity : AppCompatActivity() {
             CrashLogger.log(
                 TAG, "wb estimate: frame=$wbEstimateFrame " +
                         "cells=${scan.cellsUsed} clipped=${scan.cellsClipped} " +
+                        "daylight=${if (daylight != null) "yes" else "no"} " +
                         "means=[${phaseMeans.joinToString { String.format("%.1f", it) }}] " +
-                        "phaseGains=[${smoothedPhaseGains.joinToString { String.format("%.3f", it) }}] " +
+                        "illuminant=[${smoothedIlluminantGains.joinToString { String.format("%.3f", it) }}] " +
+                        "phaseGains=[${phaseGains.joinToString { String.format("%.3f", it) }}] " +
                     "greenSites=[${greens[0]},${greens[1]}] " +
                     "colorGains=[${String.format("%.2f", colorGains[0])}," +
                     "${String.format("%.2f", colorGains[1])}," +
@@ -3159,6 +3320,7 @@ class MainActivity : AppCompatActivity() {
         }
         if (lensShadingUiFrameCount % 12 == 0) {
             mainHandler.post { updateLensShadingUI() }
+            mainHandler.post { updateDaylightAnchorUI() }
         }
         lensShadingUiFrameCount++
         if (lensShadingEstimator.currentState == LensShadingState.CONVERGED && !lensShadingMapPersisted) {
@@ -3320,6 +3482,7 @@ class MainActivity : AppCompatActivity() {
         if (lensShadingEstimator.currentState != LensShadingState.SAMPLING) return
         lensShadingNoticeShown = true
         lensShadingNoticeOverlay.removeCallbacks(lensShadingNoticeHideRunnable)
+        lensShadingNoticeOverlay.removeCallbacks(daylightAnchorNoticeHideRunnable)
         lensShadingNoticeOverlay.animate().cancel()
         lensShadingNoticeOverlay.text =
             "This device can't provide a lens shading map - auto-sampling the lens\n" +
@@ -3402,6 +3565,298 @@ class MainActivity : AppCompatActivity() {
             TAG, "lensShading: auto-start sampling ${rawSensorWidth}x${rawSensorHeight} " +
                 "pattern=${rawBayerPattern.label} strength=${lensShadingStrength}"
         )
+    }
+
+    // Per-lens daylight anchor setup: restore a saved anchor, or start sampling
+    // (bootstrapping the HAL into its fixed DAYLIGHT mode if the current white
+    // balance mode does not already pin it there).
+    private fun initDaylightAnchorForLens(lens: LensInfo) {
+        if (!::daylightAnchorEstimator.isInitialized) return
+        daylightAnchorGains = null
+        daylightAnchorApplied = null
+        daylightAnchorPersisted = false
+        daylightAnchorEstimator.reset()
+        daylightAnchorLastState = DaylightAnchorEstimator.State.IDLE
+        val saved = loadDaylightAnchor(lens.cameraId)
+        if (saved != null) {
+            daylightAnchorGains = saved
+            applyDaylightAnchor()
+            daylightAnchorPersisted = true
+            CrashLogger.log(
+                TAG, "daylightAnchor: restored saved anchor for lens ${lens.cameraId} " +
+                    "d=[${daylightAnchorApplied?.joinToString { String.format("%.4f", it) }}]"
+            )
+        } else if (rawColorProfile != null) {
+            restartDaylightAnchorSampling()
+        }
+        mainHandler.post { updateDaylightAnchorUI() }
+    }
+
+    private fun restartDaylightAnchorSampling() {
+        val lens = lensManager.activeLens ?: return
+        if (!camera2Manager.supportsDaylightMode) {
+            CrashLogger.log(TAG, "daylightAnchor: no fixed daylight mode on this device")
+            return
+        }
+        daylightAnchorGains = null
+        daylightAnchorApplied = null
+        daylightAnchorPersisted = false
+        deleteDaylightAnchorPersistence(lens.cameraId)
+        daylightAnchorEstimator.start()
+        // The HAL only reports daylight gains while pinned to its fixed
+        // DAYLIGHT mode. If it already is, readbacks flow on their own;
+        // otherwise hold the override until convergence. KELVIN resolves to
+        // CLOUDY/SHADE on devices without DAYLIGHT, so only the reported HAL
+        // mode is trusted here, never the app's mode.
+        val pinnedToDaylight = camera2Manager.latestAwbMode ==
+            android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT
+        daylightBootstrapFrames = 0
+        if (!pinnedToDaylight) {
+            daylightBootstrapActive = true
+            camera2Manager.daylightCalibrationOverride = true
+            maybeShowDaylightAnchorNotice()
+        }
+        CrashLogger.log(
+            TAG, "daylightAnchor: sampling started lens=${lens.cameraId} " +
+                "override=$daylightBootstrapActive"
+        )
+        mainHandler.post { updateDaylightAnchorUI() }
+    }
+
+    private fun resetDaylightAnchor() {
+        val lens = lensManager.activeLens
+        stopDaylightAnchorBootstrap()
+        daylightAnchorEstimator.reset()
+        daylightAnchorGains = null
+        daylightAnchorApplied = null
+        daylightAnchorPersisted = false
+        rawColorProfile?.daylightCorrection = floatArrayOf(1f, 1f, 1f)
+        val oldDaylight = rawDaylightGains
+        rawDaylightGains = rawColorProfile?.daylightTransform()?.wbGains
+        retargetDaylightSmoothing(oldDaylight, rawDaylightGains)
+        if (lens != null) deleteDaylightAnchorPersistence(lens.cameraId)
+        CrashLogger.log(TAG, "daylightAnchor: reset")
+        mainHandler.post { updateDaylightAnchorUI() }
+    }
+
+    private fun stopDaylightAnchorBootstrap() {
+        if (!daylightBootstrapActive) return
+        daylightBootstrapActive = false
+        camera2Manager.daylightCalibrationOverride = false
+        CrashLogger.log(
+            TAG, "daylightAnchor: bootstrap done state=${daylightAnchorEstimator.state} " +
+                "frames=$daylightBootstrapFrames"
+        )
+    }
+
+    // Feeds the anchor sampler from the per-frame HAL readback. Only converged
+    // readbacks produced while the HAL is pinned to its fixed DAYLIGHT mode
+    // describe the sensor's daylight response; scene-adaptive (AUTO) readbacks
+    // are a property of the scene, not the sensor, and are ignored here.
+    private fun feedDaylightAnchorEstimator() {
+        if (!::daylightAnchorEstimator.isInitialized || rawColorProfile == null) return
+        val est = daylightAnchorEstimator
+        // The pill follows the estimator's state, not only the apply path:
+        // convergence can arrive with the correction unchanged (small median
+        // moves skip applyDaylightAnchor's hysteresis entirely), and the
+        // periodic lens-shading-driven refresh does not run on HAL-map
+        // devices. State transitions are rare, so posting per change is free.
+        if (est.state != daylightAnchorLastState) {
+            daylightAnchorLastState = est.state
+            mainHandler.post { updateDaylightAnchorUI() }
+        }
+        if (est.state == DaylightAnchorEstimator.State.IDLE &&
+            camera2Manager.latestAwbMode == android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT
+        ) {
+            est.start()
+        }
+        if (est.state == DaylightAnchorEstimator.State.SAMPLING ||
+            est.state == DaylightAnchorEstimator.State.CONVERGED
+        ) {
+            if (camera2Manager.latestAwbMode == android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT &&
+                camera2Manager.latestAwbState == CaptureResult.CONTROL_AWB_STATE_CONVERGED
+            ) {
+                est.addSample(camera2Manager.latestColorCorrectionGains)
+            }
+        }
+        if (daylightBootstrapActive) {
+            daylightBootstrapFrames++
+            if (est.state == DaylightAnchorEstimator.State.CONVERGED || daylightBootstrapFrames > 300) {
+                stopDaylightAnchorBootstrap()
+                // Anything but convergence means the HAL never reported stable
+                // daylight (no fixed mode, an ignored override, or gains that
+                // never settled): leave the pill Idle rather than Learning
+                // forever. Convergence keeps the anchor it sampled.
+                if (est.state != DaylightAnchorEstimator.State.CONVERGED) {
+                    est.reset()
+                }
+            }
+        }
+        val anchor = est.currentAnchor ?: return
+        val gains = floatArrayOf(anchor.rGain, 1f, anchor.bGain)
+        val prev = daylightAnchorGains
+        if (prev == null ||
+            kotlin.math.abs(gains[0] - prev[0]) > 0.01f ||
+            kotlin.math.abs(gains[2] - prev[2]) > 0.01f
+        ) {
+            daylightAnchorGains = gains
+            applyDaylightAnchor()
+        }
+        if (est.state == DaylightAnchorEstimator.State.CONVERGED && !daylightAnchorPersisted) {
+            val lens = lensManager.activeLens
+            if (lens != null && persistDaylightAnchor(lens.cameraId, gains)) {
+                daylightAnchorPersisted = true
+            }
+        }
+    }
+
+    // The estimator smooths the illuminant stage while the daylight reference
+    // is fixed; when the sampled anchor replaces that reference, rescale the
+    // smoothed stage so the product the renderer applies does not jump.
+    // illuminant = level / (means * daylight) exactly, so each phase moves by
+    // old/new and the product is preserved. Only meaningful while the
+    // estimator owns the smoothing state; right after a lens init the state
+    // was just reset and there is nothing to carry over.
+    private fun retargetDaylightSmoothing(oldDaylight: FloatArray?, newDaylight: FloatArray?) {
+        if (!estimatorReady) return
+        if (oldDaylight == null || newDaylight == null) return
+        val colorMap = previewRenderer.bayerColorMap
+        for (p in 0 until GreyWorldEstimate.PHASE_COUNT) {
+            val oldG = when (colorMap.getOrElse(p) { 1 }) {
+                0 -> oldDaylight[0]
+                2 -> oldDaylight[2]
+                else -> 1f
+            }
+            val newG = when (colorMap.getOrElse(p) { 1 }) {
+                0 -> newDaylight[0]
+                2 -> newDaylight[2]
+                else -> 1f
+            }
+            smoothedIlluminantGains[p] =
+                (smoothedIlluminantGains[p] * oldG / newG)
+                    .coerceIn(GreyWorldEstimate.MIN_GAIN, GreyWorldEstimate.MAX_GAIN)
+        }
+    }
+
+    private fun applyDaylightAnchor() {
+        val profile = rawColorProfile ?: return
+        val gains = daylightAnchorGains ?: return
+        val d = profile.daylightCorrectionFor(floatArrayOf(gains[0], 1f, 1f, gains[2])) ?: return
+        val applied = daylightAnchorApplied
+        if (applied != null &&
+            kotlin.math.abs(applied[0] - d[0]) < 0.005f &&
+            kotlin.math.abs(applied[2] - d[2]) < 0.005f
+        ) {
+            return
+        }
+        daylightAnchorApplied = d
+        profile.daylightCorrection = d
+        // The estimator's daylight reference is cached per lens; rebuild it
+        // against the corrected profile and carry the smoothing history over
+        // so the applied product stays put.
+        val oldDaylight = rawDaylightGains
+        rawDaylightGains = profile.daylightTransform()?.wbGains
+        retargetDaylightSmoothing(oldDaylight, rawDaylightGains)
+        CrashLogger.log(
+            TAG, "daylightAnchor: applied d=[${d.joinToString { String.format("%.4f", it) }}] " +
+                "daylight wb=[${rawDaylightGains?.joinToString { String.format("%.3f", it) }}]"
+        )
+        mainHandler.post { updateDaylightAnchorUI() }
+    }
+
+    private fun daylightAnchorFile(lensId: String): File = File(filesDir, "daylight_anchor_$lensId.json")
+
+    private fun persistDaylightAnchor(lensId: String, gains: FloatArray): Boolean {
+        return try {
+            val obj = JSONObject()
+            obj.put("r", gains[0].toDouble())
+            obj.put("b", gains[2].toDouble())
+            FileOutputStream(daylightAnchorFile(lensId)).use {
+                it.write(obj.toString().toByteArray(Charsets.UTF_8))
+            }
+            CrashLogger.log(TAG, "daylightAnchor: saved anchor for lens $lensId")
+            true
+        } catch (e: Exception) {
+            CrashLogger.log(TAG, "daylightAnchor: save failed ${e.message}")
+            false
+        }
+    }
+
+    private fun loadDaylightAnchor(lensId: String): FloatArray? {
+        val f = daylightAnchorFile(lensId)
+        if (!f.exists()) return null
+        return try {
+            val obj = JSONObject(f.readText(Charsets.UTF_8))
+            val r = obj.getDouble("r").toFloat()
+            val b = obj.getDouble("b").toFloat()
+            if (r.isFinite() && b.isFinite() && r in 0.3f..8f && b in 0.3f..8f) {
+                floatArrayOf(r, 1f, b)
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            CrashLogger.log(TAG, "daylightAnchor: load failed ${e.message}")
+            null
+        }
+    }
+
+    private fun deleteDaylightAnchorPersistence(lensId: String) {
+        try {
+            daylightAnchorFile(lensId).delete()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun updateDaylightAnchorUI() {
+        if (!::daylightAnchorEstimator.isInitialized) return
+        val frames = daylightAnchorEstimator.sampledFrames
+        var text: String
+        var color: Int
+        when {
+            daylightAnchorEstimator.state == DaylightAnchorEstimator.State.SAMPLING -> {
+                text = "Learning"; color = 0xFFFFA726.toInt()
+            }
+            daylightAnchorEstimator.state == DaylightAnchorEstimator.State.CONVERGED -> {
+                text = "Applied"; color = 0xFF7CB342.toInt()
+            }
+            daylightAnchorApplied != null -> {
+                text = "Applied (saved)"; color = 0xFF7CB342.toInt()
+            }
+            else -> {
+                text = "Idle"; color = 0xFF757575.toInt()
+            }
+        }
+        if (frames > 0 && daylightAnchorEstimator.state != DaylightAnchorEstimator.State.IDLE) {
+            text += " | $frames"
+        }
+        daylightAnchorStatusPill.text = text
+        daylightAnchorStatusPill.setBackgroundColor(color)
+        val canSample = cameraReady && camera2Manager.supportsDaylightMode
+        daylightAnchorStartBtn.isEnabled = canSample
+        daylightAnchorStartBtn.alpha = if (canSample) 1f else 0.5f
+    }
+
+    private val daylightAnchorNoticeHideRunnable = Runnable {
+        lensShadingNoticeOverlay.animate().cancel()
+        lensShadingNoticeOverlay.animate().alpha(0f).setDuration(300).withEndAction {
+            lensShadingNoticeOverlay.visibility = View.GONE
+        }.start()
+    }
+
+    private fun maybeShowDaylightAnchorNotice() {
+        if (daylightAnchorNoticeShown) return
+        daylightAnchorNoticeShown = true
+        lensShadingNoticeOverlay.removeCallbacks(daylightAnchorNoticeHideRunnable)
+        lensShadingNoticeOverlay.removeCallbacks(lensShadingNoticeHideRunnable)
+        lensShadingNoticeOverlay.animate().cancel()
+        lensShadingNoticeOverlay.text =
+            "Sampling the sensor's daylight response to calibrate the white balance presets.\n" +
+                "Check the Daylight Anchor settings to restart or clear it."
+        lensShadingNoticeOverlay.alpha = 0f
+        lensShadingNoticeOverlay.visibility = View.VISIBLE
+        lensShadingNoticeOverlay.animate().alpha(1f).setDuration(200).withEndAction {
+            lensShadingNoticeOverlay.postDelayed(daylightAnchorNoticeHideRunnable, 10_000)
+        }.start()
     }
 
     private fun restartCamera() {

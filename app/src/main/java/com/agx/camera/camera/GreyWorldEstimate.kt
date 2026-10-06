@@ -34,8 +34,8 @@ object GreyWorldEstimate {
     // frame, a fully masked region, or a site read outside the sensor.
     private const val MIN_PHASE_MEAN = 1.0
 
-    private const val MIN_GAIN = 0.5f
-    private const val MAX_GAIN = 8f
+    internal const val MIN_GAIN = 0.5f
+    internal const val MAX_GAIN = 8f
 
     /** What one sparse pass over the cells found. */
     class CellScan(
@@ -121,19 +121,134 @@ object GreyWorldEstimate {
     fun greenPhases(colorMap: IntArray): IntArray =
         (0 until PHASE_COUNT).filter { colorMap.getOrElse(it) { 1 } == 1 }.toIntArray()
 
+    /** The red and blue phases in that order. */
+    private fun redBluePhases(colorMap: IntArray): IntArray {
+        var redPhase = 0
+        var bluePhase = PHASE_COUNT - 1
+        for (p in 0 until PHASE_COUNT) {
+            when (colorMap.getOrElse(p) { 1 }) {
+                RED -> redPhase = p
+                BLUE -> bluePhase = p
+            }
+        }
+        return intArrayOf(redPhase, bluePhase)
+    }
+
     /**
-     * One gain per CFA phase, each bringing its phase up to the green reference,
-     * or null when a phase carries no usable signal.
+     * The two stages of the estimate, kept apart on purpose.
+     *
+     * [daylight] is the fixed gain that removes the sensor's own response to a
+     * neutral object under D65 - per lens, and not something the scene has any
+     * say in. It is the whitening gain, not the response: the response is its
+     * reciprocal, so [daylight] above 1 on a channel means the sensor answers
+     * below green there.
+     *
+     * [illuminant] is what the light actually was, measured on the frame with
+     * [daylight] already divided out. This is the reading worth logging: a D65
+     * scene gives all-1s here, so what is left is the scene's departure from
+     * daylight and nothing else.
+     *
+     * [phaseGains] is the product, which is the one array the renderer wants -
+     * reference off, illuminant corrected, frame on level codes green-normalized,
+     * which is the input the profile's daylight color matrix is built against.
      */
-    fun phaseGains(phaseMeans: DoubleArray, colorMap: IntArray): FloatArray? {
+    class Estimate(
+        /** Per-phase daylight whitening gain; all-1s when there was no profile to read. */
+        val daylight: FloatArray,
+        /** Per-phase departure from daylight; all-1s when the scene was D65. */
+        val illuminant: FloatArray,
+        /** [daylight] * [illuminant] per phase: what the renderer applies. */
+        val phaseGains: FloatArray
+    )
+
+    /**
+     * The full estimate, or null when a phase carries no usable signal.
+     *
+     * [daylightGains] are the fixed gain that removes the sensor's own response to a
+     * neutral object under D65, as [RawColorMath] reads it off the color matrices
+     * - green at 1, and on red and blue the reciprocal of what the CFA answers, so
+     * a channel the sensor answers weakly gets a gain above 1. They are divided
+     * out *before* the estimate, and that ordering is the whole point.
+     *
+     * A CFA response is green-biased by construction: the green filter passes far
+     * more of any light than red or blue does, so the pre-white-balance signal for
+     * a genuinely D65 scene is strongly chromatic green. Estimating on that raw
+     * signal answers with the CFA's own bias rather than with the light - what it
+     * really reports is the sensor's response to daylight, which every D65 scene
+     * shares and which therefore swamps the part that varies. Taking the daylight
+     * gains off first leaves the estimator looking only at the illuminant.
+     *
+     * The two green sites always share one target in the estimate: the geometric
+     * mean of the two sites, which is what keeps the pair balanced for the demosaic
+     * merge. The daylight gains carry green at 1, so that reconciliation is
+     * untouched by the first stage.
+     *
+     * A [daylightGains] that is not three finite positive numbers leaves the first
+     * stage out, which degrades to estimating straight off the raw signal.
+     */
+    fun estimate(
+        phaseMeans: DoubleArray,
+        colorMap: IntArray,
+        daylightGains: FloatArray? = null
+    ): Estimate? {
         val greens = greenPhases(colorMap)
         if (greens.size != 2) return null
-        if (phaseMeans.any { it <= MIN_PHASE_MEAN }) return null
-        val reference = sqrt(phaseMeans[greens[0]] * phaseMeans[greens[1]])
+        val anchor = daylightGains?.takeIf { d -> d.size >= 3 && d.all { it.isFinite() && it > 0f } }
+        val redBlue = redBluePhases(colorMap)
+
+        // Stage one: the fixed gain that takes the sensor's own daylight response off,
+        // which is a constant and no part of the estimate.
+        val daylight = FloatArray(PHASE_COUNT) { p ->
+            if (anchor == null) {
+                1f
+            } else {
+                when (p) {
+                    redBlue[0] -> anchor[0]
+                    redBlue[1] -> anchor[2]
+                    else -> 1f
+                }
+            }
+        }
+
+        // Stage two: what the light did, measured on the corrected signal.
+        val corrected = DoubleArray(PHASE_COUNT) { p -> phaseMeans[p] * daylight[p] }
+        if (corrected.any { it <= MIN_PHASE_MEAN }) return null
+        val level = sqrt(corrected[greens[0]] * corrected[greens[1]])
+        val illuminant = FloatArray(PHASE_COUNT) { p ->
+            (level / corrected[p]).toFloat().coerceIn(MIN_GAIN, MAX_GAIN)
+        }
+        val phaseGains = combine(illuminant, daylight)
+        return Estimate(daylight, illuminant, phaseGains)
+    }
+
+    /**
+     * The two stages multiplied per phase and clamped as one product.
+     *
+     * A caller that smooths [Estimate.illuminant] across frames and then rebuilds
+     * the renderer array itself must go through here, not multiply directly: the
+     * clamp belongs to the product, since a smoothed illuminant is already inside
+     * [MIN_GAIN]/[MAX_GAIN] but its product with the daylight gain is not
+     * necessarily. Clamping the two independently, or not at all, gives the
+     * renderer a different array than [Estimate.phaseGains] describes.
+     */
+    fun combine(illuminant: FloatArray, daylight: FloatArray): FloatArray {
+        require(illuminant.size == PHASE_COUNT && daylight.size == PHASE_COUNT) {
+            "both stages are per phase, so both need $PHASE_COUNT entries"
+        }
         return FloatArray(PHASE_COUNT) { p ->
-            (reference / phaseMeans[p]).toFloat().coerceIn(MIN_GAIN, MAX_GAIN)
+            (illuminant[p] * daylight[p]).coerceIn(MIN_GAIN, MAX_GAIN)
         }
     }
+
+    /**
+     * [estimate] reduced to the one array the renderer applies, or null when a
+     * phase carries no usable signal.
+     */
+    fun phaseGains(
+        phaseMeans: DoubleArray,
+        colorMap: IntArray,
+        daylightGains: FloatArray? = null
+    ): FloatArray? = estimate(phaseMeans, colorMap, daylightGains)?.phaseGains
 
     /**
      * The part of the solution that has to land before the demosaic merges
@@ -157,14 +272,7 @@ object GreyWorldEstimate {
 
     /** The same solution as red and blue gains referenced to green at 1.0. */
     fun colorGains(phaseGains: FloatArray, colorMap: IntArray): FloatArray {
-        var redPhase = 0
-        var bluePhase = PHASE_COUNT - 1
-        for (p in 0 until PHASE_COUNT) {
-            when (colorMap.getOrElse(p) { 1 }) {
-                RED -> redPhase = p
-                BLUE -> bluePhase = p
-            }
-        }
-        return floatArrayOf(phaseGains[redPhase], 1f, phaseGains[bluePhase])
+        val redBlue = redBluePhases(colorMap)
+        return floatArrayOf(phaseGains[redBlue[0]], 1f, phaseGains[redBlue[1]])
     }
 }

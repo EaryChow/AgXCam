@@ -66,6 +66,37 @@ class Camera2Manager(private val context: Context) {
     @Volatile
     var latestColorCorrectionGains: FloatArray? = null
 
+    // Result-side AWB mode/state behind the last COLOR_CORRECTION readback.
+    // The daylight anchor sampler only trusts gains the HAL reported while
+    // pinned to its fixed DAYLIGHT mode and converged.
+    @Volatile
+    var latestAwbMode: Int? = null
+
+    @Volatile
+    var latestAwbState: Int? = null
+
+    // While set, the preview request is pinned to the HAL's fixed DAYLIGHT
+    // mode regardless of the user white balance mode, so the daylight anchor
+    // sampler gets converged daylight readbacks to calibrate from. The app's
+    // own render pipeline never applies HAL color correction state, so the
+    // preview image is unaffected; only the readback changes.
+    @Volatile
+    var daylightCalibrationOverride: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            applyPreviewRequest()
+        }
+
+    // True when the HAL exposes the fixed DAYLIGHT mode the anchor sampler
+    // calibrates from. An empty set means the characteristics have not been
+    // read yet (openCamera not run), which is not the same as unsupported:
+    // the bootstrap starts before then on most launch paths, so an empty set
+    // is treated as unknown and allowed.
+    val supportsDaylightMode: Boolean
+        get() = availableAwbModes.isEmpty() ||
+            CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT in availableAwbModes
+
     private var ccLogCount = 0
 
     // Lens shading (vignette) correction. The HAL is asked to compute the
@@ -585,6 +616,11 @@ class Camera2Manager(private val context: Context) {
     // The AWB mode actually sent to the HAL (Kelvin's OFF is substituted with
     // the fixed D65 preset because vendor HALs ignore AWB-OFF).
     private fun effectiveAwbMode(): Int {
+        if (daylightCalibrationOverride &&
+            CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT in availableAwbModes
+        ) {
+            return CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT
+        }
         return if (currentAwbMode == CaptureRequest.CONTROL_AWB_MODE_OFF) {
             pendingHoldMode() ?: CaptureRequest.CONTROL_AWB_MODE_AUTO
         } else {
@@ -1540,11 +1576,13 @@ CaptureRequest.CONTROL_AWB_MODE_SHADE -> "SHADE"
             latestColorCorrectionGains = ccg?.let {
                 floatArrayOf(it.red, it.greenEven, it.greenOdd, it.blue)
             }
+            latestAwbMode = result.get(CaptureResult.CONTROL_AWB_MODE)
+            latestAwbState = result.get(CaptureResult.CONTROL_AWB_STATE)
             ccLogCount++
             if (ccLogCount % 60 == 0) {
                 CrashLogger.log(TAG,
-                    "cc: awbState=${awbStateName(result.get(CaptureResult.CONTROL_AWB_STATE))} " +
-                    "awbMode=${awbModeName(result.get(CaptureResult.CONTROL_AWB_MODE) ?: -1)} " +
+                    "cc: awbState=${awbStateName(latestAwbState)} " +
+                    "awbMode=${awbModeName(latestAwbMode ?: -1)} " +
                     "gains=[${latestColorCorrectionGains?.joinToString { String.format("%.3f", it) }}] " +
                     "mat=[${latestColorCorrectionMatrix?.joinToString { String.format("%.4f", it) }}]"
                 )

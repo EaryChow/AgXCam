@@ -3,6 +3,7 @@ package com.agx.camera.camera
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -96,10 +97,10 @@ class GreyWorldEstimateTest {
         val gains = GreyWorldEstimate.phaseGains(phaseMeans, rggb)!!
 
         val reference = sqrt(phaseMeans[1] * phaseMeans[2])
-        assertClose(reference.toFloat(), (phaseMeans[1] * gains[1]).toFloat())
-        assertClose(reference.toFloat(), (phaseMeans[2] * gains[2]).toFloat())
-        assertClose(reference.toFloat(), (phaseMeans[0] * gains[0]).toFloat())
-        assertClose(reference.toFloat(), (phaseMeans[3] * gains[3]).toFloat())
+        assertClose("green A", reference.toFloat(), (phaseMeans[1] * gains[1]).toFloat())
+        assertClose("green B", reference.toFloat(), (phaseMeans[2] * gains[2]).toFloat())
+        assertClose("red", reference.toFloat(), (phaseMeans[0] * gains[0]).toFloat())
+        assertClose("blue", reference.toFloat(), (phaseMeans[3] * gains[3]).toFloat())
 
         // The split is real, not one averaged green dressed up as a pair.
         assertNotEquals(gains[1], gains[2])
@@ -110,7 +111,289 @@ class GreyWorldEstimateTest {
         val buffer = mosaic(red = 640, greenA = 640, greenB = 640, blue = 640)
         val gains = GreyWorldEstimate.phaseGains(means(buffer), rggb)!!
 
-        gains.forEachIndexed { p, gain -> assertClose(1f, gain, 1e-3f) }
+        gains.forEachIndexed { p, gain -> assertClose("phase $p", 1f, gain, 1e-3f) }
+    }
+
+    // A sensor never answers with equal codes on its three filters, so a frame of
+    // equal numbers is not what a neutral scene looks like on the CFA. This is the
+    // sensor's daylight response with green at 1, and the gains that take it to
+    // level codes - the pair the profile hands over for a D65 reference.
+    private val daylightResponse = floatArrayOf(0.45f, 1f, 0.75f)
+    private val daylightGains = floatArrayOf(
+        1f / daylightResponse[0], 1f, 1f / daylightResponse[2]
+    )
+
+    @Test
+    fun aDaylightNeutralFrameAsksForNoChange() {
+        // This frame is what the sensor reports for a neutral object under D65: the
+        // CFA's green bias, nothing else. With that divided out first, the light is
+        // left holding nothing - the illuminant stage is all-1s, which is the whole
+        // claim: the reading is a measurement of the light, and there was no light
+        // to measure beyond the reference.
+        val buffer = mosaic(red = 450, greenA = 1000, greenB = 1000, blue = 750)
+        val estimate = GreyWorldEstimate.estimate(means(buffer), rggb, daylightGains)!!
+
+        estimate.illuminant.forEachIndexed { p, gain ->
+            assertClose("illuminant $p", 1f, gain, 1e-3f)
+        }
+
+        // The product the renderer applies is the daylight gains, because that is
+        // still what takes a D65 frame to level codes. Only the illuminant stage is
+        // the measurement.
+        assertClose("red", daylightGains[0], estimate.phaseGains[0], 1e-3f)
+        assertClose("blue", daylightGains[2], estimate.phaseGains[3], 1e-3f)
+    }
+
+    @Test
+    fun withoutTheDaylightReferenceTheEstimateIsDominatedByTheCfa() {
+        // The same D65 frame read without the reference comes back strongly
+        // red-deficient and blue-deficient. Nothing in the scene is off-neutral -
+        // the estimate is reporting the CFA's own response to the light, which is
+        // a constant every D65 scene shares. That constant is what swamps the part
+        // that actually varies, and it is why the reference has to come off first.
+        val buffer = mosaic(red = 450, greenA = 1000, greenB = 1000, blue = 750)
+        val unanchored = GreyWorldEstimate.estimate(means(buffer), rggb)!!
+
+        // The magnitude is the failure. On a frame lit by exactly the daylight the
+        // CFA is anchored to, the unanchored reading is still more than 2x on red -
+        // it reports a strong red cast where there is none at all. That bias is
+        // baked into the green filter, identical on every daylight scene the sensor
+        // ever sees, and it lands in the same number the light itself moves. No
+        // threshold on the reading can separate the two.
+        assertTrue("unanchored red ${unanchored.illuminant[0]}", unanchored.illuminant[0] > 2f)
+
+        // The same frame with the daylight reference taken off first: all-1s,
+        // because the light was exactly what the reference describes.
+        val anchored = GreyWorldEstimate.estimate(means(buffer), rggb, daylightGains)!!
+        anchored.illuminant.forEachIndexed { p, gain ->
+            assertClose("anchored illuminant $p", 1f, gain, 1e-3f)
+        }
+
+        // And a genuinely warm scene still comes back warm, so the reference is
+        // not simply flattening the estimate.
+        val tungsten = GreyWorldEstimate.estimate(
+            means(mosaic(red = 700, greenA = 1000, greenB = 1000, blue = 600)),
+            rggb,
+            daylightGains
+        )!!
+        assertTrue("tungsten red ${tungsten.illuminant[0]}", tungsten.illuminant[0] < 1f)
+        assertTrue("tungsten blue ${tungsten.illuminant[3]}", tungsten.illuminant[3] > 1f)
+    }
+
+    @Test
+    fun theDaylightAnchorLeavesTheGreenSitesAlone() {
+        val buffer = mosaic(red = 300, greenA = 200, greenB = 800, blue = 400)
+        val phaseMeans = means(buffer)
+        val plain = GreyWorldEstimate.estimate(phaseMeans, rggb)!!
+        val anchored = GreyWorldEstimate.estimate(phaseMeans, rggb, daylightGains)!!
+
+        // The daylight reference carries green at 1, so the green pair's target is
+        // unchanged: the geometric mean of the two sites either way, which is what
+        // keeps the demosaic merge balanced.
+        assertClose("green A", plain.illuminant[1], anchored.illuminant[1])
+        assertClose("green B", plain.illuminant[2], anchored.illuminant[2])
+        // Still two distinct answers, not one green averaged twice.
+        assertNotEquals(anchored.illuminant[1], anchored.illuminant[2])
+        // Red and blue are the ones that moved.
+        assertNotEquals("red", plain.illuminant[0], anchored.illuminant[0])
+        assertNotEquals("blue", plain.illuminant[3], anchored.illuminant[3])
+        // And the reference itself is passed through untouched on the greens.
+        assertClose("daylight green A", 1f, anchored.daylight[1])
+        assertClose("daylight green B", 1f, anchored.daylight[2])
+    }
+
+    @Test
+    fun theDaylightAnchorLeavesAWarmSceneAlone() {
+        // Tungsten: more red and less blue than daylight. The anchor still reads it
+        // as off-neutral and still corrects it - red down, blue up - but it
+        // corrects by less, because daylight itself already answers below green on
+        // red and blue. Referencing green alone asks for the difference between the
+        // scene and a flat response, which is a bigger correction than the
+        // difference between the scene and what the sensor does under daylight.
+        val buffer = mosaic(red = 700, greenA = 1000, greenB = 1000, blue = 600)
+        val phaseMeans = means(buffer)
+        val plain = GreyWorldEstimate.estimate(phaseMeans, rggb)!!
+        val anchored = GreyWorldEstimate.estimate(phaseMeans, rggb, daylightGains)!!
+
+        // Red is over-represented under tungsten, so it comes back; blue is
+        // under-represented, so it goes up.
+        assertTrue("red ${anchored.illuminant[0]} should fall below 1", anchored.illuminant[0] < 1f)
+        assertTrue("blue ${anchored.illuminant[3]} should rise above 1", anchored.illuminant[3] > 1f)
+        // Both moves are smaller than the flat-reference version's, because daylight
+        // itself already answers below green on red and blue.
+        assertTrue(
+            "red ${anchored.illuminant[0]} vs ${plain.illuminant[0]}",
+            anchored.illuminant[0] < plain.illuminant[0]
+        )
+        assertTrue(
+            "blue ${anchored.illuminant[3]} vs ${plain.illuminant[3]}",
+            anchored.illuminant[3] < plain.illuminant[3]
+        )
+    }
+
+    @Test
+    fun theDaylightAnchorFollowsTheBayerPattern() {
+        // GRBG puts its greens on phases 0 and 3, so the same daylight frame has to
+        // be written the same way or the anchor lands on the wrong filters.
+        val phaseMeans = doubleArrayOf(1000.0, 450.0, 750.0, 1000.0)
+        val estimate = GreyWorldEstimate.estimate(phaseMeans, grbg, daylightGains)!!
+        val reference = sqrt(phaseMeans[0] * phaseMeans[3])
+
+        // Corrected means land on one level green-normalized whichever phase holds
+        // which filter. GRBG puts green on 0 and 3, so the reference is their
+        // geometric mean rather than phases 1 and 2.
+        assertClose("red", reference.toFloat(), (phaseMeans[1] * estimate.phaseGains[1]).toFloat(), 1e-2f)
+        assertClose("blue", reference.toFloat(), (phaseMeans[2] * estimate.phaseGains[2]).toFloat(), 1e-2f)
+        assertClose("green A", reference.toFloat(), (phaseMeans[0] * estimate.phaseGains[0]).toFloat(), 1e-2f)
+        assertClose("green B", reference.toFloat(), (phaseMeans[3] * estimate.phaseGains[3]).toFloat(), 1e-2f)
+
+        // The reference landed on the filters that are not green, so this is the
+        // case where a mix-up would put the CFA's bias on the wrong pair.
+        assertTrue("red ${estimate.phaseGains[1]}", estimate.phaseGains[1] > 1f)
+        assertTrue("blue ${estimate.phaseGains[2]}", estimate.phaseGains[2] > 1f)
+        estimate.illuminant.forEachIndexed { p, gain ->
+            assertClose("illuminant $p", 1f, gain, 1e-3f)
+        }
+    }
+
+    @Test
+    fun theAnchoredEstimateLandsOnLevelCodes() {
+        // Whatever the light was, the corrected frame has to come out level
+        // green-normalized. That is the invariant the profile's colour matrix is
+        // built against, and it is what makes the returned array safe to hand
+        // straight to the renderer as one product of both stages.
+        // Every mean stays under the scan's white level: a cell holding a clipped
+        // filter is dropped whole, so one value at 1023 would empty the frame and
+        // leave the estimate nothing to work from.
+        val frames = listOf(
+            "daylight" to mosaic(red = 450, greenA = 1000, greenB = 1000, blue = 750),
+            "tungsten" to mosaic(red = 700, greenA = 1000, greenB = 1000, blue = 600),
+            "overcast" to mosaic(red = 400, greenA = 1000, greenB = 1000, blue = 800),
+            "split greens" to mosaic(red = 450, greenA = 600, greenB = 1000, blue = 750)
+        )
+        for ((label, buffer) in frames) {
+            val phaseMeans = means(buffer)
+            val gains = GreyWorldEstimate.estimate(phaseMeans, rggb, daylightGains)!!.phaseGains
+            val preMerge = GreyWorldEstimate.preMergeGains(gains, rggb)
+            val colors = GreyWorldEstimate.colorGains(gains, rggb)
+            val balanced = floatArrayOf(
+                (phaseMeans[0] * preMerge[0] * colors[0]).toFloat(),
+                (phaseMeans[1] * preMerge[1] * colors[1]).toFloat(),
+                (phaseMeans[3] * preMerge[3] * colors[2]).toFloat()
+            )
+            assertClose("$label red", balanced[1], balanced[0], 1e-2f)
+            assertClose("$label blue", balanced[1], balanced[2], 1e-2f)
+        }
+    }
+
+    @Test
+    fun theFloorIsCheckedAfterTheDaylightReferenceComesOff() {
+        // MIN_PHASE_MEAN is a floor on usable signal, not on the frame being
+        // neutral, and it applies to what the estimator is about to divide by. A
+        // frame the sensor barely answers at all is refused either way, because a
+        // gain built on a near-black mean is a guess.
+        val dim = mosaic(red = 0, greenA = 1, greenB = 1, blue = 0)
+        assertNull(GreyWorldEstimate.estimate(means(dim), rggb, daylightGains))
+        assertNull(GreyWorldEstimate.estimate(means(dim), rggb))
+
+        // The floor guards the corrected signal, so it sees the product rather than
+        // the raw mean. Red and blue at 0.5 are under the floor on their own but
+        // come out above it once the reference lifts them, and the estimate is
+        // legitimate either way - there is real signal there to work from.
+        val faint = mosaic(red = 1, greenA = 1000, greenB = 1000, blue = 1)
+        assertNull(GreyWorldEstimate.estimate(means(faint), rggb))
+        assertNotNull(GreyWorldEstimate.estimate(means(faint), rggb, daylightGains))
+    }
+
+    @Test
+    fun aMalformedDaylightAnchorFallsBackToGreen() {
+        // A broken profile must not take the estimate with it. Ignoring the anchor
+        // and falling back to the green-referenced answer is wrong by a fixed factor
+        // and visible; returning null would stall the gains instead.
+        val buffer = mosaic(red = 300, greenA = 200, greenB = 800, blue = 400)
+        val phaseMeans = means(buffer)
+        val plain = GreyWorldEstimate.estimate(phaseMeans, rggb)!!
+
+        val malformed = listOf(
+            null,
+            floatArrayOf(0f, 1f, 1f),
+            floatArrayOf(1f, 0f, 1f),
+            floatArrayOf(1f, 1f, Float.NaN),
+            floatArrayOf(Float.POSITIVE_INFINITY, 1f, 1f),
+            floatArrayOf(-1f, 1f, 1f),
+            floatArrayOf(1f, 1f)
+        )
+        for (anchor in malformed) {
+            val estimate = GreyWorldEstimate.estimate(phaseMeans, rggb, anchor)
+            assertNotNull("anchor ${anchor?.toList()}", estimate)
+            assertArrayEquals("daylight ${anchor?.toList()}", plain.daylight, estimate!!.daylight, 1e-6f)
+            assertArrayEquals("illuminant ${anchor?.toList()}", plain.illuminant, estimate.illuminant, 1e-6f)
+            assertArrayEquals("gains ${anchor?.toList()}", plain.phaseGains, estimate.phaseGains, 1e-6f)
+        }
+
+        // A longer array is not malformed, it is just carrying more than the three
+        // filters use. Reading the first three matches normalize() and the rest of
+        // the profile math, which all accept anything from three up.
+        val longer = GreyWorldEstimate.estimate(
+            phaseMeans, rggb, daylightGains + floatArrayOf(9f)
+        )!!
+        val expected = GreyWorldEstimate.estimate(phaseMeans, rggb, daylightGains)!!
+        assertArrayEquals(expected.daylight, longer.daylight, 1e-6f)
+        assertArrayEquals(expected.illuminant, longer.illuminant, 1e-6f)
+        assertArrayEquals(expected.phaseGains, longer.phaseGains, 1e-6f)
+    }
+
+    @Test
+    fun aSmoothedProductIsClampedAsOneNumber() {
+        // The app smooths the illuminant across frames and rebuilds the renderer
+        // array itself, so the clamp has to belong to the product: a smoothed
+        // illuminant is already inside the bounds, but multiplied by the daylight
+        // gain it need not be. Both sides have to come out of the same definition
+        // or the renderer holds an array estimate() would not describe.
+        val estimate = GreyWorldEstimate.estimate(
+            means(mosaic(red = 1, greenA = 1000, greenB = 1000, blue = 1)), rggb, daylightGains
+        )!!
+        assertArrayEquals(
+            estimate.phaseGains,
+            GreyWorldEstimate.combine(estimate.illuminant, estimate.daylight),
+            0f
+        )
+
+        // A pair that multiplies out past the bound is clamped, not passed through.
+        val pushy = floatArrayOf(4f, 1f, 4f, 1f)
+        assertArrayEquals(
+            floatArrayOf(8f, 1f, 8f, 1f),
+            GreyWorldEstimate.combine(pushy, pushy),
+            0f
+        )
+        val faint = floatArrayOf(0.4f, 1f, 0.4f, 1f)
+        assertArrayEquals(
+            floatArrayOf(0.5f, 1f, 0.5f, 1f),
+            GreyWorldEstimate.combine(faint, faint),
+            0f
+        )
+    }
+
+    @Test
+    fun theSplitStillReconstructsTheAnchoredSolution() {
+        val buffer = mosaic(red = 300, greenA = 200, greenB = 800, blue = 400)
+        val phaseGains = GreyWorldEstimate.phaseGains(means(buffer), rggb, daylightGains)!!
+        val preMerge = GreyWorldEstimate.preMergeGains(phaseGains, rggb)
+        val colors = GreyWorldEstimate.colorGains(phaseGains, rggb)
+
+        assertArrayEquals(floatArrayOf(1f, phaseGains[1], phaseGains[2], 1f), preMerge, 1e-6f)
+        assertArrayEquals(floatArrayOf(phaseGains[0], 1f, phaseGains[3]), colors, 1e-6f)
+
+        // The anchor changes the red and blue targets, not the split, so the two
+        // halves still reconstruct the per-phase solution exactly.
+        for (p in 0 until GreyWorldEstimate.PHASE_COUNT) {
+            val combined = preMerge[p] * when (rggb[p]) {
+                0 -> colors[0]
+                2 -> colors[2]
+                else -> colors[1]
+            }
+            assertEquals("phase $p", phaseGains[p], combined, 1e-5f)
+        }
     }
 
     @Test
@@ -200,15 +483,24 @@ class GreyWorldEstimateTest {
         val phaseGains = GreyWorldEstimate.phaseGains(phaseMeans, grbg)!!
         val preMerge = GreyWorldEstimate.preMergeGains(phaseGains, grbg)
 
-        assertClose(phaseGains[0], preMerge[0])
-        assertClose(1f, preMerge[1])
-        assertClose(1f, preMerge[2])
-        assertClose(phaseGains[3], preMerge[3])
+        // Greens carry their gain before the merge; red and blue wait until after it.
+        assertClose("green A", phaseGains[0], preMerge[0])
+        assertClose("red", 1f, preMerge[1])
+        assertClose("blue", 1f, preMerge[2])
+        assertClose("green B", phaseGains[3], preMerge[3])
 
         // Both greens still reach the same number under this pattern too.
         val reference = sqrt(phaseMeans[0] * phaseMeans[3])
-        assertClose(reference.toFloat(), (phaseMeans[0] * preMerge[0]).toFloat())
-        assertClose(reference.toFloat(), (phaseMeans[3] * preMerge[3]).toFloat())
+        assertClose(
+            "green A",
+            reference.toFloat(),
+            (phaseMeans[0] * preMerge[0]).toFloat()
+        )
+        assertClose(
+            "green B",
+            reference.toFloat(),
+            (phaseMeans[3] * preMerge[3]).toFloat()
+        )
     }
 
     @Test
@@ -229,7 +521,7 @@ class GreyWorldEstimateTest {
         gains.forEach { gain ->
             assertTrue("gain $gain out of range", gain in 0.5f..8f)
         }
-        assertClose(8f, gains[3])
+        assertClose("clamped blue", 8f, gains[3])
     }
 
     // --- Clipped-region exclusion ---
@@ -273,7 +565,7 @@ class GreyWorldEstimateTest {
         // Every surviving cell reads the same neutral value, so the surviving
         // phases still ask for no change.
         val gains = GreyWorldEstimate.phaseGains(result.means, rggb)!!
-        gains.forEach { gain -> assertClose(1f, gain, 1e-3f) }
+        gains.forEach { gain -> assertClose("surviving phase", 1f, gain, 1e-3f) }
     }
 
     @Test
@@ -370,7 +662,7 @@ class GreyWorldEstimateTest {
         // guaranteed to be seen - stated here because the estimate tolerates it:
         // the gains are unchanged at 1 either way.
         val gains = GreyWorldEstimate.phaseGains(means(buffer, stride = 2), rggb)!!
-        gains.forEach { gain -> assertClose(1f, gain, 1e-3f) }
+        gains.forEach { gain -> assertClose("gain", 1f, gain, 1e-3f) }
     }
 
     @Test
@@ -386,7 +678,10 @@ class GreyWorldEstimateTest {
         assertArrayEquals(doubleArrayOf(0.0, 0.0, 0.0, 0.0), result.means, 1e-9)
     }
 
-    private fun assertClose(expected: Float, actual: Float, tolerance: Float = 1e-4f) {
-        assertTrue("expected $expected but was $actual", abs(expected - actual) <= tolerance)
+    private fun assertClose(label: String, expected: Float, actual: Float, tolerance: Float = 1e-4f) {
+        assertTrue(
+            "$label: expected $expected but was $actual (tolerance $tolerance)",
+            abs(expected - actual) <= tolerance
+        )
     }
 }

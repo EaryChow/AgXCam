@@ -37,15 +37,49 @@ import kotlin.math.sqrt
  *
  * The result makes the physical as-shot neutral map to sRGB white: scene
  * whites become numerically equal after the matrix, independent of the
- * sensor's channel sensitivities or the capture illuminant. No HAL color
- * correction state (COLOR_CORRECTION_TRANSFORM / COLOR_CORRECTION_GAINS) is
- * used -- the profile is static per camera and the only frame-varying input
- * is the as-shot neutral.
+ * sensor's channel sensitivities or the capture illuminant.
+ *
+ * The reported color matrices describe a nominal sensor. Vendors do not always
+ * author them in the gain space the RAW stream actually lives in, so the
+ * profile alone can misplace the sensor's response to a D65 white, and every
+ * path that trusts the sensor model would render the gap as a cast. A
+ * per-device diagonal bridge ([daylightCorrection], sampled at runtime by
+ * DaylightAnchorEstimator from the HAL's fixed daylight gains, lens-shading
+ * style) scales the reported matrices into the live gain space. Until a sample
+ * arrives the correction is the identity and the profile is used as reported.
  */
 class RawColorProfile(chars: CameraCharacteristics) {
 
-    private val colorMatrix1: Mat3
-    private val colorMatrix2: Mat3
+    private val rawColorMatrix1: Mat3
+    private val rawColorMatrix2: Mat3
+
+    // Per-device diagonal bridging the reported color matrices into the live
+    // RAW gain space. Vendors do not always author the DNG color matrices in
+    // the gain space the RAW stream actually lives in; the profile's answer to
+    // "what does the sensor say to a D65 white" then disagrees with the
+    // device's own daylight gains and every path that trusts the sensor model
+    // renders the mismatch as a cast. Sampled at runtime by
+    // DaylightAnchorEstimator (median of the HAL daylight-mode gains) and
+    // identity until then.
+    @Volatile
+    var daylightCorrection: FloatArray = floatArrayOf(1f, 1f, 1f)
+        set(value) {
+            if (value.size >= 3 && value[0].isFinite() && value[1].isFinite() &&
+                value[2].isFinite() && value[0] > 0f && value[1] > 0f && value[2] > 0f
+            ) {
+                field = floatArrayOf(value[0], value[1], value[2])
+            }
+        }
+
+    private fun correctedColorMatrix(m: Mat3): Mat3 = ColorMatrix.multiply(
+        ColorMatrix.diagonal(daylightCorrection[0], daylightCorrection[1], daylightCorrection[2]),
+        m
+    )
+
+    private val effectiveColorMatrix1: Mat3
+        get() = correctedColorMatrix(rawColorMatrix1)
+    private val effectiveColorMatrix2: Mat3
+        get() = correctedColorMatrix(rawColorMatrix2)
     private val calibration1: Mat3
     private val calibration2: Mat3
     private val forwardMatrix1: Mat3?
@@ -63,6 +97,18 @@ class RawColorProfile(chars: CameraCharacteristics) {
     /** True when at least one forward camera->XYZ matrix was reported. */
     val hasForwardMatrix: Boolean
 
+    /**
+     * One reference illuminant: the temperature it was measured at, together with
+     * the matrices that belong to it. Kept as one value so the two can never be
+     * separated again -- see [orderReferences].
+     */
+    internal data class ReferenceIlluminant(
+        val kelvin: Float,
+        val colorMatrix: Mat3?,
+        val calibration: Mat3?,
+        val forwardMatrix: Mat3?
+    )
+
     init {
         val cm1 = readMatrix(chars, "SENSOR_COLOR_TRANSFORM1")
         val cm2 = readMatrix(chars, "SENSOR_COLOR_TRANSFORM2")
@@ -71,32 +117,35 @@ class RawColorProfile(chars: CameraCharacteristics) {
         val fm1 = readMatrix(chars, "SENSOR_FORWARD_MATRIX1")
         val fm2 = readMatrix(chars, "SENSOR_FORWARD_MATRIX2")
 
-        colorMatrix1 = cm1 ?: Mat3()
-        colorMatrix2 = cm2 ?: Mat3()
-        calibration1 = cal1 ?: Mat3()
-        calibration2 = cal2 ?: Mat3()
-        forwardMatrix1 = fm1
-        forwardMatrix2 = fm2
-
         available = cm1 != null || cm2 != null
         hasForwardMatrix = fm1 != null || fm2 != null
 
-        var t1 = readReferenceIlluminantKelvin(chars, "SENSOR_REFERENCE_ILLUMINANT1") ?: 2856f
-        var t2 = readReferenceIlluminantKelvin(chars, "SENSOR_REFERENCE_ILLUMINANT2") ?: 6504f
-        if (t1 > t2) {
-            val swap = t1
-            t1 = t2
-            t2 = swap
-        }
-        colorTemperature1 = t1
-        colorTemperature2 = t2
+        val (warm, cool) = orderReferences(
+            ReferenceIlluminant(
+                readReferenceIlluminantKelvin(chars, "SENSOR_REFERENCE_ILLUMINANT1") ?: 2856f,
+                cm1, cal1, fm1
+            ),
+            ReferenceIlluminant(
+                readReferenceIlluminantKelvin(chars, "SENSOR_REFERENCE_ILLUMINANT2") ?: 6504f,
+                cm2, cal2, fm2
+            )
+        )
+
+        colorTemperature1 = warm.kelvin
+        colorTemperature2 = cool.kelvin
+        rawColorMatrix1 = warm.colorMatrix ?: Mat3()
+        rawColorMatrix2 = cool.colorMatrix ?: Mat3()
+        calibration1 = warm.calibration ?: Mat3()
+        calibration2 = cool.calibration ?: Mat3()
+        forwardMatrix1 = warm.forwardMatrix
+        forwardMatrix2 = cool.forwardMatrix
 
         Log.d(
             TAG, "RawColorProfile: available=$available fwd=$hasForwardMatrix " +
-                "illuminants=${t1.toInt()}K/${t2.toInt()}K " +
-                "cm1=${matStr(cm1)}" +
-                "cal1=${matStr(cal1)}" +
-                "fwd1=${matStr(fm1)}"
+                "illuminants=${warm.kelvin.toInt()}K(warm)/${cool.kelvin.toInt()}K(cool) " +
+                "cm_warm=${matStr(warm.colorMatrix)}" +
+                "cal_warm=${matStr(warm.calibration)}" +
+                "fwd_warm=${matStr(warm.forwardMatrix)}"
         )
     }
 
@@ -107,7 +156,7 @@ class RawColorProfile(chars: CameraCharacteristics) {
      */
     fun temperatureForNeutral(neutralSensorRgb: FloatArray): Float? {
         val neutral = RawColorMath.normalize(neutralSensorRgb) ?: return null
-        val xy = RawColorMath.sceneWhiteXy(neutral, colorMatrix1, colorMatrix2, colorTemperature1, colorTemperature2) ?: return null
+        val xy = RawColorMath.sceneWhiteXy(neutral, effectiveColorMatrix1, effectiveColorMatrix2, colorTemperature1, colorTemperature2) ?: return null
         return RawColorMath.xyToTemperature(xy)
     }
 
@@ -118,7 +167,7 @@ class RawColorProfile(chars: CameraCharacteristics) {
     fun srgbMatrixForNeutral(neutralSensorRgb: FloatArray): Mat3? {
         if (!available) return null
         return RawColorMath.srgbMatrix(
-            colorMatrix1, colorMatrix2,
+            effectiveColorMatrix1, effectiveColorMatrix2,
             calibration1, calibration2,
             forwardMatrix1, forwardMatrix2,
             colorTemperature1, colorTemperature2,
@@ -134,7 +183,7 @@ class RawColorProfile(chars: CameraCharacteristics) {
     fun neutralTransformForNeutral(neutralSensorRgb: FloatArray): RawColorMath.NeutralTransform? {
         if (!available) return null
         return RawColorMath.neutralTransform(
-            colorMatrix1, colorMatrix2,
+            effectiveColorMatrix1, effectiveColorMatrix2,
             calibration1, calibration2,
             forwardMatrix1, forwardMatrix2,
             colorTemperature1, colorTemperature2,
@@ -142,8 +191,192 @@ class RawColorProfile(chars: CameraCharacteristics) {
         )
     }
 
+    /**
+     * The same transform as [neutralTransformForNeutral] for the daylight
+     * reference instead of a measured neutral. Static per camera: the sensor
+     * does not have a D65 that depends on the scene.
+     *
+     * Null when the profile has no usable transform, in which case a caller
+     * without one keeps the scene-adaptive path rather than pairing a
+     * green-referenced estimate with a daylight matrix.
+     */
+    fun daylightTransform(): RawColorMath.NeutralTransform? {
+        if (!available) return null
+        return RawColorMath.neutralTransformAtDaylight(
+            effectiveColorMatrix1, effectiveColorMatrix2,
+            calibration1, calibration2,
+            forwardMatrix1, forwardMatrix2,
+            colorTemperature1, colorTemperature2
+        )
+    }
+
+    /**
+     * The codes a neutral object reports under daylight: the sensor's own
+     * response to D65, green at 1. Static per camera - the sensor does not have
+     * a daylight that depends on the scene.
+     *
+     * This is the anchor of the chromaticity system. The green-bias removal the
+     * estimator starts from is the reciprocal of it, and a fixed preset is
+     * solved against it as its neutral, so the gains that come out are the
+     * sensor's daylight whitening alone and do not move with the scene; the
+     * illuminant the user picked is then carried entirely by the matrix that
+     * adapts it onto D65.
+     *
+     * Null when the profile has no usable transform.
+     */
+    fun daylightWhite(): FloatArray? {
+        if (!available) return null
+        val white = RawColorMath.daylightWhite(
+            effectiveColorMatrix1, effectiveColorMatrix2,
+            colorTemperature1, colorTemperature2
+        ) ?: return null
+        return floatArrayOf(white[0] / white[1], 1f, white[2] / white[1])
+    }
+
+    /**
+     * The diagonal bridge for [daylightCorrection] implied by one device
+     * daylight measurement: [anchorGains] is a 4-channel
+     * COLOR_CORRECTION_GAINS readback from the HAL in its fixed DAYLIGHT mode,
+     * i.e. the device's own daylight white balance. The ratio between the
+     * sensor that answer describes and the sensor the reported color matrices
+     * describe is a per-device diagonal; scaling the matrices by it makes the
+     * profile's sensor model agree with the RAW stream (see [daylightCorrection]).
+     *
+     * Null when the profile has no usable transform or the anchor is unusable.
+     */
+    fun daylightCorrectionFor(anchorGains: FloatArray): FloatArray? {
+        if (!available || anchorGains.size < 4) return null
+        if (anchorGains.any { !it.isFinite() || it <= 0f }) return null
+        val gMean = (anchorGains[1] + anchorGains[2]) * 0.5f
+        if (!gMean.isFinite() || gMean <= 0f) return null
+        // What the reported matrices claim the sensor says to a D65 white.
+        val claim = RawColorMath.daylightWhite(
+            rawColorMatrix1, rawColorMatrix2,
+            colorTemperature1, colorTemperature2
+        ) ?: return null
+        if (!(claim[1] > 0f)) return null
+        val claimR = claim[0] / claim[1]
+        val claimB = claim[2] / claim[1]
+        // What the device says, green-referenced the same way.
+        val deviceR = gMean / anchorGains[0]
+        val deviceB = gMean / anchorGains[3]
+        return floatArrayOf(deviceR / claimR, 1f, deviceB / claimB)
+    }
+
+    /**
+     * The D65-anchored camera-RGB -> XYZ map: the sensor's own response to
+     * colorimetry, with the scene assumed to be lit by D65.
+     *
+     * D65 is the assumption because it is the same assumption the daylight gains
+     * already make. Those gains are the whitening gain for a neutral object under
+     * D65, so the sensor response behind them is the D65 response, and this is
+     * that response read as a matrix rather than as three scalars. Reusing it here
+     * is what keeps the estimate and the render describing one sensor: the
+     * illuminant is measured against the response the green-bias removal was
+     * derived from, rather than against a second, differently-assumed one.
+     *
+     * Static per camera, and independent of the scene. Nothing here is a
+     * temperature: the reference matrices are read at D65 and no blackbody locus
+     * is involved, so this does not move when the light does.
+     */
+    fun cameraToXyzAtDaylight(): Mat3? {
+        if (!available) return null
+        return RawColorMath.cameraToXyzAtDaylight(
+            effectiveColorMatrix1, effectiveColorMatrix2,
+            calibration1, calibration2,
+            forwardMatrix1, forwardMatrix2,
+            colorTemperature1, colorTemperature2
+        )
+    }
+
+    /**
+     * The chromaticity of the illuminant that produced [neutralSensorRgb], as a
+     * camera-RGB neutral pushed through the D65 camera -> XYZ map.
+     *
+     * This is a measurement, not a derivation from a temperature. The neutral is
+     * what the sensor reports for a grey object, and under the D65 response that
+     * report *is* the illuminant's XYZ up to the sensor's own colour, so the
+     * chromaticity falls out of one matrix multiply. Nothing is iterated and no
+     * correlated color temperature is computed or needed, which is what separates
+     * this from [temperatureForNeutral]: a scene is a point in chromaticity space,
+     * not a point on the blackbody locus, and an estimate that had to be pushed
+     * onto that locus to be expressed would be reporting a temperature rather than
+     * the light.
+     *
+     * Null when the neutral is degenerate or does not land in the chromaticity
+     * triangle, which is the honest answer for a reading no illuminant produced.
+     */
+    fun sceneXyForNeutral(neutralSensorRgb: FloatArray): FloatArray? {
+        if (!available) return null
+        val neutral = RawColorMath.normalize(neutralSensorRgb) ?: return null
+        val cameraToXyz = cameraToXyzAtDaylight() ?: return null
+        return RawColorMath.xyFromXyz(ColorMatrix.mulMatVec(cameraToXyz, neutral))
+    }
+
+    /**
+     * The transform for an illuminant of known chromaticity, with the white
+     * balance left to the caller.
+     *
+     * [sceneXy] is the illuminant to adapt from and is expected to come from
+     * [sceneXyForNeutral], i.e. from the estimate. The reference matrices are read
+     * at D65 rather than at the scene's temperature, so the camera -> XYZ map is
+     * the sensor's response and not a function of the light; the adaptation from
+     * [sceneXy] onto D65 is then applied to that, once, by the returned matrix.
+     *
+     * The returned [RawColorMath.NeutralTransform.wbGains] are the whitening gains
+     * for [neutralSensorRgb] and are meant to be ignored when the caller runs its
+     * own white balance - the matrix is already the WB-removed one, so applying
+     * the two together would take the balance off twice. The gains are still
+     * returned because the transform is one object with one convention, and
+     * dropping a field would make it look like a different kind of transform.
+     */
+    fun neutralTransformForSceneXy(
+        neutralSensorRgb: FloatArray,
+        sceneXy: FloatArray
+    ): RawColorMath.NeutralTransform? {
+        if (!available) return null
+        return RawColorMath.neutralTransformAtSceneXy(
+            effectiveColorMatrix1, effectiveColorMatrix2,
+            calibration1, calibration2,
+            forwardMatrix1, forwardMatrix2,
+            colorTemperature1, colorTemperature2,
+            neutralSensorRgb, sceneXy
+        )
+    }
+
     companion object {
         private const val TAG = "RawColorProfile"
+
+        /**
+         * The two reference illuminants ordered warm-first, each matrix still
+         * attached to the temperature it was measured at.
+         *
+         * Slot 1 is warm and slot 2 cool because [RawColorMath]'s weight reaches 1 at
+         * t1 and 0 at t2, while its interpolation returns
+         * `weight * m1 + (1 - weight) * m2`. So slot 1's matrix is the one that
+         * survives when the scene is warmer than both references and slot 2's when it
+         * is cooler, and the slot a temperature lands in decides which matrix that
+         * temperature reads.
+         *
+         * That is why the ordering moves whole illuminants rather than swapping two
+         * floats. Sorting the temperatures on their own leaves the warm slot holding
+         * the cool slot's matrix, and then every entry point documented as "read at
+         * D65" returns whichever reference illuminant happened to land in slot 2
+         * instead of D65's own response. On a DNG whose ColorMatrix1 is D65 and
+         * ColorMatrix2 is illuminant A, that is illuminant A's matrix on the daylight
+         * path, and a D65 grey renders warm through it -- the yellow this profile
+         * was producing.
+         *
+         * Equal temperatures keep their reported order, and weight() clamps to the
+         * nearer endpoint before it can divide, so a degenerate pair is stable rather
+         * than NaN.
+         */
+        internal fun orderReferences(
+            reported1: ReferenceIlluminant,
+            reported2: ReferenceIlluminant
+        ): Pair<ReferenceIlluminant, ReferenceIlluminant> =
+            if (reported1.kelvin > reported2.kelvin) reported2 to reported1
+            else reported1 to reported2
 
         private fun matStr(m: Mat3?): String =
             if (m == null) "none"
@@ -196,17 +429,31 @@ class RawColorProfile(chars: CameraCharacteristics) {
             }
         }
 
-        // Correlated color temperatures of the CIE standard illuminants used by
-        // SENSOR_REFERENCE_ILLUMINANT1/2 (values not listed fall back to D65).
+        // Correlated color temperatures of the illuminants named by
+        // SENSOR_REFERENCE_ILLUMINANT1/2, per the Camera2
+        // SENSOR_REFERENCE_ILLUMINANT1 enumeration. Values follow the AOSP
+        // camera CTS reference table, the same numbering camera certification
+        // tests against: tungsten 3, standard illuminant A 17, ISO studio
+        // tungsten 24; the fluorescent family 2/12/13/14/15; flash 4, D55 20,
+        // D50 23, fine weather 9; daylight 1, cloudy weather 10, D65 21;
+        // standard illuminant B 18, standard illuminant C 19; D75 22, shade
+        // 11. Codes 5-8 and 16 are unassigned, and everything unnamed here is
+        // daylight-ish and falls back to D65 -- except the fluorescent family,
+        // which is several thousand kelvin cooler and must not be read as
+        // daylight.
         private fun standardIlluminantKelvin(v: Int): Float = when (v) {
-            3, 17 -> 2856f   // tungsten / standard illuminant A
-            18 -> 4874f      // standard illuminant B
-            19 -> 6774f      // standard illuminant C
-            4 -> 5500f       // flash
-            20 -> 5503f      // D55
-            22 -> 7504f      // D75
-            23 -> 5003f      // D50
-            else -> 6504f    // daylight / fine weather / cloud / shade / D65
+            3, 17, 24 -> 2856f  // tungsten / standard illuminant A / ISO studio tungsten
+            2 -> 2940f          // fluorescent
+            14 -> 4230f         // cool white fluorescent
+            15 -> 3450f         // white fluorescent
+            13 -> 4874f         // day white fluorescent
+            18 -> 4874f         // standard illuminant B
+            12 -> 6430f         // daylight fluorescent
+            19 -> 6774f         // standard illuminant C
+            4, 20 -> 5503f      // flash / D55
+            23, 9 -> 5003f      // D50 / fine weather
+            22, 11 -> 7504f     // D75 / shade
+            else -> 6504f       // daylight / cloudy weather / D65 / unnamed
         }
     }
 }
@@ -223,6 +470,9 @@ object RawColorMath {
     private val D50_XY = floatArrayOf(0.3457f, 0.3585f)
     private val D50_XYZ = floatArrayOf(0.9642f, 1.0f, 0.8249f)
     private val ONE = floatArrayOf(1f, 1f, 1f)
+
+    // CIE 1931 D65, the daylight reference this pipeline anchors on.
+    private val D65_XY = floatArrayOf(ColorMatrix.D65_X, ColorMatrix.D65_Y)
 
     // Standard sRGB (IEC 61966-2-1) primaries expressed in the PCS (D50):
     // the linear-Bradford-adapted sRGB->XYZ(D50) matrix. Row sums are the
@@ -353,12 +603,14 @@ object RawColorMath {
         forwardMatrix2: Mat3?,
         temperature1: Float,
         temperature2: Float,
-        neutralSensorRgb: FloatArray
+        neutralSensorRgb: FloatArray,
+        sceneXy: FloatArray? = null,
+        sceneTemp: Float? = null
     ): NeutralTransform? {
         val core = neutralCore(
             colorMatrix1, colorMatrix2, calibration1, calibration2,
             forwardMatrix1, forwardMatrix2, temperature1, temperature2,
-            neutralSensorRgb
+            neutralSensorRgb, sceneXy, sceneTemp
         ) ?: return null
         val neutral = core.neutral
         // Green-normalized gains that whiten the as-shot neutral in camera
@@ -378,6 +630,168 @@ object RawColorMath {
         )
     }
 
+    /**
+     * The same transform as [neutralTransform], but for the daylight reference
+     * rather than a measured neutral: the scene chromaticity is pinned to D65
+     * and the matrices are read at the daylight temperature, so the result is a
+     * property of the sensor alone and does not move with the scene.
+     *
+     * Both halves come out of one call and they have to come from one call.
+     * The pair follows one convention, and both halves depend on it:
+     * [NeutralTransform.wbGains] take the sensor's response to level codes, and
+     * [NeutralTransform.colorMatrix] maps level codes onto the output white. A
+     * caller applying gains and then this matrix therefore lands the sensor's own
+     * response on the output white.
+     *
+     * That is what makes an estimator here a measurement of the light rather than
+     * an assumption about it: a D65 scene arrives as the sensor's daylight
+     * response and the estimator answers with exactly [NeutralTransform.wbGains],
+     * because level codes is the target the gains are built to reach. So the
+     * estimate is anchored on D65 - a neutral daylight scene is the zero point -
+     * and holds only the scene's departure from it. With the matrix held here
+     * rather than tracking the scene, the gains are not adapting twice: the
+     * matrix holds the sensor fixed and the gains carry whatever the light was.
+     *
+     * Nothing is solved for here. The reference chromaticity is known, so it is
+     * passed straight down instead of being recovered from the response it
+     * produced - see [neutralCore] on why that recovery is worth skipping.
+     *
+     * Returns null when the profile has no usable transform.
+     */
+    fun neutralTransformAtDaylight(
+        colorMatrix1: Mat3,
+        colorMatrix2: Mat3,
+        calibration1: Mat3,
+        calibration2: Mat3,
+        forwardMatrix1: Mat3?,
+        forwardMatrix2: Mat3?,
+        temperature1: Float,
+        temperature2: Float
+    ): NeutralTransform? {
+        // ColorMatrix maps XYZ to camera, so this is the sensor's own answer to
+        // a D65 white, and it is handed back with the chromaticity it came from
+        // so neutralCore does not have to recover it.
+        val daylightWhite = daylightWhite(colorMatrix1, colorMatrix2, temperature1, temperature2)
+            ?: return null
+        return neutralTransform(
+            colorMatrix1, colorMatrix2, calibration1, calibration2,
+            forwardMatrix1, forwardMatrix2, temperature1, temperature2,
+            daylightWhite, D65_XY, D65_TEMP
+        )
+    }
+
+    /**
+     * The D65-anchored camera-RGB -> XYZ map, the sensor's response to colorimetry
+     * with the scene assumed to be lit by D65.
+     *
+     * D65 is the assumption because it is the one the daylight gains already make:
+     * those gains whiten a neutral object under D65, so the response behind them is
+     * the D65 response. Reading the same response here as a matrix is what keeps
+     * the measurement and the render describing one sensor.
+     *
+     * The chromaticity is passed in as D65 rather than solved for, so nothing here
+     * iterates and no correlated color temperature is computed. The reference
+     * matrices are read at D65; the scene plays no part.
+     */
+    fun cameraToXyzAtDaylight(
+        colorMatrix1: Mat3,
+        colorMatrix2: Mat3,
+        calibration1: Mat3,
+        calibration2: Mat3,
+        forwardMatrix1: Mat3?,
+        forwardMatrix2: Mat3?,
+        temperature1: Float,
+        temperature2: Float
+    ): Mat3? {
+        // The sensor's XYZ->camera response, read at D65, inverted. Deliberately
+        // the bare inverse: this is a measurement, so the map has to be the sensor's
+        // own and nothing else. The D50<->D65 adaptation that neutralCore folds into
+        // its cameraToXyz is a colourimetric convention for rendering, and putting it
+        // in here would move every measurement by the D50/D65 gap - which is
+        // exactly the white-bias the daylight gains exist to remove.
+        val cm = interpolate(
+            D65_TEMP,
+            normalizeColorMatrix(colorMatrix1),
+            normalizeColorMatrix(colorMatrix2),
+            temperature1, temperature2
+        )
+        return ColorMatrix.inverse(cm)
+    }
+
+    // The camera-RGB answer to a D65 white, straight off the reference matrices
+    // read at D65. This is the neutral the daylight whitening gains are the
+    // reciprocal of.
+    internal fun daylightWhite(
+        colorMatrix1: Mat3,
+        colorMatrix2: Mat3,
+        temperature1: Float,
+        temperature2: Float
+    ): FloatArray? {
+        val cm = interpolate(
+            D65_TEMP,
+            normalizeColorMatrix(colorMatrix1),
+            normalizeColorMatrix(colorMatrix2),
+            temperature1, temperature2
+        )
+        val white = ColorMatrix.mulMatVec(cm, xyToXyz(D65_XY))
+        return if (white.all { it.isFinite() && it > 0f }) white else null
+    }
+
+    /**
+     * The transform for an illuminant of known chromaticity.
+     *
+     * This is [neutralTransform] with the scene's chromaticity supplied instead of
+     * recovered, and with the reference matrices read at D65 rather than at the
+     * scene's temperature. Both differences matter and neither is a convenience.
+     *
+     * The chromaticity is the estimate, so recovering it from the neutral would be
+     * a second derivation of a number the caller already holds - and a recovery is
+     * a fixed-point iteration through [xyToTemperature], which puts a blackbody
+     * assumption into a path that has no business making one. A scene is a point in
+     * chromaticity space, not a point on the Planckian locus, and an illuminant
+     * that is off the locus cannot be expressed on it at all.
+     *
+     * Reading the matrices at D65 keeps the camera -> XYZ map a property of the
+     * sensor. Reading them at the scene's temperature would make the sensor's
+     * response depend on the light, which is the same error as the daylight matrix
+     * held fixed, reached from the other direction.
+     *
+     * The returned gains whiten [neutralSensorRgb] and the returned matrix is the
+     * WB-removed one, so a caller with its own white balance applies the matrix
+     * alone; see [RawColorProfile.neutralTransformForSceneXy].
+     */
+    fun neutralTransformAtSceneXy(
+        colorMatrix1: Mat3,
+        colorMatrix2: Mat3,
+        calibration1: Mat3,
+        calibration2: Mat3,
+        forwardMatrix1: Mat3?,
+        forwardMatrix2: Mat3?,
+        temperature1: Float,
+        temperature2: Float,
+        neutralSensorRgb: FloatArray,
+        sceneXy: FloatArray
+    ): NeutralTransform? = neutralTransform(
+        colorMatrix1, colorMatrix2, calibration1, calibration2,
+        forwardMatrix1, forwardMatrix2, temperature1, temperature2,
+        neutralSensorRgb,
+        // The chromaticity is the caller's measurement, and D65 is the temperature
+        // the matrices are read at. These are deliberately unrelated numbers now.
+        sceneXy, D65_TEMP
+    )
+
+    /** Camera-RGB -> chromaticity, for measuring an illuminant. */
+    fun xyFromXyz(xyz: FloatArray): FloatArray? {
+        if (xyz.any { !it.isFinite() }) return null
+        val sum = xyz[0] + xyz[1] + xyz[2]
+        if (sum <= 0f) return null
+        val xy = xyzToXy(xyz)
+        // x and y both strictly inside (0,1) is the chromaticity triangle. A point
+        // outside it is not a chromaticity, so it is reported as a miss rather than
+        // clamped into one.
+        return if (xy[0] > 0f && xy[1] > 0f && xy[0] < 1f && xy[1] < 1f && xy[0] + xy[1] < 1f) xy else null
+    }
+
     private data class NeutralCore(
         val colorMatrix: Mat3,
         val cameraToXyz: Mat3,
@@ -393,15 +807,30 @@ object RawColorMath {
         forwardMatrix2: Mat3?,
         temperature1: Float,
         temperature2: Float,
-        neutralSensorRgb: FloatArray
+        neutralSensorRgb: FloatArray,
+        sceneXy: FloatArray? = null,
+        sceneTemp: Float? = null
     ): NeutralCore? {
         val neutral = normalize(neutralSensorRgb) ?: return null
 
         val lowColor = normalizeColorMatrix(colorMatrix1)
         val highColor = normalizeColorMatrix(colorMatrix2)
 
-        val xy = sceneWhiteXy(neutral, colorMatrix1, colorMatrix2, temperature1, temperature2) ?: return null
-        val temp = xyToTemperature(xy)
+        // A caller that already knows the chromaticity passes it. Solving for it
+        // again costs a fixed-point iteration that has to land inside NEUTRAL_EPS,
+        // and when both reference matrices are equal that solve has no attracting
+        // fixed point to speak of - the interpolation wobbles by an ulp, the
+        // recovered chromaticity wobbles with it, and the loop can fall out the
+        // bottom returning null for a perfectly good profile.
+        val xy = sceneXy
+            ?: sceneWhiteXy(neutral, colorMatrix1, colorMatrix2, temperature1, temperature2)
+            ?: return null
+        // Likewise the temperature. xyToTemperature is the inverse of the xy these
+        // matrices were authored at, so recovering it is a second derivation of a
+        // number the caller may already hold exactly; passing it keeps the matrix
+        // blend reading at the reference's own temperature rather than a rounding
+        // of it.
+        val temp = sceneTemp ?: xyToTemperature(xy)
 
         val cm = interpolate(temp, lowColor, highColor, temperature1, temperature2)
         val cal = interpolate(temp, calibration1, calibration2, temperature1, temperature2)
@@ -597,7 +1026,18 @@ object RawColorMath {
     }
 
     // Reciprocal-temperature weight: 1 at t1 (warm), 0 at t2 (cool).
+    //
+    // Two references reported at the same temperature carry no ordering at all:
+    // there is no warm end to take a reciprocal-temperature distance from, so no
+    // read can say which illuminant it is asking for. Falling through to slot 2
+    // the way the formula below would is the worst answer available - it hands
+    // back whichever matrix the vendor wrote second and reports it as the
+    // requested one, which on a device that labels both references tungsten put
+    // illuminant A on every daylight path. The weight therefore stays on slot 1:
+    // the primary ColorMatrix1, the matrix a single-matrix profile ships and the
+    // only one the pair still identifies.
     private fun weight(temp: Float, t1: Float, t2: Float): Float {
+        if (t1 == t2) return 1.0f
         if (temp <= t1) return 1.0f
         if (temp >= t2) return 0.0f
         val invT = 1.0f / temp
