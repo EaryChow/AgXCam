@@ -332,7 +332,8 @@ class RawColorProfile(chars: CameraCharacteristics) {
      */
     fun neutralTransformForSceneXy(
         neutralSensorRgb: FloatArray,
-        sceneXy: FloatArray
+        sceneXy: FloatArray,
+        adaptation: Float = 1f
     ): RawColorMath.NeutralTransform? {
         if (!available) return null
         return RawColorMath.neutralTransformAtSceneXy(
@@ -340,7 +341,7 @@ class RawColorProfile(chars: CameraCharacteristics) {
             calibration1, calibration2,
             forwardMatrix1, forwardMatrix2,
             colorTemperature1, colorTemperature2,
-            neutralSensorRgb, sceneXy
+            neutralSensorRgb, sceneXy, adaptation
         )
     }
 
@@ -605,12 +606,13 @@ object RawColorMath {
         temperature2: Float,
         neutralSensorRgb: FloatArray,
         sceneXy: FloatArray? = null,
-        sceneTemp: Float? = null
+        sceneTemp: Float? = null,
+        adaptation: Float = 1f
     ): NeutralTransform? {
         val core = neutralCore(
             colorMatrix1, colorMatrix2, calibration1, calibration2,
             forwardMatrix1, forwardMatrix2, temperature1, temperature2,
-            neutralSensorRgb, sceneXy, sceneTemp
+            neutralSensorRgb, sceneXy, sceneTemp, adaptation
         ) ?: return null
         val neutral = core.neutral
         // Green-normalized gains that whiten the as-shot neutral in camera
@@ -770,14 +772,15 @@ object RawColorMath {
         temperature1: Float,
         temperature2: Float,
         neutralSensorRgb: FloatArray,
-        sceneXy: FloatArray
+        sceneXy: FloatArray,
+        adaptation: Float = 1f
     ): NeutralTransform? = neutralTransform(
         colorMatrix1, colorMatrix2, calibration1, calibration2,
         forwardMatrix1, forwardMatrix2, temperature1, temperature2,
         neutralSensorRgb,
         // The chromaticity is the caller's measurement, and D65 is the temperature
         // the matrices are read at. These are deliberately unrelated numbers now.
-        sceneXy, D65_TEMP
+        sceneXy, D65_TEMP, adaptation
     )
 
     /** Camera-RGB -> chromaticity, for measuring an illuminant. */
@@ -809,7 +812,8 @@ object RawColorMath {
         temperature2: Float,
         neutralSensorRgb: FloatArray,
         sceneXy: FloatArray? = null,
-        sceneTemp: Float? = null
+        sceneTemp: Float? = null,
+        adaptation: Float = 1f
     ): NeutralCore? {
         val neutral = normalize(neutralSensorRgb) ?: return null
 
@@ -842,8 +846,13 @@ object RawColorMath {
         val fwd = interpolateOpt(temp, forwardMatrix1, forwardMatrix2, temperature1, temperature2)
             ?.let { normalizeForwardMatrix(it) }
 
-        // Camera-space white for the scene chromaticity.
-        val cameraWhite = ColorMatrix.mulMatVec(cm, xyToXyz(xy))
+        // Camera-space white for the scene chromaticity. Limited auto white
+        // balance may partially adapt: the white the matrix adapts from walks
+        // from D65 (no correction) to the scene white (full correction) in
+        // Bradford cone space, so the scene keeps the light's own color in
+        // proportion to how much adaptation it earns.
+        val effXy = adaptationBlendedXy(xy, adaptation)
+        val cameraWhite = ColorMatrix.mulMatVec(cm, xyToXyz(effXy))
         val whiteScale = 1.0f / max(0f, max(cameraWhite[0], max(cameraWhite[1], cameraWhite[2])))
         val cw = floatArrayOf(
             clamp02(cameraWhite[0] * whiteScale),
@@ -852,7 +861,7 @@ object RawColorMath {
         )
 
         // PCS (D50) -> camera, normalized so the PCS white maps to ~1.
-        val adapted = ColorMatrix.multiply(cm, mapWhite(D50_XY, xy))
+        val adapted = ColorMatrix.multiply(cm, mapWhite(D50_XY, effXy))
         val scale = max(
             0f,
             max(
@@ -969,6 +978,22 @@ object RawColorMath {
             return ColorMatrix.Mat3(m.m.map { it / maxC }.toFloatArray())
         }
         return m
+    }
+
+    // Blend the white the matrix adapts from toward D65 by the degree of
+    // adaptation, in Bradford cone space: adaptation = 1 leaves the scene
+    // white (full correction), adaptation = 0 replaces it with D65 (no
+    // correction at all, the matrix treats the scene as daylight).
+    private fun adaptationBlendedXy(xy: FloatArray, adaptation: Float): FloatArray {
+        if (adaptation >= 1f) return xy
+        val sceneLms = ColorMatrix.mulMatVec(BRADFORD, xyToXyz(xy))
+        val d65Lms = ColorMatrix.mulMatVec(BRADFORD, xyToXyz(D65_XY))
+        val blend = floatArrayOf(
+            (1f - adaptation) * d65Lms[0] + adaptation * sceneLms[0],
+            (1f - adaptation) * d65Lms[1] + adaptation * sceneLms[1],
+            (1f - adaptation) * d65Lms[2] + adaptation * sceneLms[2]
+        )
+        return xyzToXy(ColorMatrix.mulMatVec(BRADFORD_INV, blend))
     }
 
     // Linear Bradford von-Kries adaptation that maps srcXy white into dstXy white.

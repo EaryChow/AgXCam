@@ -1168,6 +1168,28 @@
 
             <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
 
+            <!-- Auto White Balance (user-facing) -->
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Auto White Balance" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
+
+            <CheckBox
+                android:id="@+id/limited_awb_checkbox"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Limited Auto White Balance"
+                android:textColor="#FFFFFFFF"
+                android:textSize="12sp"
+                android:layout_marginBottom="2dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Limit the auto white balance for highly chromatic light sources"
+                android:textColor="#FF888888"
+                android:textSize="10sp"
+                android:layout_marginBottom="8dp" />
+
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
+
             <!-- Thermal Settings -->
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Thermal Settings" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
 

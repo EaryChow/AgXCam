@@ -80,6 +80,17 @@ class MainActivity : AppCompatActivity() {
     private var currentWbMode = WhiteBalanceMode.AUTO
     private var kelvinState = KelvinState()
     private var agxParams = AgxParams()
+    // Limited auto white balance: gate AUTO's correction by how much
+    // adaptation the estimated light earns. The scene luminance estimate and
+    // the low-passed degree of adaptation feed it. Both are written on the
+    // raw thread and reset from the preview pipeline, like the estimator's
+    // smoothed gains.
+    @Volatile
+    private var limitedAutoWb = false
+    @Volatile
+    private var smoothedAdaptation = 1f
+    @Volatile
+    private var lastSceneGreenLevel = -1f
     private var photoOutput = PhotoOutputSettings()
     // Leading factor of the demosaic clipping-neutralization exponent (factor * 5).
     private var clipAttenFactor = 0.1f
@@ -164,6 +175,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var daylightAnchorStatusPill: TextView
     private lateinit var daylightAnchorStartBtn: TextView
     private lateinit var daylightAnchorResetBtn: TextView
+    private lateinit var limitedAwbCheckBox: CheckBox
 
     private lateinit var orientationListener: OrientationEventListener
 
@@ -425,6 +437,7 @@ class MainActivity : AppCompatActivity() {
         daylightAnchorStatusPill = findViewById(R.id.daylight_anchor_status_pill)
         daylightAnchorStartBtn = findViewById(R.id.daylight_anchor_start_btn)
         daylightAnchorResetBtn = findViewById(R.id.daylight_anchor_reset_btn)
+        limitedAwbCheckBox = findViewById(R.id.limited_awb_checkbox)
         finishingCaptureOverlay = findViewById(R.id.finishing_capture_overlay)
         lensSwitchOverlay = findViewById(R.id.lens_switch_overlay)
         lensInfoOverlay = findViewById(R.id.lens_info_overlay)
@@ -547,6 +560,7 @@ class MainActivity : AppCompatActivity() {
         focusIndicatorTimeoutMs = previewResPrefs.getLong(PREF_FOCUS_TIMEOUT, 0L)
         maxPreviewDimensions = getMaxPreviewDimensions()
         thermalProtectionEnabled = previewResPrefs.getBoolean(PREF_THERMAL_PROTECTION_ENABLED, true)
+        limitedAutoWb = previewResPrefs.getBoolean(PREF_LIMITED_WB, true)
         clipAttenFactor = previewResPrefs.getFloat(PREF_CLIP_ATTEN, 0.1f).coerceIn(0f, 1f)
         dpcStrength = previewResPrefs.getFloat(PREF_S1_DPC, 0f).coerceIn(0f, 1f)
         rawNrStrength = previewResPrefs.getFloat(PREF_S3_RAW, 0f).coerceIn(0f, 1f)
@@ -716,6 +730,13 @@ class MainActivity : AppCompatActivity() {
         // asks for confirmation every single time.
         thermalProtectionSwitch.setOnClickListener {
             onThermalProtectionToggleRequested(thermalProtectionSwitch.isChecked)
+        }
+
+        limitedAwbCheckBox.isChecked = limitedAutoWb
+        limitedAwbCheckBox.setOnClickListener {
+            limitedAutoWb = limitedAwbCheckBox.isChecked
+            previewResPrefs.edit().putBoolean(PREF_LIMITED_WB, limitedAutoWb).apply()
+            CrashLogger.log(TAG, "limitedAWB: enabled=$limitedAutoWb")
         }
 
         wbButton.setOnClickListener {
@@ -2669,9 +2690,11 @@ class MainActivity : AppCompatActivity() {
             // AUTO is the app's own estimate: it works on every CFA phase separately,
             // which no HAL or profile answer can express, so it is preferred over
             // the HAL. The fixed presets leave the HAL in charge - it is already
-            // pinned to the chosen illuminant - and KELVIN is the app's own CAT.
+            // pinned to the chosen illuminant - and KELVIN is a preset like the
+            // rest, parameterized by the slider pair.
             val useEstimator = currentWbMode == WhiteBalanceMode.AUTO || !gainsOk
-            if (useEstimator && wbEstimateFrame % 15 == 0) {
+            val estimatorStep = useEstimator && wbEstimateFrame % 15 == 0
+            if (estimatorStep) {
                 estimateAutoWhiteBalance(dest, rawW, rawH)
             }
 
@@ -2757,12 +2780,28 @@ class MainActivity : AppCompatActivity() {
                 else -> currentWbMode.sceneXy()
             }
 
+            // Limited auto white balance: gate the scene->D65 correction by the
+            // degree of adaptation the estimated light earns. Highly chromatic
+            // light (party LEDs) sits far off the Planckian locus and earns
+            // zero, so the scene keeps its light untouched; near-locus light
+            // partially adapts. Presets and the plain mode keep full correction.
+            val adaptation: Float = when {
+                !limitedAutoWb -> 1f
+                currentWbMode != WhiteBalanceMode.AUTO -> 1f
+                sceneXy == null -> 1f
+                // The locus scan and the low-pass only run on estimator steps:
+                // the estimate, and the degree of adaptation derived from it,
+                // cannot change faster than the estimator updates.
+                !estimatorStep -> smoothedAdaptation
+                else -> smoothedLimitedAdaptation(sceneXy)
+            }
+
             // The white balance is ours, so the matrix is the WB-removed one and the
             // gains the transform hands back are unused. A scene chromaticity that
             // cannot be resolved is a miss, not a reason to invent a temperature:
             // the profile's own solve is tried instead.
             val profileTransform = if (sceneXy != null) {
-                rawColorProfile?.neutralTransformForSceneXy(neutral, sceneXy)
+                rawColorProfile?.neutralTransformForSceneXy(neutral, sceneXy, adaptation)
             } else {
                 rawColorProfile?.neutralTransformForNeutral(neutral)
             }
@@ -2833,7 +2872,8 @@ class MainActivity : AppCompatActivity() {
                     TAG, "estimator cc: frame=$wbEstimateFrame " +
                         "wb=[${previewRenderer.wbGainR}, ${previewRenderer.wbGainG}, " +
                         "${previewRenderer.wbGainB}] " +
-                        "phase=[${previewRenderer.wbPhaseGains?.joinToString { String.format("%.3f", it) }}]"
+                        "phase=[${previewRenderer.wbPhaseGains?.joinToString { String.format("%.3f", it) }}]" +
+                        (if (currentWbMode == WhiteBalanceMode.AUTO) " adapt=$adaptation" else "")
                 )
             }
             previewRenderer.setBayerFrame(dest, rawW, rawH, rawW)
@@ -3142,6 +3182,8 @@ class MainActivity : AppCompatActivity() {
             daylightAnchorPersisted = false
             mainHandler.post { updateDaylightAnchorUI() }
         }
+        lastSceneGreenLevel = -1f
+        smoothedAdaptation = 1f
     }
 
     // Luminance (Y) coefficients of the camera-native RGB space, derived from a
@@ -3222,6 +3264,11 @@ class MainActivity : AppCompatActivity() {
             cellStride, rawWhiteLevel
         )
         val phaseMeans = scan.means
+        // Scene luminance proxy for the limited auto white balance: the green
+        // level normalized to the sensor white, mapped to an adapting
+        // luminance estimate by a tunable gain.
+        lastSceneGreenLevel =
+            ((phaseMeans[1] + phaseMeans[2]) * 0.5f / rawWhiteLevel.coerceAtLeast(1)).toFloat()
         // The sensor's daylight response comes off before the estimate, so what
         // the estimator reports is the light's departure from D65 rather than the
         // CFA's own green bias, which every D65 scene shares. Without a profile
@@ -4078,6 +4125,22 @@ class MainActivity : AppCompatActivity() {
     private fun kelvinSceneXy(): FloatArray {
         val (x, y) = WhiteBalanceMath.kelvinToXy(kelvinState.kelvin, kelvinState.tint)
         return floatArrayOf(x, y)
+    }
+
+    // Degree of adaptation for the limited auto white balance. Called only on
+    // estimator steps (~0.5 s apart), where the EMA's 0.28 factor is the ~1.5 s
+    // low-pass the constant documents; between steps the dispatch holds the
+    // smoothed value, so the correction eases rather than steps.
+    private fun smoothedLimitedAdaptation(sceneXy: FloatArray): Float {
+        val (distanceUv, nearestCct) = WhiteBalanceMath.locusDistanceUv(sceneXy[0], sceneXy[1])
+        val la = if (lastSceneGreenLevel > 0f) {
+            lastSceneGreenLevel.toDouble() * LIMITED_WB_LA_GAIN
+        } else {
+            200.0
+        }
+        val target = WhiteBalanceMath.limitedAdaptation(la, nearestCct, distanceUv)
+        smoothedAdaptation += LIMITED_WB_SMOOTHING * (target - smoothedAdaptation)
+        return smoothedAdaptation.coerceIn(0f, 1f)
     }
 
     private fun uploadAgxUniforms() {
@@ -5313,6 +5376,14 @@ override fun onResume() {
         private const val PREF_WB_MODE = "wb_mode_global"
         private const val PREF_WB_KELVIN = "wb_kelvin_global"
         private const val PREF_WB_TINT = "wb_tint_global"
+        // Limited auto white balance: gate the scene->D65 correction by how
+        // much adaptation the estimated light earns (chromatic LEDs earn none).
+        private const val PREF_LIMITED_WB = "limited_auto_wb"
+        // Normalized scene luminance -> adapting luminance estimate in cd/m2.
+        private const val LIMITED_WB_LA_GAIN = 1000.0
+        // Low-pass on the degree of adaptation: ~1.5 s at the estimator's
+        // ~0.5 s update cadence.
+        private const val LIMITED_WB_SMOOTHING = 0.28f
         private const val RAW_BUFFER_POOL = 3
         // Leading factor of the demosaic clipping-neutralization exponent.
         private const val PREF_CLIP_ATTEN = "clip_atten_factor"

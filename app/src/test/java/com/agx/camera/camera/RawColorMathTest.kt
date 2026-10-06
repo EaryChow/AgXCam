@@ -748,4 +748,88 @@ class RawColorMathTest {
         assertTrue("warm scene renders white (spread $spread)", spread < 0.02f)
         assertClose("near unit brightness", 1f, (out[0] + out[1] + out[2]) / 3f, 0.05f)
     }
+
+    // Limited auto white balance: the adaptation parameter walks the matrix's
+    // adapted white from the scene white (1, full correction) to D65 (0, no
+    // correction at all).
+    private val limitedCm = Mat3(
+        floatArrayOf(
+            0.8359375f, -0.171875f, -0.1328125f,
+            -0.46875f, 1.3984375f, 0.046875f,
+            -0.0859375f, 0.3359375f, 0.40625f
+        )
+    )
+    private val limitedCal = Mat3(floatArrayOf(1.0234375f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1.0078125f))
+    private val limitedFwd = Mat3(
+        floatArrayOf(
+            0.6328125f, 0.109375f, 0.21875f,
+            0.21875f, 0.7578125f, 0.0234375f,
+            -0.0390625f, -0.453125f, 1.3203125f
+        )
+    )
+    private val d65Xy = floatArrayOf(0.3127f, 0.3290f)
+    private val tungstenXy = floatArrayOf(0.4476f, 0.4074f)
+
+    private fun xyzOf(xy: FloatArray): FloatArray =
+        floatArrayOf(xy[0] / xy[1], 1f, (1f - xy[0] - xy[1]) / xy[1])
+
+    private fun sceneResponse(xy: FloatArray): FloatArray {
+        val raw = matMulVec(limitedCm, xyzOf(xy))
+        val mx = raw.maxOf { it }
+        return floatArrayOf(raw[0] / mx, raw[1] / mx, raw[2] / mx)
+    }
+
+    private fun limitedTransform(xy: FloatArray, adaptation: Float): RawColorMath.NeutralTransform =
+        RawColorMath.neutralTransformAtSceneXy(
+            limitedCm, limitedCm, limitedCal, limitedCal, limitedFwd, limitedFwd,
+            6504f, 6504f, sceneResponse(xy), xy, adaptation
+        ) ?: throw AssertionError("must exist")
+
+    private fun foldedOut(t: RawColorMath.NeutralTransform): FloatArray {
+        val folded = ColorMatrix.multiply(
+            t.colorMatrix,
+            ColorMatrix.diagonal(t.wbGains[0], t.wbGains[1], t.wbGains[2])
+        )
+        return matMulVec(folded, sceneResponse(tungstenXy))
+    }
+
+    @Test
+    fun adaptationOneMatchesDefault() {
+        val base = RawColorMath.neutralTransformAtSceneXy(
+            limitedCm, limitedCm, limitedCal, limitedCal, limitedFwd, limitedFwd,
+            6504f, 6504f, sceneResponse(tungstenXy), tungstenXy
+        )
+        val explicit = limitedTransform(tungstenXy, 1f)
+        assertNotNull(base)
+        assertArrayEquals(explicit.colorMatrix.m, base!!.colorMatrix.m, 1e-6f)
+    }
+
+    @Test
+    fun adaptationZeroIsExactlyNoCorrection() {
+        // A zero degree of adaptation must reproduce the daylight-anchored
+        // matrix exactly: the blend of a single endpoint is that endpoint.
+        val none = foldedOut(limitedTransform(tungstenXy, 0f))
+        val daylight = foldedOut(limitedTransform(d65Xy, 1f))
+        assertArrayEquals(daylight, none, 1e-4f)
+    }
+
+    @Test
+    fun adaptationBetweenEndpointsIsMonotonic() {
+        val none = foldedOut(limitedTransform(tungstenXy, 0f))
+        val half = foldedOut(limitedTransform(tungstenXy, 0.5f))
+        val full = foldedOut(limitedTransform(tungstenXy, 1f))
+        // Full correction whitens the tungsten scene; none keeps it warm; the
+        // halfway blend sits strictly between on both axes.
+        assertClose("full R/G", 1f, full[0] / full[1], 0.02f)
+        assertClose("full B/G", 1f, full[2] / full[1], 0.02f)
+        assertTrue("no correction stays warm", none[0] / none[1] > 1.05f)
+        assertTrue(
+            "halfway R/G ${half[0] / half[1]} between ${none[0] / none[1]} and ${full[0] / full[1]}",
+            half[0] / half[1] < none[0] / none[1] && half[0] / half[1] > full[0] / full[1]
+        )
+        assertTrue(
+            "halfway B/G ${half[2] / half[1]} between ${none[2] / none[1]} and ${full[2] / full[1]}",
+            half[2] / half[1] > none[2] / none[1] && half[2] / half[1] < full[2] / full[1]
+        )
+    }
 }

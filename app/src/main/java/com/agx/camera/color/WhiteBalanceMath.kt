@@ -96,6 +96,86 @@ object WhiteBalanceMath {
         return Pair(xShift.toFloat().coerceIn(0f, 1f), yShift.toFloat().coerceIn(0f, 1f))
     }
 
+    // Distance from a chromaticity to the Planckian locus in CIE 1960 uv (the
+    // u = 4x/d, v = 6y/d convention this file already uses, and the space
+    // Duv and the Planckian locus are defined in), together with the CCT of
+    // the nearest locus point. Coarse scan over the locus; the gate and the
+    // anchor curve only need this smooth, not exact. Highly chromatic LEDs
+    // sit far from the locus (0.15+ in these units), daylight-family light
+    // within about 0.02.
+    fun locusDistanceUv(x: Float, y: Float): Pair<Double, Double> {
+        val d = -2.0 * x + 12.0 * y + 3.0
+        if (d <= 0.0) return Pair(1.0, 6504.0)
+        val u = 4.0 * x / d
+        val v = 6.0 * y / d
+        var best = 1e9
+        var bestCct = 6504.0
+        var cct = 1500.0
+        while (cct <= 12000.0) {
+            val (lu, lv) = planckianLocusUv(cct)
+            val dist = kotlin.math.hypot(u - lu, v - lv)
+            if (dist < best) {
+                best = dist
+                bestCct = cct
+            }
+            cct += 25.0
+        }
+        return Pair(best, bestCct)
+    }
+
+    // Degree of partial adaptation for limited auto white balance, after
+    // Zhu, Ma, Liu, Wang and Song, "Modeling the adapted illumination color
+    // considering the degree of chromatic adaptation", Opt. Express 34(2),
+    // 1340 (2026): the luminance factor is the paper's Eq. (9),
+    // fL(La) = 1 - exp(-0.0038*La - 0.3471), capped at its 200 cd/m2 value so
+    // luminance can only un-throttle, never push past the chromatic anchors.
+    // The chromatic curve is piecewise-linear in ln(CCT) tuned generous:
+    // white-ish and warm light (the everyday household range) earns strong
+    // correction, because eyes fully accept those lights as white within
+    // seconds. The distance attenuation is a flat plateau out to DUV_PLATEAU,
+    // then a smoothstep decay into the seamless hard gate at T_chroma = 0.02
+    // in CIE 1960 uv, which still drops highly chromatic light (party LEDs)
+    // to exactly zero adaptation. 1 = full correction, 0 = none.
+    fun limitedAdaptation(la: Double, nearestLocusCct: Double, distanceUv: Double): Float {
+        if (distanceUv >= T_CHROMA) return 0f
+        val laC = la.coerceIn(50.0, 1000.0)
+        val fL = 1.0 - kotlin.math.exp(-0.0038 * laC - 0.3471)
+        val fL200 = 1.0 - kotlin.math.exp(-0.0038 * 200.0 - 0.3471)
+        val lum = (fL / fL200).coerceAtMost(1.0)
+        val x = kotlin.math.ln(nearestLocusCct.coerceIn(1667.0, 12000.0))
+        var g = ADAPTATION_KNOTS.last().second
+        for (i in 0 until ADAPTATION_KNOTS.size - 1) {
+            val (x0, y0) = ADAPTATION_KNOTS[i]
+            val (x1, y1) = ADAPTATION_KNOTS[i + 1]
+            if (x <= x1) {
+                g = y0 + (x - x0) / (x1 - x0) * (y1 - y0)
+                break
+            }
+        }
+        val duv = if (distanceUv <= DUV_PLATEAU) {
+            1.0
+        } else {
+            val t = ((distanceUv - DUV_PLATEAU) / (T_CHROMA - DUV_PLATEAU))
+                .coerceIn(0.0, 1.0)
+            1.0 - t * t * (3.0 - 2.0 * t)
+        }
+        return (lum * g * duv).toFloat().coerceIn(0f, 1f)
+    }
+
+    private const val T_CHROMA = 0.02
+    private const val DUV_PLATEAU = 0.008
+    private val ADAPTATION_KNOTS = arrayOf(
+        kotlin.math.ln(1667.0) to 0.05,
+        kotlin.math.ln(2500.0) to 0.22,
+        kotlin.math.ln(3000.0) to 0.45,
+        kotlin.math.ln(3500.0) to 0.75,
+        kotlin.math.ln(4000.0) to 0.97,
+        kotlin.math.ln(4700.0) to 1.0,
+        kotlin.math.ln(6504.0) to 1.0,
+        kotlin.math.ln(10000.0) to 0.95,
+        kotlin.math.ln(12000.0) to 0.90,
+    )
+
     // Planck's law (2*h*c^2 factor dropped; only relative SPD matters):
     //   L(lambda, T) ~ lambda^-5 / (exp(c2 / (lambda * T)) - 1),  c2 = h*c/k = 1.438776877e-2 m K.
     // Integrated over the CIE 1931 2-deg observer with Simpson's rule (5 nm steps, 380-780 nm)

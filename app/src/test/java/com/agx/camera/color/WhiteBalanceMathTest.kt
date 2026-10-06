@@ -157,4 +157,72 @@ class WhiteBalanceMathTest {
         val expected = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)
         vecEquals(expected, product.m, 0.02f)
     }
+
+    @Test
+    fun locusDistanceUv_onLocusIsNearZero() {
+        val (x, y) = WhiteBalanceMath.kelvinToXy(6504f)
+        val (dist, cct) = WhiteBalanceMath.locusDistanceUv(x, y)
+        assertTrue("on-locus distance $dist", dist < 0.005)
+        assertEquals("nearest cct", 6500.0, cct, 150.0)
+    }
+
+    @Test
+    fun locusDistanceUv_redLedIsFarOffLocus() {
+        val (dist, _) = WhiteBalanceMath.locusDistanceUv(0.69f, 0.30f)
+        assertTrue("red LED distance $dist", dist > 0.1)
+    }
+
+    @Test
+    fun limitedAdaptation_chromaticLightEarnsNothing() {
+        // The acceptance test of the feature: highly chromatic light is not
+        // adapted at all, at any luminance.
+        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(200.0, 6504.0, 0.05), 0f)
+        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(1000.0, 6504.0, 0.021), 0f)
+        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(200.0, 6504.0, 0.02), 0f)
+    }
+
+    @Test
+    fun limitedAdaptation_anchors() {
+        // White-ish and warm household light earns strong correction; only
+        // genuinely warm light keeps a cast.
+        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(200.0, 6504.0, 0.0), 0.01f)
+        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(200.0, 5000.0, 0.0), 0.01f)
+        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(200.0, 4700.0, 0.0), 0.01f)
+        assertEquals(0.97f, WhiteBalanceMath.limitedAdaptation(200.0, 4000.0, 0.0), 0.02f)
+        assertEquals(0.45f, WhiteBalanceMath.limitedAdaptation(200.0, 3000.0, 0.0), 0.02f)
+        assertEquals(0.95f, WhiteBalanceMath.limitedAdaptation(200.0, 10000.0, 0.0), 0.02f)
+        val tungsten = WhiteBalanceMath.limitedAdaptation(200.0, 2856.0, 0.0)
+        assertTrue("tungsten keeps a warm cast ($tungsten)", tungsten in 0.35f..0.42f)
+    }
+
+    @Test
+    fun limitedAdaptation_smallDuvIsFree() {
+        // Ordinary white LEDs sit slightly off the locus (|Duv| ~0.003-0.008)
+        // and must not be throttled for it: the attenuation is a flat plateau
+        // out to DUV_PLATEAU.
+        val onLocus = WhiteBalanceMath.limitedAdaptation(200.0, 4700.0, 0.0)
+        val slightlyOff = WhiteBalanceMath.limitedAdaptation(200.0, 4700.0, 0.006)
+        assertEquals("plateau is free", onLocus, slightlyOff, 1e-6f)
+    }
+
+    @Test
+    fun limitedAdaptation_luminanceScaling() {
+        // Luminance can only un-throttle: dim scenes keep more of the cast,
+        // bright scenes are capped at the chromatic anchor, never beyond.
+        val dim = WhiteBalanceMath.limitedAdaptation(50.0, 2856.0, 0.0)
+        val mid = WhiteBalanceMath.limitedAdaptation(200.0, 2856.0, 0.0)
+        val bright = WhiteBalanceMath.limitedAdaptation(1000.0, 2856.0, 0.0)
+        assertTrue("dim $dim < mid $mid", dim < mid)
+        assertEquals("bright is capped at the anchor", mid, bright, 1e-6f)
+    }
+
+    @Test
+    fun limitedAdaptation_gateIsSeamless() {
+        // Just inside the gate the quadratic window has already taken the
+        // adaptation to nearly nothing, so the hard drop to zero at T_chroma
+        // is a rounding, not a step.
+        val justInside = WhiteBalanceMath.limitedAdaptation(200.0, 6504.0, 0.0199)
+        assertTrue("just inside the gate D $justInside", justInside in 0.000001f..0.05f)
+        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(200.0, 6504.0, 0.02), 0f)
+    }
 }
