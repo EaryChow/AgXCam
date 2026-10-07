@@ -3,6 +3,7 @@ build/
 app/build/
 app/release/
 app/debug/
+.kotlin/
 
 # Gradle
 .gradle/
@@ -19,7 +20,7 @@ Thumbs.db
 
 # Project-specific
 keystore.properties
-reference_blender_codes/
+other_untracked_files/
 design_spec.txt
 all_changes.txt
 PLAN.md
