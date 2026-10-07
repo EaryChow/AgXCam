@@ -104,8 +104,8 @@ class MainActivity : AppCompatActivity() {
     // sees a stable target.
     @Volatile
     private var limitedTargetXy: FloatArray? = null
-    private val limitedDistWindow = DoubleArray(3) { 1.0 }
-    private var limitedDistIndex = 0
+    private val limitedGateWindow = FloatArray(3) { 0f }
+    private var limitedGateIndex = 0
     @Volatile
     private var aeConvergedOnce = false
     private var photoOutput = PhotoOutputSettings()
@@ -2807,7 +2807,17 @@ class MainActivity : AppCompatActivity() {
             // tint walking perpendicular to it, which makes KELVIN exactly a preset
             // whose table entry is computed instead of constant.
             val sceneXy: FloatArray? = when (currentWbMode) {
-                WhiteBalanceMode.AUTO -> rawColorProfile?.sceneXyForNeutral(neutral)
+                // Limited AWB gates on the estimate's chroma, which is
+                // defined outside the chromaticity triangle too - a
+                // sodium light measures out there. Reading the
+                // triangle-rejected xy would flip the render to fully
+                // neutralizing the light (the old blue jump).
+                WhiteBalanceMode.AUTO -> if (limitedAutoWb) {
+                    rawColorProfile?.estimateXyForNeutral(neutral)
+                        ?: rawColorProfile?.sceneXyForNeutral(neutral)
+                } else {
+                    rawColorProfile?.sceneXyForNeutral(neutral)
+                }
                 WhiteBalanceMode.KELVIN -> kelvinSceneXy()
                 else -> currentWbMode.sceneXy()
             }
@@ -3130,8 +3140,8 @@ class MainActivity : AppCompatActivity() {
             smoothedAdaptation = 1f
             limitedHasReference = false
             limitedTargetXy = null
-            for (i in limitedDistWindow.indices) limitedDistWindow[i] = 1.0
-            limitedDistIndex = 0
+            for (i in limitedGateWindow.indices) limitedGateWindow[i] = 0f
+            limitedGateIndex = 0
             rawColorProfile = profile
             // The daylight gain is a sensor property, so it is resolved once per lens
             // here rather than per frame. AUTO's estimator takes it off the raw
@@ -3273,8 +3283,8 @@ class MainActivity : AppCompatActivity() {
         smoothedAdaptation = 1f
         limitedHasReference = false
         limitedTargetXy = null
-        for (i in limitedDistWindow.indices) limitedDistWindow[i] = 1.0
-        limitedDistIndex = 0
+        for (i in limitedGateWindow.indices) limitedGateWindow[i] = 0f
+        limitedGateIndex = 0
         aeConvergedOnce = false
     }
 
@@ -4251,21 +4261,28 @@ class MainActivity : AppCompatActivity() {
     // of stepping with each estimator update.
     private fun smoothedLimitedAdaptation(sceneXy: FloatArray, snap: Boolean = false): Float {
         limitedHasReference = true
-        val (distanceUv, nearestCct) = WhiteBalanceMath.locusDistanceUv(sceneXy[0], sceneXy[1])
-        // The gate distance is the minimum of the last few estimator
-        // steps: a single noisy frame (clipped cells shifting the
-        // estimate) must not dip the adaptation, while a genuinely
-        // chromatic light stays far from the locus on every step and
-        // still gates within a step or two of arriving.
-        limitedDistWindow[limitedDistIndex] = distanceUv
-        limitedDistIndex = (limitedDistIndex + 1) % limitedDistWindow.size
-        val gateDist = limitedDistWindow.minOrNull() ?: distanceUv
-        val target = WhiteBalanceMath.limitedAdaptation(gateDist)
+        val nearest = WhiteBalanceMath.locusNearest(sceneXy[0], sceneXy[1])
+            ?: floatArrayOf(1f, 6504f, ColorMatrix.D65_X, ColorMatrix.D65_Y)
+        val distanceUv = nearest[0].toDouble()
+        val nearestCct = nearest[1].toDouble()
+        val locusXy = floatArrayOf(nearest[2], nearest[3])
+        val chroma = WhiteBalanceMath.chromaFromD65(sceneXy[0], sceneXy[1])
+        // The gate is the maximum over the last few estimator steps: a
+        // single noisy step (clipped cells shifting the estimate) must
+        // not dip the adaptation, while a genuinely chromatic light sits
+        // outside the white region on every step and still gates within
+        // a step or two of arriving. Starting from zeros, the window can
+        // only hold a gate back, never pull it forward.
+        val stepD = WhiteBalanceMath.limitedAdaptation(chroma, distanceUv)
+        limitedGateWindow[limitedGateIndex] = stepD
+        limitedGateIndex = (limitedGateIndex + 1) % limitedGateWindow.size
+        val target = limitedGateWindow.maxOrNull() ?: stepD
         // The assertion target follows the estimate's nearest-locus CCT
         // through WhiteBalanceMath.limitedBlendTargetXy: floored at
         // ADAPT_TARGET_K for warm scenes, gliding up the locus and easing
-        // onto exact D65 near 6504 K, so walking between rooms never snaps.
-        val (tx, ty) = WhiteBalanceMath.limitedBlendTargetXy(nearestCct)
+        // onto exact D65 near 6504 K, and keeping the estimate's perpen-
+        // dicular offset so a near-white tint is corrected in full.
+        val (tx, ty) = WhiteBalanceMath.limitedBlendTargetXy(sceneXy, locusXy, nearestCct)
         limitedTargetXy = floatArrayOf(tx, ty)
         smoothedAdaptation = if (snap) {
             // First trusted estimate: adopt it exactly, like the

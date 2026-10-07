@@ -314,6 +314,27 @@ class RawColorProfile(chars: CameraCharacteristics) {
     }
 
     /**
+     * The estimate's chromaticity without the chromaticity-triangle
+     * rejection [sceneXyForNeutral] applies. Limited auto white balance
+     * gates on the estimate's chroma, and a highly chromatic light (a
+     * sodium streetlight) measures OUTSIDE the triangle - rejecting it
+     * there reads as "no estimate" and the caller falls back to fully
+     * neutralizing the light, the opposite of the gate's intent. Only the
+     * degenerate cases (non-finite, non-positive sum) are a miss here;
+     * position outside the triangle is honest information and is kept.
+     */
+    fun estimateXyForNeutral(neutralSensorRgb: FloatArray): FloatArray? {
+        if (!available) return null
+        val neutral = RawColorMath.normalize(neutralSensorRgb) ?: return null
+        val cameraToXyz = cameraToXyzAtDaylight() ?: return null
+        val xyz = ColorMatrix.mulMatVec(cameraToXyz, neutral)
+        if (xyz.any { !it.isFinite() }) return null
+        val total = xyz[0] + xyz[1] + xyz[2]
+        if (total <= 0f) return null
+        return floatArrayOf(xyz[0] / total, xyz[1] / total)
+    }
+
+    /**
      * The transform for an illuminant of known chromaticity, with the white
      * balance left to the caller.
      *

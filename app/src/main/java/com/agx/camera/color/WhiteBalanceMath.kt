@@ -96,6 +96,20 @@ object WhiteBalanceMath {
         return Pair(xShift.toFloat().coerceIn(0f, 1f), yShift.toFloat().coerceIn(0f, 1f))
     }
 
+    // Chroma of a chromaticity: its CIE 1960 uv distance from D65 - how far
+    // the light sits from the neutral point, in any direction. Low-chroma
+    // light reads as white to human vision regardless of its locus distance
+    // (a green-white LED is fully adapted to; a yellow light at only twice
+    // the chroma is not), so the limited-AWB gate keys on chroma where the
+    // locus distance cannot discriminate.
+    fun chromaFromD65(x: Float, y: Float): Double {
+        val d = -2.0 * x + 12.0 * y + 3.0
+        if (d <= 0.0) return 1.0
+        val u = 4.0 * x / d
+        val v = 6.0 * y / d
+        return kotlin.math.hypot(u - D65_UV.first, v - D65_UV.second)
+    }
+
     // Distance from a chromaticity to the Planckian locus in CIE 1960 uv (the
     // u = 4x/d, v = 6y/d convention this file already uses, and the space
     // Duv and the Planckian locus are defined in), together with the CCT of
@@ -123,34 +137,70 @@ object WhiteBalanceMath {
         return Pair(best, bestCct)
     }
 
-    // Degree of partial adaptation for limited auto white balance: on-locus
-    // light is white-ish and earns FULL adaptation to the measured
-    // illuminant - partial adaptation of a warm scene passes through a
-    // yellow phase on the way from its orange cast to white, so there is no
-    // "a little adapted" endpoint that keeps the cast's hue. The only
-    // attenuation is distance-based: a flat plateau out to DUV_PLATEAU, then
-    // a smoothstep decay into the seamless hard gate at T_chroma = 0.02 in
-    // CIE 1960 uv, which drops highly chromatic light (party LEDs) to
-    // exactly zero adaptation. 1 = full correction, 0 = none.
-    fun limitedAdaptation(distanceUv: Double): Float {
-        if (distanceUv >= T_CHROMA) return 0f
-        val duv = if (distanceUv <= DUV_PLATEAU) {
-            1.0
-        } else {
-            val t = ((distanceUv - DUV_PLATEAU) / (T_CHROMA - DUV_PLATEAU))
-                .coerceIn(0.0, 1.0)
-            1.0 - t * t * (3.0 - 2.0 * t)
+    // Like locusDistanceUv, but also returns the nearest locus point's
+    // chromaticity: [distance, cct, x, y]. The limited-AWB target keeps the
+    // estimate's perpendicular offset relative to exactly this point.
+    fun locusNearest(x: Float, y: Float): FloatArray? {
+        val d = -2.0 * x + 12.0 * y + 3.0
+        if (d <= 0.0) return null
+        val u = 4.0 * x / d
+        val v = 6.0 * y / d
+        var best = 1e9
+        var bestCct = 6504.0
+        var bestXy: Pair<Double, Double>? = null
+        var cct = 1500.0
+        while (cct <= 12000.0) {
+            val (lu, lv) = planckianLocusUv(cct)
+            val dist = kotlin.math.hypot(u - lu, v - lv)
+            if (dist < best) {
+                best = dist
+                bestCct = cct
+                bestXy = planckianLocusXy(cct)
+            }
+            cct += 25.0
         }
-        return duv.toFloat().coerceIn(0f, 1f)
+        val (px, py) = bestXy ?: return null
+        return floatArrayOf(best.toFloat(), bestCct.toFloat(), px.toFloat(), py.toFloat())
     }
 
-    // The illuminant limited AWB asserts: the estimate's nearest Planckian
-    // point, floored at ADAPT_TARGET_K. Warm scenes adapt up to a 5000 K
-    // Kelvin assertion (the tuning reference: cool enough to read red-
-    // ish-neutral to the eye rather than green); scenes at or above the
-    // floor adapt to their own light, so a genuinely D65-lit scene is
-    // not pushed blue.
-    fun limitedBlendTargetXy(nearestLocusCct: Double): Pair<Float, Float> {
+    // Degree of partial adaptation for limited auto white balance. A light
+    // earns adaptation by being inside the white region of CIE 1960 uv,
+    // which is the union of two neighborhoods, each carried by one factor:
+    // near the Planckian locus (the classic warm-to-cool whites, however
+    // far down the locus - incandescent at 0.07 from D65 is still a white),
+    // and near D65 itself (near-white tints like a green-white LED at 0.04,
+    // however far off the locus). A light outside both - the sodium-yellow
+    // streetlight at 0.09, party LEDs at 0.14+ - is chromatic and earns
+    // zero: human vision never adapts to it, so neither does the app.
+    // The result is the max of two smoothsteps, so the boundary is seamless
+    // from either side. 1 = full correction, 0 = none.
+    fun limitedAdaptation(chromaUv: Double, locusDistUv: Double): Float {
+        val duvExempt = 1.0 - smooth01((locusDistUv - DUV_FULL) / (DUV_ZERO - DUV_FULL))
+        val chromaGate = 1.0 - smooth01((chromaUv - CHROMA_FULL) / (CHROMA_ZERO - CHROMA_FULL))
+        return max(duvExempt, chromaGate).toFloat().coerceIn(0f, 1f)
+    }
+
+    private fun smooth01(t: Double): Double {
+        val c = t.coerceIn(0.0, 1.0)
+        return c * c * (3.0 - 2.0 * c)
+    }
+
+    // The illuminant limited AWB asserts: the estimate slid PARALLEL to the
+    // Planckian locus to the throttled reference, keeping its perpendicular
+    // offset. The parallel component follows the estimate's nearest-locus
+    // CCT through the floor and the D65 ease (see below): warm scenes
+    // assert the fixed ADAPT_TARGET_K reference (the tuning calibration -
+    // cool enough to read reddish-neutral rather than green), cool scenes
+    // assert their own light up to exact D65. The perpendicular component
+    // is kept in full: a near-white light's tint (the bedroom's green-white
+    // LED) is what human vision adapts away completely, and at full
+    // adaptation the render must do the same - dropping the offset would
+    // leave the tint in the picture no matter how complete the adaptation.
+    fun limitedBlendTargetXy(
+        sceneXy: FloatArray,
+        locusXy: FloatArray,
+        nearestLocusCct: Double
+    ): Pair<Float, Float> {
         val k = nearestLocusCct.coerceAtLeast(ADAPT_TARGET_K)
         val (lx, ly) = kelvinToXy(k.toFloat(), 0f)
         // Ease onto exact D65 near 6504 K: the Planckian point is
@@ -159,13 +209,18 @@ object WhiteBalanceMath {
         // continuous across the whole range, so walking between rooms
         // glides instead of snapping at any boundary.
         val w = ((k - 5500.0) / (6504.0 - 5500.0)).coerceIn(0.0, 1.0)
-        val x = (lx + (ColorMatrix.D65_X.toDouble() - lx) * w).toFloat()
-        val y = (ly + (ColorMatrix.D65_Y.toDouble() - ly) * w).toFloat()
-        return x to y
+        val tx = (lx + (ColorMatrix.D65_X.toDouble() - lx) * w).toFloat()
+        val ty = (ly + (ColorMatrix.D65_Y.toDouble() - ly) * w).toFloat()
+        return (sceneXy[0] + (tx - locusXy[0])) to (sceneXy[1] + (ty - locusXy[1]))
     }
 
-    private const val T_CHROMA = 0.02
-    private const val DUV_PLATEAU = 0.008
+    private val D65_UV: Pair<Double, Double> =
+        xyToUv(ColorMatrix.D65_X.toDouble(), ColorMatrix.D65_Y.toDouble())
+
+    private const val DUV_FULL = 0.008
+    private const val DUV_ZERO = 0.012
+    private const val CHROMA_FULL = 0.045
+    private const val CHROMA_ZERO = 0.065
     const val ADAPT_TARGET_K = 5000.0
 
     // Planck's law (2*h*c^2 factor dropped; only relative SPD matters):

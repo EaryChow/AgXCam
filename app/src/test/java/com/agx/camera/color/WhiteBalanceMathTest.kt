@@ -175,73 +175,130 @@ class WhiteBalanceMathTest {
     @Test
     fun limitedAdaptation_chromaticLightEarnsNothing() {
         // The acceptance test of the feature: highly chromatic light is not
-        // adapted at all.
-        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.05), 0f)
-        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.021), 0f)
-        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.02), 0f)
+        // adapted at all. Chroma from D65 decides, and only off the locus:
+        // a red LED and the sodium-yellow streetlight (converged estimate)
+        // both sit far outside the white region on both axes.
+        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.10, 0.02), 0f)
+        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.08, 0.02), 0f)
+        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.065, 0.02), 0f)
     }
 
     @Test
-    fun limitedAdaptation_fullInsideTheGate() {
-        // On-locus light earns full adaptation; the blend target's 4000 K
-        // floor, not this number, is what throttles warm scenes.
-        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(0.0), 0.01f)
-        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(0.008), 0.01f)
+    fun limitedAdaptation_nearWhiteLightFullyAdapts() {
+        // The bedroom case: a green-white LED measures at chroma ~0.04 and
+        // locus distance ~0.04, yet reads completely white to human vision,
+        // so it earns full adaptation.
+        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(0.0405, 0.042), 1e-6f)
+    }
+
+    @Test
+    fun limitedAdaptation_onLocusWhitesFullyAdapts() {
+        // The locus exemption: warm whites are far from D65 in chroma
+        // (incandescent ~0.07) but on-locus, and the ADAPT_TARGET_K floor
+        // - not this gate - is what throttles their warmth.
+        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(0.069, 0.0003), 1e-6f)
+        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(0.117, 0.0), 1e-6f)
+        // A warm-white LED slightly off the locus (|Duv| ~0.0075) keeps
+        // full adaptation through the exemption.
+        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(0.068, 0.0075), 1e-6f)
     }
 
     @Test
     fun limitedBlendTargetIsFlooredAtADAPT_TARGET_K() {
         // Warm scenes assert the floor reference exactly (the tuning
         // calibration); scenes at or above the floor keep their own
-        // Planckian point, so a D65-lit scene is not pushed blue.
-        val (lx, ly) = WhiteBalanceMath.limitedBlendTargetXy(2375.0)
+        // Planckian point, so a D65-lit scene is not pushed blue. On-locus
+        // estimates keep no perpendicular offset, so the target is the
+        // throttled reference itself.
+        val (p23x, p23y) = WhiteBalanceMath.kelvinToXy(2375f, 0f)
+        val (lx, ly) = WhiteBalanceMath.limitedBlendTargetXy(
+            floatArrayOf(p23x, p23y), floatArrayOf(p23x, p23y), 2375.0
+        )
         val (k5x, k5y) = WhiteBalanceMath.kelvinToXy(WhiteBalanceMath.ADAPT_TARGET_K.toFloat(), 0f)
         assertEquals("warm scene asserts the floor", k5x, lx, 1e-6f)
         assertEquals("warm scene asserts the floor", k5y, ly, 1e-6f)
         // Daylight scenes ease onto exact D65 (the daylight render):
         // the Planckian 6504 K point is greener than D65 itself.
-        val (dx, dy) = WhiteBalanceMath.limitedBlendTargetXy(6504.0)
+        val (d65x, d65y) = WhiteBalanceMath.kelvinToXy(6504f, 0f)
+        val (dx, dy) = WhiteBalanceMath.limitedBlendTargetXy(
+            floatArrayOf(d65x, d65y), floatArrayOf(d65x, d65y), 6504.0
+        )
         assertEquals("daylight scene asserts exact D65", ColorMatrix.D65_X, dx, 1e-6f)
         assertEquals("daylight scene asserts exact D65", ColorMatrix.D65_Y, dy, 1e-6f)
         // Continuity: no jump anywhere across the range. The bound sits
         // above the Planckian locus's own slope near 5000 K (~0.0035 in
         // xy per 100 K) but far below the 0.036 floor-to-D65 pop this
         // glide replaced.
-        var prev = WhiteBalanceMath.limitedBlendTargetXy(2000.0)
-        var cct = 2100.0
+        var prev: Pair<Float, Float>? = null
+        var cct = 2000.0
         while (cct <= 12000.0) {
-            val cur = WhiteBalanceMath.limitedBlendTargetXy(cct)
-            val d = kotlin.math.hypot(cur.first - prev.first, cur.second - prev.second)
-            assertTrue("target jump at ${cct.toInt()}K: $d", d < 0.006f)
+            val (px, py) = WhiteBalanceMath.kelvinToXy(cct.toFloat(), 0f)
+            val cur = WhiteBalanceMath.limitedBlendTargetXy(
+                floatArrayOf(px, py), floatArrayOf(px, py), cct
+            )
+            if (prev != null) {
+                val d = kotlin.math.hypot(cur.first - prev.first, cur.second - prev.second)
+                assertTrue("target jump at ${cct.toInt()}K: $d", d < 0.006f)
+            }
             prev = cur
             cct += 100.0
         }
     }
 
     @Test
+    fun limitedBlendTargetKeepsPerpendicularOffset() {
+        // The bedroom case: the estimate sits green of the locus and the
+        // target must keep that offset - slid parallel to the locus to the
+        // throttled reference, not projected onto it - or the green would
+        // survive full adaptation.
+        val sceneXy = floatArrayOf(0.331f, 0.436f)
+        val locusXy = floatArrayOf(0.326f, 0.335f)
+        val (tx, ty) = WhiteBalanceMath.limitedBlendTargetXy(sceneXy, locusXy, 5800.0)
+        val keptX = tx - sceneXy[0]
+        val keptY = ty - sceneXy[1]
+        // Same slide as the on-locus reference at this CCT makes.
+        val (refX, refY) = WhiteBalanceMath.limitedBlendTargetXy(
+            locusXy, locusXy, 5800.0
+        )
+        assertEquals("offset x kept", refX - locusXy[0], keptX, 1e-5f)
+        assertEquals("offset y kept", refY - locusXy[1], keptY, 1e-5f)
+        // And the offset itself is plainly still there.
+        assertTrue("green offset kept", ty - locusXy[1] > 0.05f)
+    }
+
+    @Test
+    fun chromaFromD65_ordersTheLights() {
+        // The gate's input, sanity-checked against the measured scenes:
+        // bedroom green-white is near-white, tungsten is inside the locus
+        // exemption, and a red LED is deep in chromatic territory.
+        val bedroom = WhiteBalanceMath.chromaFromD65(0.331f, 0.436f)
+        assertTrue("bedroom is near-white", bedroom < 0.045)
+        assertTrue("red LED is chromatic", WhiteBalanceMath.chromaFromD65(0.69f, 0.30f) > 0.2)
+        val (tx2, ty2) = WhiteBalanceMath.kelvinToXy(2856f, 0f)
+        assertTrue(
+            "tungsten is nearer white than a red LED",
+            WhiteBalanceMath.chromaFromD65(tx2, ty2) < 0.078
+        )
+    }
+
+    @Test
     fun limitedAdaptation_isLuminanceIndependent() {
         // No luminance argument exists: dim-room throttling read as
         // under-correction in practice.
-        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(0.0), 0f)
+        assertEquals(1.0f, WhiteBalanceMath.limitedAdaptation(0.0, 0.0), 0f)
     }
 
     @Test
     fun limitedAdaptation_gateIsSeamless() {
-        // Just inside the gate the quadratic window has already taken the
-        // adaptation to nearly nothing, so the hard drop to zero at T_chroma
-        // is a rounding, not a step.
-        val justInside = WhiteBalanceMath.limitedAdaptation(0.0199)
-        assertTrue("just inside the gate D $justInside", justInside in 0.000001f..0.05f)
-        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.02), 0f)
-    }
-
-    @Test
-    fun limitedAdaptation_smallDuvIsFree() {
-        // Ordinary white LEDs sit slightly off the locus (|Duv| ~0.003-0.008)
-        // and must not be throttled for it: the attenuation is a flat plateau
-        // out to DUV_PLATEAU.
-        val onLocus = WhiteBalanceMath.limitedAdaptation(0.0)
-        val slightlyOff = WhiteBalanceMath.limitedAdaptation(0.006)
-        assertEquals("plateau is free", onLocus, slightlyOff, 1e-6f)
+        // Both factors are smoothsteps with flat ends, so approaching the
+        // white region's boundary from either side eases to the same value.
+        val justInside = WhiteBalanceMath.limitedAdaptation(0.0649, 0.02)
+        assertTrue("just inside the chroma gate D $justInside", justInside in 0.000001f..0.05f)
+        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.065, 0.02), 0f)
+        // At full chroma the duv exemption is the only factor left, so its
+        // edge is testable there.
+        val justInsideDuv = WhiteBalanceMath.limitedAdaptation(0.07, 0.0119)
+        assertTrue("just inside the duv gate D $justInsideDuv", justInsideDuv in 0.0001f..0.05f)
+        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.07, 0.012), 0f)
     }
 }
