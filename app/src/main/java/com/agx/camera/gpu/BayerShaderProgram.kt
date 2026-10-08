@@ -461,7 +461,20 @@ class BayerShaderProgram {
         GLES20.glUniformMatrix3fv(dUColorMatLoc, 1, true, colorMat ?: COLOR_IDENTITY_9, 0)
         GLES20.glUniform1f(dUWhiteLevelLoc, whiteLevel)
         GLES20.glUniform1f(dUBlackLevelLoc, blackLevel)
-        GLES20.glUniform3f(dULumaCoeffsLoc, lumaCoeffs[0], lumaCoeffs[1], lumaCoeffs[2])
+        // The neutralization judges how close the SENSOR signal is to the
+        // Bayer clip, but it reads the post-gain demosaic output, and the
+        // gain split differs between white balance modes (daylight-anchored
+        // vs estimate): the same raw pixel reads different luma under
+        // different modes and the attenuation lands differently, which
+        // reads as a cast difference in bright content. Dividing the
+        // coefficients by the gains restores the pre-gain (sensor) luma,
+        // so the neutralization is invariant to how the balance is split.
+        GLES20.glUniform3f(
+            dULumaCoeffsLoc,
+            lumaCoeffs[0] / wbGains[0].coerceAtLeast(1e-6f),
+            lumaCoeffs[1] / wbGains[1].coerceAtLeast(1e-6f),
+            lumaCoeffs[2] / wbGains[2].coerceAtLeast(1e-6f)
+        )
         GLES20.glUniform1f(dUClipAttenLoc, clipAttenFactor)
         GLES20.glUniform1f(dUDpStrengthLoc, dpStrength)
         GLES20.glUniform1f(dURawNrStrengthLoc, rawNrStrength)
