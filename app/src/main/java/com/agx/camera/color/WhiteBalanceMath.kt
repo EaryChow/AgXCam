@@ -203,14 +203,21 @@ object WhiteBalanceMath {
     ): Pair<Float, Float> {
         val k = nearestLocusCct.coerceAtLeast(ADAPT_TARGET_K)
         val (lx, ly) = kelvinToXy(k.toFloat(), 0f)
-        // Ease onto exact D65 near 6504 K: the Planckian point is
-        // greener than D65 itself, and the daylight render (exact D65)
-        // is the correct one there. The blend keeps the target
-        // continuous across the whole range, so walking between rooms
-        // glides instead of snapping at any boundary.
+        // Daylight correction, applied as a constant offset and tapered:
+        // the Planckian point at 6504 K is greener than D65 itself, and the
+        // daylight render (exact D65) is the correct white there. The same
+        // small offset belongs to the locus point at every temperature up
+        // to 6504 K, eased in across 5500-6504 K; past 6504 K it encodes
+        // a gap that is not the estimate's own and shifts cool estimates
+        // (office tubes at 6800-7500 K) off the light, which the render
+        // answers blue - so it tapers back out across just 196 K, gone by
+        // 6700 K where a cool estimate asserts its own position exactly,
+        // as plain auto white balance does.
         val w = ((k - 5500.0) / (6504.0 - 5500.0)).coerceIn(0.0, 1.0)
-        val tx = (lx + (ColorMatrix.D65_X.toDouble() - lx) * w).toFloat()
-        val ty = (ly + (ColorMatrix.D65_Y.toDouble() - ly) * w).toFloat()
+        val taper = (1.0 - (k - 6504.0) / 196.0).coerceIn(0.0, 1.0)
+        val (px, py) = kelvinToXy(6504f, 0f)
+        val tx = (lx + (ColorMatrix.D65_X - px) * w * taper).toFloat()
+        val ty = (ly + (ColorMatrix.D65_Y - py) * w * taper).toFloat()
         return (sceneXy[0] + (tx - locusXy[0])) to (sceneXy[1] + (ty - locusXy[1]))
     }
 

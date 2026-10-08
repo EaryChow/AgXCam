@@ -282,6 +282,20 @@ class WhiteBalanceMathTest {
     }
 
     @Test
+    fun limitedBlendTargetTapersDaylightCorrectionAbove6504() {
+        // The office case: the daylight correction encodes the
+        // Planckian-vs-D65 gap AT 6504 K, not the cool light's own
+        // position - past 6504 K it tapers back out so a cool estimate
+        // asserts itself (fully adapted, like plain AUTO), while 6504 K
+        // still lands on exact D65 (asserted above).
+        val (p73x, p73y) = WhiteBalanceMath.kelvinToXy(7350f, 0f)
+        val scene = floatArrayOf(p73x, p73y)
+        val (tx, ty) = WhiteBalanceMath.limitedBlendTargetXy(scene, scene, 7350.0)
+        assertEquals("cool scene asserts its own position", p73x, tx, 0.002f)
+        assertEquals("cool scene asserts its own position", p73y, ty, 0.002f)
+    }
+
+    @Test
     fun limitedAdaptation_isLuminanceIndependent() {
         // No luminance argument exists: dim-room throttling read as
         // under-correction in practice.
