@@ -104,6 +104,10 @@ class Camera2Manager(private val context: Context) {
 
     private var ccLogCount = 0
 
+    // One-shot flag: the HAL ccMat is the lens-independent space for
+    // cross-lens comparison, logged once per session for the export.
+    private var ccMatLogged = false
+
     // Lens shading (vignette) correction. The HAL is asked to compute the
     // per-frame lens-shading map statistic on every request; the first
     // valid non-identity map is pushed to the renderer, and refreshed at a low
@@ -645,7 +649,13 @@ class Camera2Manager(private val context: Context) {
             set(CaptureRequest.CONTROL_AWB_MODE, effectiveAwbMode())
             set(CaptureRequest.CONTROL_AWB_LOCK, effectiveAwbMode() == CaptureRequest.CONTROL_AWB_MODE_AUTO)
         } else {
-            set(CaptureRequest.CONTROL_AWB_MODE, currentAwbMode)
+            // effectiveAwbMode(), not currentAwbMode: the daylight-
+            // anchor override must reach the HAL on this path too.
+            // The request log prints the effective mode, which once
+            // hid this: the sampler read back the scene's AUTO gains
+            // and the old reported-mode gate (correctly) rejected
+            // them forever.
+            set(CaptureRequest.CONTROL_AWB_MODE, effectiveAwbMode())
             // AWB_LOCK is sticky in some HALs: if a Kelvin session left it
             // latched, the next mode would never recompute. Explicitly set it
             // every frame so switching modes always re-runs AWB unless the
@@ -1485,6 +1495,7 @@ class Camera2Manager(private val context: Context) {
         availableAfModes = intArrayOf()
         availableAeModes = intArrayOf()
         availableAwbModes = emptySet()
+        ccMatLogged = false
         // Session-scoped result state: a stale CONVERGED from a
         // previous session would defeat the AWB input gate's AE check
         // on the first frames of the next one.
@@ -1522,6 +1533,7 @@ class Camera2Manager(private val context: Context) {
         availableAfModes = intArrayOf()
         availableAeModes = intArrayOf()
         availableAwbModes = emptySet()
+        ccMatLogged = false
         // Session-scoped result state: a stale CONVERGED from a
         // previous session would defeat the AWB input gate's AE check
         // on the first frames of the next one.
@@ -1588,6 +1600,13 @@ CaptureRequest.CONTROL_AWB_MODE_SHADE -> "SHADE"
             }
             val cct = result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)
             latestColorCorrectionMatrix = cct?.let { colorSpaceToRowMajor(it) }
+            if (latestColorCorrectionMatrix != null && !ccMatLogged) {
+                ccMatLogged = true
+                CrashLogger.log(
+                    TAG, "ccMat: " + latestColorCorrectionMatrix!!
+                        .joinToString(" ") { String.format("%.4f", it) }
+                )
+            }
             val ccg = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
             latestColorCorrectionGains = ccg?.let {
                 floatArrayOf(it.red, it.greenEven, it.greenOdd, it.blue)

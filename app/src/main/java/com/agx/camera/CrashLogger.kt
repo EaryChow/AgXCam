@@ -18,7 +18,12 @@ object CrashLogger {
     private val lock = Any()
     private val dateFormat = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
     private val buffer = StringBuilder()
-    private const val MAX_BUFFER_CHARS = 128 * 1024
+    // Large enough to keep a full multi-lens debug session: the per-request
+    // readback logging runs at kilobytes per second, and at the old 128 KB
+    // cap a session that switches lenses lost every earlier lens within a
+    // minute. The same buffer backs crash reports in every build type;
+    // 4 M chars (~8 MB) is acceptable for the dual role.
+    private const val MAX_BUFFER_CHARS = 4 * 1024 * 1024
 
     // Large out-of-band blocks (e.g. the S3 pack texel dump) that must not go
     // through the ring buffer. Saved alongside the log by the *Downloads writers.

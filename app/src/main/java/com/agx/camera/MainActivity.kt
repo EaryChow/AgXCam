@@ -3148,6 +3148,9 @@ class MainActivity : AppCompatActivity() {
             val chars = cm.getCameraCharacteristics(lens.cameraId)
             val meta = RawMetadataParser(chars)
             val profile = RawColorProfile(chars)
+            CrashLogger.log(
+                TAG, "RawColorProfile ${lens.label} (id=${lens.cameraId}): ${profile.describe()}"
+            )
             previewRenderer.bayerColorMap = meta.bayerColorMap
             previewRenderer.bayerBlackLevelPattern = meta.blackLevelPattern
             previewRenderer.agxWhiteLevel = meta.whiteLevel.toFloat()
@@ -3867,10 +3870,36 @@ class MainActivity : AppCompatActivity() {
         driftPrevTarget = tgt?.copyOf()
     }
 
+    // Recent converged readback gains while the daylight override is active:
+    // a pinned HAL holds them still, an unpinned one drifts with the scene.
+    private val anchorGainWindowR = ArrayDeque<Float>()
+    private val anchorGainWindowB = ArrayDeque<Float>()
+
+    private fun anchorGainsPinned(): Boolean {
+        val g = camera2Manager.latestColorCorrectionGains ?: return false
+        anchorGainWindowR.addLast(g[0])
+        anchorGainWindowB.addLast(g[3])
+        while (anchorGainWindowR.size > 6) anchorGainWindowR.removeFirst()
+        while (anchorGainWindowB.size > 6) anchorGainWindowB.removeFirst()
+        if (anchorGainWindowR.size < 4) return false
+        fun stable(w: ArrayDeque<Float>): Boolean {
+            val mn = w.minOrNull() ?: return false
+            val mx = w.maxOrNull() ?: return false
+            return mx > 0f && (mx - mn) / mx < 0.03f
+        }
+        return stable(anchorGainWindowR) && stable(anchorGainWindowB)
+    }
+
     // Feeds the anchor sampler from the per-frame HAL readback. Only converged
     // readbacks produced while the HAL is pinned to its fixed DAYLIGHT mode
     // describe the sensor's daylight response; scene-adaptive (AUTO) readbacks
     // are a property of the scene, not the sensor, and are ignored here.
+    // This HAL family pins the pipeline under the override - the converged
+    // gains hold still at daylight-like values - but reports CONTROL_AWB_MODE
+    // as AUTO in the readback, so the reported mode cannot be the acceptance
+    // gate. The override itself is the pin request, and anchorGainsPinned()
+    // guards the remaining case of a HAL that truly ignores it while the
+    // scene sits still (unpinned gains drift, pinned ones do not).
     private fun feedDaylightAnchorEstimator() {
         if (!::daylightAnchorEstimator.isInitialized || rawColorProfile == null) return
         val est = daylightAnchorEstimator
@@ -3884,17 +3913,32 @@ class MainActivity : AppCompatActivity() {
             mainHandler.post { updateDaylightAnchorUI() }
         }
         if (est.state == DaylightAnchorEstimator.State.IDLE &&
-            camera2Manager.latestAwbMode == android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT
+            (camera2Manager.daylightCalibrationOverride ||
+                camera2Manager.latestAwbMode ==
+                android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT)
         ) {
+            anchorGainWindowR.clear()
+            anchorGainWindowB.clear()
             est.start()
         }
         if (est.state == DaylightAnchorEstimator.State.SAMPLING ||
             est.state == DaylightAnchorEstimator.State.CONVERGED
         ) {
-            if (camera2Manager.latestAwbMode == android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT &&
-                camera2Manager.latestAwbState == CaptureResult.CONTROL_AWB_STATE_CONVERGED
+            if ((camera2Manager.daylightCalibrationOverride ||
+                camera2Manager.latestAwbMode ==
+                android.hardware.camera2.CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT) &&
+                camera2Manager.latestAwbState == CaptureResult.CONTROL_AWB_STATE_CONVERGED &&
+                anchorGainsPinned()
             ) {
-                est.addSample(camera2Manager.latestColorCorrectionGains)
+                val rawGains = camera2Manager.latestColorCorrectionGains
+                est.addSample(rawGains)
+                if (rawGains != null && est.sampledFrames % 8 == 0) {
+                    CrashLogger.log(
+                        TAG, "anchor cc: lens=${lensManager.activeLens?.label} " +
+                            "samples=${est.sampledFrames} " +
+                            "gains=[${rawGains.joinToString { String.format("%.3f", it) }}]"
+                    )
+                }
             }
         }
         if (daylightBootstrapActive) {

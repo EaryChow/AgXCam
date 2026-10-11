@@ -2,6 +2,7 @@ package com.agx.camera.camera
 
 import android.hardware.camera2.CameraCharacteristics
 import android.util.Log
+import com.agx.camera.CrashLogger
 import com.agx.camera.color.ColorMatrix
 import com.agx.camera.color.ColorMatrix.Mat3
 import kotlin.math.abs
@@ -140,14 +141,21 @@ class RawColorProfile(chars: CameraCharacteristics) {
         forwardMatrix1 = warm.forwardMatrix
         forwardMatrix2 = cool.forwardMatrix
 
-        Log.d(
-            TAG, "RawColorProfile: available=$available fwd=$hasForwardMatrix " +
-                "illuminants=${warm.kelvin.toInt()}K(warm)/${cool.kelvin.toInt()}K(cool) " +
-                "cm_warm=${matStr(warm.colorMatrix)}" +
-                "cal_warm=${matStr(warm.calibration)}" +
-                "fwd_warm=${matStr(warm.forwardMatrix)}"
-        )
+        Log.d(TAG, "RawColorProfile: ${describe()}")
+        // CrashLogger copy: the debug export does not include Log.d output,
+        // and cross-lens diagnosis needs the raw profile per lens.
+        CrashLogger.log(TAG, "RawColorProfile: ${describe()}")
     }
+
+    /** One-line summary of both reference illuminants, for diagnostics. */
+    fun describe(): String = "available=$available fwd=$hasForwardMatrix " +
+        "illuminants=${colorTemperature1.toInt()}K(warm)/${colorTemperature2.toInt()}K(cool) " +
+        "cm_warm=${matStr(rawColorMatrix1)}" +
+        "cal_warm=${matStr(calibration1)}" +
+        "fwd_warm=${matStr(forwardMatrix1)}" +
+        "cm_cool=${matStr(rawColorMatrix2)}" +
+        "cal_cool=${matStr(calibration2)}" +
+        "fwd_cool=${matStr(forwardMatrix2)}"
 
     /**
      * Correlated color temperature of the scene described by [neutralSensorRgb]
@@ -260,7 +268,15 @@ class RawColorProfile(chars: CameraCharacteristics) {
         // What the device says, green-referenced the same way.
         val deviceR = gMean / anchorGains[0]
         val deviceB = gMean / anchorGains[3]
-        return floatArrayOf(deviceR / claimR, 1f, deviceB / claimB)
+        val d = floatArrayOf(deviceR / claimR, 1f, deviceB / claimB)
+        CrashLogger.log(
+            TAG,
+            "daylightAnchor: gains=[${anchorGains[0]}, ${anchorGains[1]}, " +
+                "${anchorGains[2]}, ${anchorGains[3]}] " +
+                "claim=[$claimR, 1.0, $claimB] device=[$deviceR, 1.0, $deviceB] " +
+                "d=[${d[0]}, 1.0, ${d[2]}]"
+        )
+        return d
     }
 
     /**
@@ -401,7 +417,7 @@ class RawColorProfile(chars: CameraCharacteristics) {
             else reported1 to reported2
 
         private fun matStr(m: Mat3?): String =
-            if (m == null) "none"
+            if (m == null || m.m.all { it == 0f }) "none"
             else String.format("%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f", m.m[0], m.m[1], m.m[2], m.m[3], m.m[4], m.m[5], m.m[6], m.m[7], m.m[8])
 
         private fun readMatrix(chars: CameraCharacteristics, keyField: String): Mat3? {
