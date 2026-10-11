@@ -293,7 +293,12 @@ class ShaderBudget {
             "bayer", "demosaic", "nr", "spatialNr", "dpc", "outNr"
         )
 
-        private val ALL_PROGRAMS = BASELINE_PROGRAMS + PHASE1_PROGRAMS
+        /** The chroma branch added when S5 was split into independent luma and
+         *  chroma sliders. Counted in the resident-size list but not reported
+         *  as a Phase-1 addition. */
+        val SPLIT_PROGRAMS = listOf("s5c")
+
+        private val ALL_PROGRAMS = BASELINE_PROGRAMS + PHASE1_PROGRAMS + SPLIT_PROGRAMS
 
         /** Analytically derived from the GLSL; re-derived by ShaderBudgetTest. */
         const val FETCH_SIGMA_HAT_SPARSE = 33

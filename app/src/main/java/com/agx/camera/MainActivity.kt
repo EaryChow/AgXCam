@@ -284,6 +284,8 @@ class MainActivity : AppCompatActivity() {
     private var dpcStrength = 0f
     private var rawNrStrength = 0f
     private var outNrStrength = 0f
+    // S5-C chroma strength, independent of the S5 luma slider.
+    private var outNrChromaStrength = 1f
     private var lastIsoTapTime = 0L
     private var lastShutterTapTime = 0L
     private var isoPopupShowing = false
@@ -388,6 +390,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var s1Label: TextView; private lateinit var s1Slider: SeekBar
     private lateinit var s3Label: TextView; private lateinit var s3Slider: SeekBar
     private lateinit var s5Label: TextView; private lateinit var s5Slider: SeekBar
+    private lateinit var s5cLabel: TextView; private lateinit var s5cSlider: SeekBar
 
     // Sensor clip neutralization
     private lateinit var clipAttenLabel: TextView; private lateinit var clipAttenSlider: SeekBar
@@ -501,6 +504,7 @@ class MainActivity : AppCompatActivity() {
         s1Label = findViewById(R.id.s1_label); s1Slider = findViewById(R.id.s1_slider)
         s3Label = findViewById(R.id.s3_label); s3Slider = findViewById(R.id.s3_slider)
         s5Label = findViewById(R.id.s5_label); s5Slider = findViewById(R.id.s5_slider)
+        s5cLabel = findViewById(R.id.s5c_label); s5cSlider = findViewById(R.id.s5c_slider)
 
         clipAttenLabel = findViewById(R.id.clip_atten_label); clipAttenSlider = findViewById(R.id.clip_atten_slider)
 
@@ -582,6 +586,7 @@ class MainActivity : AppCompatActivity() {
         dpcStrength = previewResPrefs.getFloat(PREF_S1_DPC, 0f).coerceIn(0f, 1f)
         rawNrStrength = previewResPrefs.getFloat(PREF_S3_RAW, 0f).coerceIn(0f, 1f)
         outNrStrength = previewResPrefs.getFloat(PREF_S5_OUT, 0f).coerceIn(0f, 1f)
+        outNrChromaStrength = previewResPrefs.getFloat(PREF_S5C_OUT, 1f).coerceIn(0f, 1f)
 
         developerSwitch = DeveloperSwitch(this) { useRaw ->
             CrashLogger.log(TAG, "Developer switch toggled: useRaw=$useRaw")
@@ -687,6 +692,7 @@ class MainActivity : AppCompatActivity() {
             dpcStrength = this@MainActivity.dpcStrength
             rawNrStrength = this@MainActivity.rawNrStrength
             outNrStrength = this@MainActivity.outNrStrength
+            outNrChromaStrength = this@MainActivity.outNrChromaStrength
             onFirstFrameRendered = { Log.d(TAG, "First frame rendered") }
             onFrameRendered = { ms -> thermalManager.onFrameRendered(ms.toFloat()) }
             onDegradedModeChanged = { banner ->
@@ -1491,15 +1497,28 @@ class MainActivity : AppCompatActivity() {
 
         s5Slider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             outNrStrength = v / 100f
-            s5Label.text = "S5 OUT  $v"
+            s5Label.text = "S5 LUMA  $v"
             previewRenderer.outNrStrength = outNrStrength
             previewResPrefs.edit().putFloat(PREF_S5_OUT, outNrStrength).apply()
         })
         setupSliderDoubleClickReset(s5Slider, 0) {
             outNrStrength = 0f
-            s5Label.text = "S5 OUT  0"
+            s5Label.text = "S5 LUMA  0"
             previewRenderer.outNrStrength = 0f
             previewResPrefs.edit().putFloat(PREF_S5_OUT, 0f).apply()
+        }
+
+        s5cSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
+            outNrChromaStrength = v / 100f
+            s5cLabel.text = "S5 CHROMA  $v"
+            previewRenderer.outNrChromaStrength = outNrChromaStrength
+            previewResPrefs.edit().putFloat(PREF_S5C_OUT, outNrChromaStrength).apply()
+        })
+        setupSliderDoubleClickReset(s5cSlider, 100) {
+            outNrChromaStrength = 1f
+            s5cLabel.text = "S5 CHROMA  100"
+            previewRenderer.outNrChromaStrength = 1f
+            previewResPrefs.edit().putFloat(PREF_S5C_OUT, 1f).apply()
         }
 
         clipAttenSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
@@ -1751,7 +1770,9 @@ class MainActivity : AppCompatActivity() {
         s3Slider.progress = (rawNrStrength * 100).toInt().coerceIn(0, 100)
         s3Label.text = "S3 RAW  ${s3Slider.progress}"
         s5Slider.progress = (outNrStrength * 100).toInt().coerceIn(0, 100)
-        s5Label.text = "S5 OUT  ${s5Slider.progress}"
+        s5Label.text = "S5 LUMA  ${s5Slider.progress}"
+        s5cSlider.progress = (outNrChromaStrength * 100).toInt().coerceIn(0, 100)
+        s5cLabel.text = "S5 CHROMA  ${s5cSlider.progress}"
 
         clipAttenSlider.progress = (clipAttenFactor * 100).toInt().coerceIn(0, 100)
         clipAttenLabel.text = String.format("Neutralize  %.2f", clipAttenFactor)
@@ -5547,6 +5568,7 @@ override fun onResume() {
         private const val PREF_S1_DPC = "stage1_dpc_strength"
         private const val PREF_S3_RAW = "stage3_raw_strength"
         private const val PREF_S5_OUT = "stage5_out_strength"
+        private const val PREF_S5C_OUT = "stage5c_chroma_strength"
 private const val PREF_MEASUREMENT = "measurement_timing"
         // Lens shading correction strength (0.0..1.0) of the estimated map.
         private const val PREF_LS_STRENGTH = "lens_shading_strength"

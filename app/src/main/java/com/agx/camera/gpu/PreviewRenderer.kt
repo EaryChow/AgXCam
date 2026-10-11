@@ -153,6 +153,22 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var outNrBufferWidth = 0
     private var outNrBufferHeight = 0
 
+    // Stage 5-C (output-domain chroma) buffers: the propagated sigma texture,
+    // the stage-1 chroma-filtered image, and the per-8x8-cell mottle plane.
+    // RGBA32F at the demosaic resolution except the cell plane (ceil/8).
+    private var s5cSigmaFboId = 0
+    private var s5cSigmaTexId = 0
+    private var s5cStage1FboId = 0
+    private var s5cStage1TexId = 0
+    private var s5cCellFboId = 0
+    private var s5cCellTexId = 0
+    private var s5cBlendFboId = 0
+    private var s5cBlendTexId = 0
+    private var s5cBufferWidth = 0
+    private var s5cBufferHeight = 0
+    private var s5cCellWidth = 0
+    private var s5cCellHeight = 0
+
     // 1x1 RGBA32F zero texture bound to float samplers that have no real data
     // behind them (DPC avg/flag inputs while packing, sigma_hat fallback).
     private var fallbackFloatTexId = 0
@@ -167,6 +183,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private val sigmaHatShader = SigmaHatShaderProgram()
     private val rawDenoiseShader = RawDenoiseShaderProgram()
     private val outNrShader = OutNrShaderProgram()
+    private val s5cShader = S5CShaderProgram()
 
     /** Green focus-peak overlay on the final blit. Enabled while the MF roller is
      *  actively editable (focus panel open + manual focus). [focusPeakRadius] is the
@@ -201,6 +218,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     @Volatile var dpcStrength = 0f
     @Volatile var rawNrStrength = 0f
     @Volatile var outNrStrength = 0f
+    // S5-C chroma strength, independent of S5-L. 0 = bypass. It reads the S5-L
+    // output luma as its guide, so enabling it with S5-L at 0 guides on the raw
+    // demosaic luma instead.
+    @Volatile var outNrChromaStrength = 1f
     @Volatile var syntheticTestEnabled = com.agx.camera.BuildConfig.AGX_SYNTHETIC_BAYER
     // Runs the extra Stage-2 draw - the post-DPC sigma_hat re-estimation that
     // is required as the boundary between DPC and Stage 3.  Current
@@ -1079,6 +1100,14 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val dpEnabled = dpcStrength > 0f && dpcShader.isReady()
         val rawDenoiseActive = rawNrStrength > 0f && rawDenoiseShader.isReady()
         val outDenoiseActive = outNrStrength > 0f && outNrShader.isReady()
+        // S5 is split into an independent luma branch (S5-L) and chroma branch
+        // (S5-C). Either can run alone: with S5-L off, S5-C guides on the raw
+        // demosaic luma. The sparse grid gate above stays tied to the luma
+        // branch's behaviour, so S5-C never changes which chain the image path
+        // runs.
+        val s5LActive = outNrStrength > 0f && outNrShader.isReady()
+        val s5CActive = outNrChromaStrength > 0f && s5cShader.isReady()
+        val s5Active = s5LActive || s5CActive
         val needSparseGrid = (dpEnabled || rawDenoiseActive || (synthetic && outDenoiseActive)) && dpcShader.isReady()
         val previewTransform = computePreviewTransform(effW, effH)
         val whiteRange = (effWhite - effBlackLevel).coerceAtLeast(1f)
@@ -1399,7 +1428,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         logGlError("after drawDemosaic", bayerRenderCount)
 
         var ispInputTex = demosaicFboTextureId
-        if (outDenoiseActive) {
+        if (s5Active) {
             // Defect mask for S5: only meaningful on the sparse-grid (DPC)
             // path.  S1 off or no grid chain (inline/S3-only/S5-only) leaves
             // flagAvailable=false, which keeps Stage 5 bit-identical to the
@@ -1427,16 +1456,30 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             // that reason alone. The flag plane below already worked this way.
             val sigmaForImagePath =
                 sigmaAvailable && (sparseGridRendered || measurementActive)
-            ispInputTex = runStage5(
-                demosaicFboWidth, demosaicFboHeight, demosaicFboTextureId,
-                if (sigmaForImagePath) sigmaTexId else 0,
-                whiteRange, gridW, gridH,
-                useIsoSigma = !sigmaForImagePath,
-                isoModelA = isoModelA, isoModelB = isoModelB,
-                flagTex = if (previewFlagAvailable) dpcFlagTexId else 0,
-                flagAvailable = previewFlagAvailable
-            )
-            logGlError("after stage5 outDenoise", bayerRenderCount)
+            var s5Tex = demosaicFboTextureId
+            if (s5LActive) {
+                s5Tex = runStage5(
+                    demosaicFboWidth, demosaicFboHeight, demosaicFboTextureId,
+                    if (sigmaForImagePath) sigmaTexId else 0,
+                    whiteRange, gridW, gridH,
+                    useIsoSigma = !sigmaForImagePath,
+                    isoModelA = isoModelA, isoModelB = isoModelB,
+                    flagTex = if (previewFlagAvailable) dpcFlagTexId else 0,
+                    flagAvailable = previewFlagAvailable
+                )
+                logGlError("after stage5 outDenoise", bayerRenderCount)
+            }
+            if (s5CActive) {
+                // Chroma source is the raw demosaic; the guide is whatever the
+                // luma branch produced (or the demosaic itself when S5-L is off).
+                // The EV fold lives inside runStage5C, shared with the capture path.
+                s5Tex = runStage5C(
+                    demosaicFboWidth, demosaicFboHeight, demosaicFboTextureId, s5Tex,
+                    whiteRange, isoModelA, isoModelB
+                )
+                logGlError("after stage5c chroma", bayerRenderCount)
+            }
+            ispInputTex = s5Tex
         }
 
         // Structure map runs on this frame's S5 output, so it has to come after
@@ -1601,7 +1644,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
      *  returned texture id feeds the ISP (nrShader/draw) instead of the raw
      *  demosaic output.  The S5 geometry lives in output-pixel space, so the
      *  capture path passes winScale = captureRes/previewRes > 1 to widen the
-     *  window centres + dense chroma-mean box to the same relative image
+     *  window centres to the same relative image
      *  footprint, and epsBoost to compensate for its missing boxAA low-pass
      *  (preview residual sigma_hat^2/32 vs 1:1 capture ~16x larger). */
     private fun runStage5(
@@ -1622,10 +1665,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // round 2's beta-composed input (mix(outNr1, input, beta)) through the final
         // u_strength blend - that would not be bit-equal to the input.
         if (s <= 0f) return inputTex
-        // Decoupled luma/chroma response.  eps is fixed at design maximum;
-        // the slider controls a linear blend toward the filtered result so
-        // strength 0..100 maps to 0%..100% denoise (0% = identity,
-        // 100% = full SWGF at epsY~1.4, epsC~64).
+        // Luma response.  eps is fixed at design maximum; the slider controls a
+        // linear blend toward the filtered result so strength 0..100 maps to
+        // 0%..100% denoise (0% = identity, 100% = full SWGF at epsY~1.4).
+        // Chroma is not filtered here - it is bit-exact passthrough in S5-L and
+        // is handled by the S5-C branch (S5CShaderProgram).
         val lumaEpsScale = S5_LUMA_EPS_SCALE
         val beta = 0.3f
         // Stage-4 sparse-demosaic residual variance (sigma_dm ~ 3~4 DN).
@@ -1666,7 +1710,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // is the square of the sigma multiplier.
         val iterations = 2
         // Round-2 epsilon multiplier = (kappa x 1.4)^2.  kappa is the round-1 sigma multiplier
-        // (lumaEpsScale/CHROMA_EPS_SCALE lower these into the epsilon base); the
+        // (lumaEpsScale lowers it into the epsilon base); the
         // "kappa x 1.4" sigma ratio therefore squares in epsilon (epsilon proportional to sigma_hat^2).
         val round2EpsMult = 1.96f
 
@@ -1690,7 +1734,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         outNrShader.drawMain(
             inputTex, inputTex, statsVTexId, sigmaTex,
             sigmaW, sigmaH, w.toFloat(), h.toFloat(),
-            beta, lumaEpsScale, CHROMA_EPS_SCALE, sigmaDm2,
+            beta, lumaEpsScale, sigmaDm2,
             inverseRange2, calibToResidualScale,
             useIsoSigma, s5IsoA, s5IsoB,
             winScale, epsBoost, strength = s,
@@ -1731,7 +1775,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         outNrShader.drawMain(
             outNr1TexId, inputTex, statsVTexId, sigmaTex,
             sigmaW, sigmaH, w.toFloat(), h.toFloat(),
-            beta, round2EpsMult * lumaEpsScale, round2EpsMult * CHROMA_EPS_SCALE, sigmaDm2,
+            beta, round2EpsMult * lumaEpsScale, sigmaDm2,
             inverseRange2, calibToResidualScale,
             useIsoSigma, s5IsoA, s5IsoB,
             winScale, epsBoost, strength = s,
@@ -1741,6 +1785,69 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         gpuTimers.end("S5.main2")
 
         return outNr2TexId
+    }
+
+    /** Stage 5-C - output-domain chroma over the demosaiced RGB, guided by the
+     *  S5-L luma output. Five passes: propagated per-channel sigma, the
+     *  horizontal leg of the separable box-mean support, the guided chroma
+     *  stage, the per-cell mottle plane, and the final chroma blend. Returns
+     *  the blended texture, or [guideTex] when the branch is inactive. Slider 0
+     *  is a bit-exact bypass. The window geometry (support radius, guide radius)
+     *  follows the Amendment-A1 resolution law, keyed on winScale = width / 640;
+     *  the mottle cell stays 8x8. */
+    private fun runStage5C(
+        w: Int, h: Int, chromaTex: Int, guideTex: Int,
+        whiteRange: Float, isoModelA: Float, isoModelB: Float
+    ): Int {
+        if (!s5cShader.isReady()) return guideTex
+        val s = outNrChromaStrength.coerceIn(0f, 1f)
+        if (s <= 0f) return guideTex
+        // No EV-gain fold here: the certified S5-C chain (pysim.s5c) consumes
+        // the measured per-channel sigma directly, unlike the S5-L branch whose
+        // runStage5 folds the +EV picture gain into its ISO model. Keeping the
+        // fold out of S5-C is what makes preview and capture agree.
+        // Amendment-A1 window geometry: winScale = width / 640 is the S5-L
+        // radius-law idiom. The support radius r = round(4/1.5 * winScale) and
+        // the guide radius round(2/1.5 * winScale) give the certified 9x9/5x5
+        // at the 960 preview origin and 35x35/19x19 at a 4096-wide 1:1 capture.
+        val winScale = w / 640f
+        val rSupport = maxOf(1, (4.0 / 1.5 * winScale + 0.5).toInt()).toFloat()
+        val rGuide = maxOf(1, (2.0 / 1.5 * winScale + 0.5).toInt()).toFloat()
+        ensureS5CBuffers(w, h)
+        val inverseRange2 = 1f / (whiteRange * whiteRange)
+
+        gpuTimers.begin("S5C.sigma")
+        bindTarget(s5cSigmaFboId, w, h)
+        s5cShader.drawSigma(chromaTex, w.toFloat(), h.toFloat(), isoModelA, isoModelB, inverseRange2)
+        gpuTimers.end("S5C.sigma")
+
+        // The horizontal leg is scratch: it lands in the blend texture, which
+        // nothing else touches until the final blend pass overwrites it, so the
+        // separable mean needs no extra full-resolution buffer.
+        gpuTimers.begin("S5C.hbox")
+        bindTarget(s5cBlendFboId, w, h)
+        s5cShader.drawHBox(chromaTex, rSupport)
+        gpuTimers.end("S5C.hbox")
+
+        gpuTimers.begin("S5C.main")
+        bindTarget(s5cStage1FboId, w, h)
+        s5cShader.drawStage1(
+            chromaTex, guideTex, s5cSigmaTexId, s5cBlendTexId, s,
+            S5C_S, S5C_S_W, S5C_G_C, S5C_G_LUM, S5C_RETAIN, 0f, 0f, rSupport, rGuide
+        )
+        gpuTimers.end("S5C.main")
+
+        gpuTimers.begin("S5C.cell")
+        bindTarget(s5cCellFboId, s5cCellWidth, s5cCellHeight)
+        s5cShader.drawCell(s5cStage1TexId, s5cSigmaTexId, s, S5C_S_M, S5C_K_GRAD)
+        gpuTimers.end("S5C.cell")
+
+        gpuTimers.begin("S5C.blend")
+        bindTarget(s5cBlendFboId, w, h)
+        s5cShader.drawBlend(s5cStage1TexId, s5cCellTexId)
+        gpuTimers.end("S5C.blend")
+
+        return s5cBlendTexId
     }
 
     /**
@@ -2890,6 +2997,14 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         )
                         logGlError("raw after Stage-5 outDenoise", bayerRenderCount)
                     }
+                    if (outNrChromaStrength > 0f && s5cShader.isReady()) {
+                        captureIspInputTex = runStage5C(
+                            rawDemosaicFboWidth, rawDemosaicFboHeight, rawDemosaicFboTextureId,
+                            captureIspInputTex,
+                            captureWhiteRange, captureIsoModelA, captureIsoModelB
+                        )
+                        logGlError("raw after Stage-5C chroma", bayerRenderCount)
+                    }
 
                     GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, downscaleFboId)
                     GLES20.glViewport(0, 0, downscaleFboWidth, downscaleFboHeight)
@@ -3032,6 +3147,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         sigmaHatShader.destroy()
         rawDenoiseShader.destroy()
         outNrShader.destroy()
+        s5cShader.destroy()
     }
 
     fun initEgl() {
@@ -3147,6 +3263,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         sigmaHatShader.create()
         rawDenoiseShader.create()
         outNrShader.create()
+        s5cShader.create()
         // The two diagnostic programs are created up front so arming a switch
         // never pays a shader compile mid-frame; their draws are gated by the
         // switches themselves.
@@ -3186,6 +3303,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             "spatialNr" to spatialNrShader.budgetProgramId(),
             "dpc" to dpcShader.budgetProgramId(),
             "outNr" to outNrShader.budgetProgramId(),
+            "s5c" to s5cShader.budgetProgramId(),
             "sigmaHat" to sigmaHatShader.budgetProgramId(),
             "rawDenoise" to rawDenoiseShader.budgetProgramId(),
             "sigmaBucket" to sigmaBucketShader.budgetProgramId(),
@@ -3867,6 +3985,46 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         CrashLogger.log(TAG, "Stage-5 buffers: ${width}x${height} statsH=$statsHTexId statsV=$statsVTexId out1=$outNr1TexId out2=$outNr2TexId")
     }
 
+    private fun ensureS5CBuffers(width: Int, height: Int) {
+        if (s5cBufferWidth == width && s5cBufferHeight == height &&
+            s5cBlendFboId != 0
+        ) return
+        releaseS5CBuffers()
+        val cellW = (width + S5C_CELL - 1) / S5C_CELL
+        val cellH = (height + S5C_CELL - 1) / S5C_CELL
+        s5cBufferWidth = width
+        s5cBufferHeight = height
+        s5cCellWidth = cellW
+        s5cCellHeight = cellH
+
+        while (true) {
+            val (sg, sgf) = allocRgba32fFbo(width, height); s5cSigmaTexId = sg; s5cSigmaFboId = sgf
+            if (s5cSigmaFboId == 0) break
+            val (st, stf) = allocRgba32fFbo(width, height); s5cStage1TexId = st; s5cStage1FboId = stf
+            if (s5cStage1FboId == 0) break
+            val (ce, cef) = allocRgba32fFbo(cellW, cellH); s5cCellTexId = ce; s5cCellFboId = cef
+            if (s5cCellFboId == 0) break
+            val (bl, blf) = allocRgba32fFbo(width, height); s5cBlendTexId = bl; s5cBlendFboId = blf
+            break
+        }
+        CrashLogger.log(TAG, "Stage-5C buffers: ${width}x${height} (cells ${cellW}x$cellH) sigma=$s5cSigmaTexId stage1=$s5cStage1TexId cell=$s5cCellTexId blend=$s5cBlendTexId")
+    }
+
+    private fun releaseS5CBuffers() {
+        deleteFboTex(s5cSigmaFboId, s5cSigmaTexId)
+        deleteFboTex(s5cStage1FboId, s5cStage1TexId)
+        deleteFboTex(s5cCellFboId, s5cCellTexId)
+        deleteFboTex(s5cBlendFboId, s5cBlendTexId)
+        s5cSigmaFboId = 0; s5cSigmaTexId = 0
+        s5cStage1FboId = 0; s5cStage1TexId = 0
+        s5cCellFboId = 0; s5cCellTexId = 0
+        s5cBlendFboId = 0; s5cBlendTexId = 0
+        s5cBufferWidth = 0
+        s5cBufferHeight = 0
+        s5cCellWidth = 0
+        s5cCellHeight = 0
+    }
+
     private fun destroyEgl() {
         if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
             EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
@@ -3951,6 +4109,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             statsVFboId = 0; statsVTexId = 0
             outNr1FboId = 0; outNr1TexId = 0
             outNr2FboId = 0; outNr2TexId = 0
+            releaseS5CBuffers()
             releaseSigmaBucketBuffer()
             releaseStructureMapBuffer()
             sigmaBucketShader.destroy()
@@ -4024,6 +4183,23 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         private const val S5_LUMA_EPS_SCALE = 1.4f
         private const val S5_SIGMA_DM2 = 10f
         private const val S5_CALIB_TO_RESIDUAL_SCALE = 1f / 32f
+
+        // S5-C constants, the frozen T0 dose set from PHASE1_SPEC.md / pysim.
+        // The stage-1 weight falloff S_W sets the distance-to-weight roll-off,
+        // G_C is the guide-variance gain and G_LUM weights it, RETAIN shrinks
+        // the guide sigma used to weigh the guide coordinate, and the cell
+        // stage uses S_M for its own gain and K_GRAD for the gradient guard.
+        // All are folded into the single chroma slider as a linear strength.
+        private const val S5C_S = 0.5f
+        private const val S5C_S_W = 2.0f
+        private const val S5C_G_C = 1.5f
+        private const val S5C_G_LUM = 1.0f
+        private const val S5C_RETAIN = 0.28f
+        private const val S5C_S_M = 0.5f
+        private const val S5C_K_GRAD = 1.0f
+        // Mottle cell edge in output pixels. Frozen 8x8 at every resolution;
+        // cell scaling is a separate follow-up, not part of the A1 law.
+        private const val S5C_CELL = 8
 
         // Above this per-frame class churn the structure map is reporting its
         // own instability, which would show up as flicker in anything that
