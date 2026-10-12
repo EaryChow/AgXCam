@@ -1,5 +1,6 @@
 package com.agx.camera.color
 
+import com.agx.camera.camera.RawColorMath
 import org.junit.Assert.*
 import org.junit.Test
 import kotlin.math.abs
@@ -180,7 +181,12 @@ class WhiteBalanceMathTest {
         // both sit far outside the white region on both axes.
         assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.10, 0.02), 0f)
         assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.08, 0.02), 0f)
-        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.065, 0.02), 0f)
+        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.072, 0.02), 0f)
+        // The band's purpose: a near-white one step below CHROMA_FULL
+        // adapts essentially fully, a chromatic source one step
+        // above CHROMA_ZERO stays chromatic.
+        assertTrue(WhiteBalanceMath.limitedAdaptation(0.05, 0.02) >= 0.99f)
+        assertTrue(WhiteBalanceMath.limitedAdaptation(0.075, 0.02) <= 0.01f)
     }
 
     @Test
@@ -296,6 +302,49 @@ class WhiteBalanceMathTest {
     }
 
     @Test
+    fun neutralForSceneXy_roundtrip() {
+        // The cross-lens carry map: a chromaticity carried into a lens
+        // and measured back through that lens's own map must reproduce.
+        // Exercises RawColorMath.neutralForSceneXy directly - the same
+        // function RawColorProfile delegates to - including its guards.
+        val cm1 = ColorMatrix.Mat3(floatArrayOf(
+            0.8359375f, -0.171875f, -0.1328125f,
+            -0.46875f, 1.3984375f, 0.046875f,
+            -0.0859375f, 0.3359375f, 0.40625f
+        ))
+        val cm2 = ColorMatrix.Mat3(floatArrayOf(
+            1.28125f, -0.484375f, -0.2265625f,
+            -0.5859375f, 1.59375f, 0.140625f,
+            -0.046875f, 0.1796875f, 0.703125f
+        ))
+        val cal = ColorMatrix.diagonal(1.0234375f, 1f, 1.0078125f)
+        val fm = ColorMatrix.Mat3(floatArrayOf(
+            0.6328125f, 0.109375f, 0.21875f,
+            0.21875f, 0.7578125f, 0.0234375f,
+            -0.0390625f, -0.453125f, 1.3203125f
+        ))
+        val c2x = RawColorMath.cameraToXyzAtDaylight(
+            cm1, cm2, cal, cal, fm, fm, 6504f, 2856f
+        )!!
+        for ((x, y) in listOf(0.3127f to 0.3290f, 0.3451f to 0.3516f, 0.3808f to 0.4551f)) {
+            val n = RawColorMath.neutralForSceneXy(c2x, floatArrayOf(x, y))!!
+            val w = ColorMatrix.mulMatVec(c2x, n)
+            val s = w[0] + w[1] + w[2]
+            assertEquals("roundtrip x", x, w[0] / s, 1e-4f)
+            assertEquals("roundtrip y", y, w[1] / s, 1e-4f)
+        }
+        // guards: degenerate chromaticity and a singular map
+        assertNull(RawColorMath.neutralForSceneXy(c2x, floatArrayOf(0.3f, 0f)))
+        assertNull(RawColorMath.neutralForSceneXy(c2x, floatArrayOf(0.6f, 0.6f)))
+        assertNull(RawColorMath.neutralForSceneXy(c2x, floatArrayOf(Float.NaN, 0.3f)))
+        assertNull(
+            RawColorMath.neutralForSceneXy(
+                ColorMatrix.Mat3(FloatArray(9)), floatArrayOf(0.3f, 0.3f)
+            )
+        )
+    }
+
+    @Test
     fun limitedAdaptation_isLuminanceIndependent() {
         // No luminance argument exists: dim-room throttling read as
         // under-correction in practice.
@@ -306,13 +355,13 @@ class WhiteBalanceMathTest {
     fun limitedAdaptation_gateIsSeamless() {
         // Both factors are smoothsteps with flat ends, so approaching the
         // white region's boundary from either side eases to the same value.
-        val justInside = WhiteBalanceMath.limitedAdaptation(0.0649, 0.02)
-        assertTrue("just inside the chroma gate D $justInside", justInside in 0.000001f..0.05f)
-        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.065, 0.02), 0f)
+        val justInside = WhiteBalanceMath.limitedAdaptation(0.0519, 0.02)
+        assertTrue("just inside the chroma gate D $justInside", justInside in 0.95f..1f)
+        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.072, 0.02), 0f)
         // At full chroma the duv exemption is the only factor left, so its
         // edge is testable there.
         val justInsideDuv = WhiteBalanceMath.limitedAdaptation(0.07, 0.0119)
         assertTrue("just inside the duv gate D $justInsideDuv", justInsideDuv in 0.0001f..0.05f)
-        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.07, 0.012), 0f)
+        assertEquals(0f, WhiteBalanceMath.limitedAdaptation(0.08, 0.012), 0f)
     }
 }

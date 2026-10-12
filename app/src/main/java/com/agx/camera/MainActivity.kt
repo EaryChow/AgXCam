@@ -106,6 +106,20 @@ class MainActivity : AppCompatActivity() {
     private var limitedTargetXy: FloatArray? = null
     private val limitedGateWindow = FloatArray(3) { 0f }
     private var limitedGateIndex = 0
+
+    // Cross-lens handoff: the hold exists only at lens switches. The
+    // outgoing session's illuminant is captured in the lens-
+    // independent space and seeded into the incoming lens's
+    // estimator, so zooming cannot jump the white balance; after
+    // the seed the estimator free-runs under its own temporal
+    // smoothing, and a single lens walking across scenes is the
+    // estimator's job alone. There is deliberately no temporal
+    // pinning on one lens.
+    @Volatile private var lastSceneXy: FloatArray? = null
+    @Volatile private var pendingHandoffNeutral: FloatArray? = null
+    @Volatile private var pendingHandoffXy: FloatArray? = null
+    @Volatile private var estimatorStepsThisSession = 0
+
     @Volatile
     private var aeConvergedOnce = false
     private var photoOutput = PhotoOutputSettings()
@@ -3161,6 +3175,11 @@ class MainActivity : AppCompatActivity() {
             // is trusted yet, and stale smoothing state must not cross lenses.
             awbSmoother.reset()
             aeConvergedOnce = false
+            // Cross-lens handoff: the outgoing session's illuminant,
+            // captured lens-independently on every estimator step, is
+            // converted into THIS lens's neutral so the estimator
+            // starts from the same white balance the other lens saw -
+            // zooming cannot jump it. The estimator free-runs after.
             smoothedAdaptation = 1f
             limitedHasReference = false
             limitedTargetXy = null
@@ -3250,6 +3269,23 @@ class MainActivity : AppCompatActivity() {
                 mainHandler.post { updateLensShadingUI() }
             }
             initDaylightAnchorForLens(lens)
+            // The handoff must be converted AFTER the anchor is applied:
+            // neutralForSceneXy uses the corrected map, and converting
+            // earlier round-trips through a mismatched map - the green
+            // cast at every switch.
+            estimatorStepsThisSession = 0
+            if (currentWbMode == WhiteBalanceMode.AUTO) {
+                val prevXy = lastSceneXy
+                lastSceneXy = null
+                if (prevXy != null) {
+                    pendingHandoffXy = prevXy.copyOf()
+                    pendingHandoffNeutral = profile.neutralForSceneXy(prevXy)
+                }
+                // The handoff value drives the render from the very
+                // first frame - before the estimator's first step - so
+                // the as-shot neutral never shows mid-scene.
+                pendingHandoffNeutral?.let { estimatorNeutral = it }
+            }
             CrashLogger.log(
                 TAG, "applyRawMetadata: ${meta.sensorWidth}x${meta.sensorHeight} white=${meta.whiteLevel} " +
                     "blackAvg=${meta.blackLevelAverage} pattern=${meta.bayerPattern.label} " +
@@ -3279,6 +3315,10 @@ class MainActivity : AppCompatActivity() {
         previewRenderer.wbGainG = 1f
         previewRenderer.wbGainB = 1f
         awbSmoother.reset()
+        lastSceneXy = null
+        pendingHandoffNeutral = null
+        pendingHandoffXy = null
+        estimatorStepsThisSession = 0
         previewRenderer.wbPhaseGains = null
         estimatorReady = false
         previewRenderer.nativeLumaCoeffs = DEFAULT_LUMA_COEFFS.copyOf()
@@ -3361,6 +3401,7 @@ class MainActivity : AppCompatActivity() {
     // never enters the smoothing history and cannot drift.
     private val awbSmoother = AwbIlluminantSmoother()
 
+
     // Sticky: the estimator steps every 15th frame, so its gains have to outlive
     // the call that produced them. Cleared with the lens, and ignored whenever
     // the mode is not AUTO.
@@ -3379,6 +3420,9 @@ class MainActivity : AppCompatActivity() {
         dest.clear()
         return dest
     }
+
+    private fun handoffSampleSane(xy: FloatArray?): Boolean =
+        xy != null && WhiteBalanceMath.chromaFromD65(xy[0], xy[1]) <= 0.15f
 
     private fun estimateAutoWhiteBalance(buffer: java.nio.ByteBuffer, w: Int, h: Int) {
         // 16 cells is a 32-pixel step, matching the stride this walk used before
@@ -3415,6 +3459,9 @@ class MainActivity : AppCompatActivity() {
         // let a stale sensor response drift in on top of a scene that has
         // not changed. The dual-rate state machine (acquire, handover,
         // slow pole, fast re-acquire) lives in AwbIlluminantSmoother.
+        // Count successful estimates only: the step thresholds gate
+        // maturity, and a failed estimate must not age the session.
+        estimatorStepsThisSession++
         val now = SystemClock.elapsedRealtimeNanos()
         awbSmoother.step(estimate.illuminant, now)
         // Clamped as the product, through the estimator's own combine, so the array
@@ -3457,7 +3504,50 @@ class MainActivity : AppCompatActivity() {
         // The first trusted estimate is adopted exactly, like the illuminant
         // snap.
         if (awbSmoother.consumeSnapNeutral()) {
-            estimatorNeutral = floatArrayOf(1f / colorGains[0], 1f, 1f / colorGains[2])
+            // The snap adopts the first own measurement exactly - unless
+            // a settled handoff reference disagrees with it. A fresh
+            // lens's first measurement carries the young-session
+            // transient (it can cross the limited gate's chroma band,
+            // throttling adaptation into a visible cast that fades);
+            // a measurement that AGREES with the settled reference is
+            // trustworthy and wins. Otherwise keep the reference and
+            // let the EMA pull in the mature value.
+            val handoff = pendingHandoffNeutral
+            pendingHandoffNeutral = null
+            val ownNeutral = floatArrayOf(1f / colorGains[0], 1f, 1f / colorGains[2])
+            val ownXy = rawColorProfile?.sceneXyForNeutral(ownNeutral)
+            val handoffXy = handoff?.let { h ->
+                rawColorProfile?.sceneXyForNeutral(h)
+            }
+            val agrees = handoffSampleSane(ownXy) && handoffSampleSane(handoffXy) &&
+                kotlin.math.hypot(
+                    ownXy!![0] - handoffXy!![0], ownXy[1] - handoffXy[1]
+                ) <= 0.03f
+            estimatorNeutral = when {
+                handoff == null || agrees -> ownNeutral
+                else -> handoff
+            }
+            // Seed the smoother from the adopted neutral so the
+            // free-run eases from the handoff instead of re-acquiring.
+            val adopted = estimatorNeutral
+            val dl = estimate.daylight
+            if (adopted != null && dl != null) {
+                val redPhase = colorMap.indexOf(0)
+                val bluePhase = colorMap.indexOf(2)
+                // estimate.daylight is FOUR-PHASE (rawSensorFmt.kt:201):
+                // it must be indexed by the phase, not positionally,
+                // or every non-rggb pattern seeds the smoother with the
+                // wrong daylight element - the startup/switch blue cast
+                // that fades as the poles wash it out.
+                if (redPhase >= 0 && bluePhase >= 0 &&
+                    dl.size > redPhase && dl.size > bluePhase
+                ) {
+                    val seed = FloatArray(4) { 1f }
+                    seed[redPhase] = (1f / adopted[0]) / dl[redPhase]
+                    seed[bluePhase] = (1f / adopted[2]) / dl[bluePhase]
+                    awbSmoother.seed(seed)
+                }
+            }
         } else {
             val prevNeutral = estimatorNeutral ?: floatArrayOf(1f, 1f, 1f)
             estimatorNeutral = floatArrayOf(
@@ -3465,6 +3555,70 @@ class MainActivity : AppCompatActivity() {
                 1f,
                 prevNeutral[2] + ESTIMATOR_NEUTRAL_SMOOTHING * (1f / colorGains[2] - prevNeutral[2])
             )
+        }
+
+        // The raw per-step measurement, independent of the seeded
+        // neutral EMA: it is the incoming lens's own vote in the
+        // step-8 handoff comparison below, where the EMA is still
+        // carry-contaminated and cannot serve as the vote.
+        val rawPhaseGains = GreyWorldEstimate.combine(estimate.illuminant, estimate.daylight)
+        val rawColorGains = GreyWorldEstimate.colorGains(rawPhaseGains, colorMap)
+        val fastXy = rawColorProfile?.sceneXyForNeutral(
+            floatArrayOf(1f / rawColorGains[0], 1f, 1f / rawColorGains[2])
+        )
+        if (estimatorStepsThisSession >= 4) {
+            lastSceneXy = estimatorNeutral?.let { n ->
+                rawColorProfile?.sceneXyForNeutral(n)?.takeIf { xy ->
+                    // A covered lens reads garbage; never hand it off.
+                    WhiteBalanceMath.chromaFromD65(xy[0], xy[1]) <= 0.15
+                }
+            }
+        }
+
+        // Mature two-sample comparison: a few settled steps in, the
+        // incoming lens's measurement is trustworthy enough to vote
+        // against the outgoing lens's. The covered-lens rejection
+        // applies to both; the consensus eases in once (no pinning).
+        val handoffXy = pendingHandoffXy
+        // Step 8, not 4: young-session measurements read transiently
+        // low-y (seen on every switch direction) and the neutral is
+        // still carry-contaminated a step 4 - by step 8 the incoming
+        // measurement is pure and the transient has settled.
+        if (estimatorStepsThisSession == 8 && handoffXy != null) {
+            pendingHandoffXy = null
+            // The incoming vote must be the raw per-step measurement:
+            // the neutral EMA is seeded from the handoff and is still
+            // carry-contaminated here, so voting it would compare the
+            // reference against itself.
+            val incomingXy = fastXy
+            if (handoffSampleSane(handoffXy) && handoffSampleSane(incomingXy)) {
+                val delta = kotlin.math.hypot(
+                    incomingXy!![0] - handoffXy[0], incomingXy[1] - handoffXy[1]
+                )
+                val mid = floatArrayOf(
+                    (handoffXy[0] + incomingXy[0]) * 0.5f,
+                    (handoffXy[1] + incomingXy[1]) * 0.5f
+                )
+                val midNeutral = rawColorProfile?.neutralForSceneXy(mid)
+                if (midNeutral != null && estimatorNeutral != null) {
+                    estimatorNeutral = floatArrayOf(
+                        estimatorNeutral!![0] * 0.5f + midNeutral[0] * 0.5f,
+                        1f,
+                        estimatorNeutral!![2] * 0.5f + midNeutral[2] * 0.5f
+                    )
+                }
+                CrashLogger.log(
+                    TAG, "lensHandoff: outgoing=[" +
+                        handoffXy.joinToString { String.format("%.4f", it) } +
+                        "] incoming=[" +
+                        incomingXy.joinToString { String.format("%.4f", it) } +
+                        "] delta=$delta (eased to midpoint)"
+                )
+            } else {
+                CrashLogger.log(
+                    TAG, "lensHandoff: sample rejected at maturity, keeping own"
+                )
+            }
         }
 
         if (logNow) {
@@ -4321,23 +4475,20 @@ class MainActivity : AppCompatActivity() {
         return floatArrayOf(x, y)
     }
 
-    // Degree of adaptation for the limited auto white balance, low-passed so
-    // the correction eases in and out over about a second and a half instead
-    // of stepping with each estimator update.
-    private fun smoothedLimitedAdaptation(sceneXy: FloatArray, snap: Boolean = false): Float {
+    // Degree of adaptation for the limited auto white balance: the
+    // gate judges the lens's own measurement - the real light
+    // decides how much adaptation is allowed - and the assertion
+    // target follows the same chromaticity. Low-passed so the
+    // correction eases in and out instead of stepping.
+    private fun smoothedLimitedAdaptation(
+        sceneXy: FloatArray,
+        snap: Boolean = false
+    ): Float {
         limitedHasReference = true
         val nearest = WhiteBalanceMath.locusNearest(sceneXy[0], sceneXy[1])
             ?: floatArrayOf(1f, 6504f, ColorMatrix.D65_X, ColorMatrix.D65_Y)
         val distanceUv = nearest[0].toDouble()
-        val nearestCct = nearest[1].toDouble()
-        val locusXy = floatArrayOf(nearest[2], nearest[3])
         val chroma = WhiteBalanceMath.chromaFromD65(sceneXy[0], sceneXy[1])
-        // The gate is the maximum over the last few estimator steps: a
-        // single noisy step (clipped cells shifting the estimate) must
-        // not dip the adaptation, while a genuinely chromatic light sits
-        // outside the white region on every step and still gates within
-        // a step or two of arriving. Starting from zeros, the window can
-        // only hold a gate back, never pull it forward.
         val stepD = WhiteBalanceMath.limitedAdaptation(chroma, distanceUv)
         limitedGateWindow[limitedGateIndex] = stepD
         limitedGateIndex = (limitedGateIndex + 1) % limitedGateWindow.size
@@ -4347,6 +4498,8 @@ class MainActivity : AppCompatActivity() {
         // ADAPT_TARGET_K for warm scenes, gliding up the locus and easing
         // onto exact D65 near 6504 K, and keeping the estimate's perpen-
         // dicular offset so a near-white tint is corrected in full.
+        val nearestCct = nearest[1].toDouble()
+        val locusXy = floatArrayOf(nearest[2], nearest[3])
         val (tx, ty) = WhiteBalanceMath.limitedBlendTargetXy(sceneXy, locusXy, nearestCct)
         limitedTargetXy = floatArrayOf(tx, ty)
         smoothedAdaptation = if (snap) {
@@ -4424,6 +4577,13 @@ override fun onResume() {
         orientationListener.enable()
         thermalManager.reset()
         disconnectBanner.visibility = View.GONE
+        if (cameraReady) {
+            // Re-entering with the session alive: the scene may have
+            // changed while backgrounded, so the estimator earns trust
+            // again instead of trusting a stale reference.
+            aeConvergedOnce = false
+            CrashLogger.log(TAG, "onResume: session alive, re-gating estimator trust")
+        }
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED && !cameraReady && !openingCamera) {
             val lens = lensManager.activeLens ?: lensManager.selectPrimary()

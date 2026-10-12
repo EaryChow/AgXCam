@@ -43,6 +43,8 @@ class AwbIlluminantSmoother {
     private var snapNeutral = false
     private var snapAdaptation = false
     private var lastStepNanos = 0L
+    private var stepWasFast = false
+    private var settleSteps = 0
 
     fun reset() = synchronized(lock) {
         for (p in gains.indices) gains[p] = 1f
@@ -54,6 +56,8 @@ class AwbIlluminantSmoother {
         snapNeutral = false
         snapAdaptation = false
         lastStepNanos = 0L
+        settleSteps = 0
+        stepWasFast = false
     }
 
     /**
@@ -73,11 +77,20 @@ class AwbIlluminantSmoother {
 
         val previous = prev
         prev = raw.copyOf()
+        // Settle grace after a handoff seed: the early raw
+        // estimates of a fresh session carry a transient, and
+        // the fast pole would amplify it into a visible cast.
+        // Nothing is pinned - this is the slow pole only.
+        if (settleSteps > 0) {
+            settleSteps--
+            for (p in raw.indices) gains[p] += alphaSlow * (raw[p] - gains[p])
+            return@synchronized alphaSlow.also { stepWasFast = false }
+        }
         if (previous == null) {
             for (p in raw.indices) gains[p] = raw[p]
             snapNeutral = true
             snapAdaptation = true
-            return@synchronized 0f
+            return@synchronized 0f.also { stepWasFast = false }
         }
         var stable = true
         for (p in raw.indices) {
@@ -89,10 +102,10 @@ class AwbIlluminantSmoother {
                 acquiring = false
                 fastHoldSteps = 0
                 for (p in raw.indices) gains[p] = raw[p]
-                return@synchronized 0f
+                return@synchronized 0f.also { stepWasFast = false }
             }
             for (p in raw.indices) gains[p] += alphaFast * (raw[p] - gains[p])
-            return@synchronized alphaFast
+            return@synchronized alphaFast.also { stepWasFast = true }
         }
         var far = false
         for (p in raw.indices) {
@@ -107,20 +120,38 @@ class AwbIlluminantSmoother {
                 fastAcquire = false
                 fastHoldSteps = 0
                 for (p in raw.indices) gains[p] += alphaSlow * (raw[p] - gains[p])
-                return@synchronized alphaSlow
+                return@synchronized alphaSlow.also { stepWasFast = false }
             }
             for (p in raw.indices) gains[p] += alphaFast * (raw[p] - gains[p])
-            return@synchronized alphaFast
+            return@synchronized alphaFast.also { stepWasFast = true }
         }
         fastHoldSteps = if (far && stable) fastHoldSteps + 1 else 0
         if (fastHoldSteps >= FAST_HOLD_COUNT) {
             fastAcquire = true
             for (p in raw.indices) gains[p] += alphaFast * (raw[p] - gains[p])
-            return@synchronized alphaFast
+            return@synchronized alphaFast.also { stepWasFast = true }
         }
         for (p in raw.indices) gains[p] += alphaSlow * (raw[p] - gains[p])
-        return@synchronized alphaSlow
+        return@synchronized alphaSlow.also { stepWasFast = false }
     }
+
+    // Adopts a handoff illuminant (e.g. from another lens at a switch)
+    // as the settled state: the estimator starts where the outgoing
+    // lens left off, and temporal smoothing continues from there.
+    fun seed(gains4: FloatArray) = synchronized(lock) {
+        for (p in gains.indices) gains[p] = gains4.getOrElse(p) { 1f }
+        prev = gains.copyOf()
+        acquiring = false
+        fastAcquire = false
+        fastHoldSteps = 0
+        stableSteps = STABLE_HANDOVER
+        settleSteps = 6
+        lastStepNanos = 0L
+    }
+
+    /** True when the most recent [step] rode the fast re-acquire pole. */
+    val lastStepWasFast: Boolean
+        get() = synchronized(lock) { stepWasFast }
 
     /** One-shot flag: the last [step] adopted the first estimate exactly. */
     fun consumeSnapNeutral(): Boolean = synchronized(lock) {

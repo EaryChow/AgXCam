@@ -226,8 +226,12 @@ object WhiteBalanceMath {
 
     private const val DUV_FULL = 0.008
     private const val DUV_ZERO = 0.012
-    private const val CHROMA_FULL = 0.045
-    private const val CHROMA_ZERO = 0.065
+    // The band separates near-white light that human vision accepts
+    // given time (full adaptation below CHROMA_FULL) from chromatic
+    // sources just above it (none at CHROMA_ZERO). The two are
+    // close in chroma, so the band between them is deliberate.
+    private const val CHROMA_FULL = 0.052
+    private const val CHROMA_ZERO = 0.072
     const val ADAPT_TARGET_K = 5000.0
 
     // Planck's law (2*h*c^2 factor dropped; only relative SPD matters):
