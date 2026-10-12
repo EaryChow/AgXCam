@@ -116,8 +116,10 @@ class MainActivity : AppCompatActivity() {
     // estimator's job alone. There is deliberately no temporal
     // pinning on one lens.
     @Volatile private var lastSceneXy: FloatArray? = null
+    @Volatile private var lastSceneXyAtMs: Long = 0L
     @Volatile private var pendingHandoffNeutral: FloatArray? = null
     @Volatile private var pendingHandoffXy: FloatArray? = null
+    @Volatile private var pendingHandoffAtMs: Long = 0L
     @Volatile private var estimatorStepsThisSession = 0
 
     @Volatile
@@ -3277,14 +3279,16 @@ class MainActivity : AppCompatActivity() {
             if (currentWbMode == WhiteBalanceMode.AUTO) {
                 val prevXy = lastSceneXy
                 lastSceneXy = null
-                if (prevXy != null) {
+                val fresh = SystemClock.elapsedRealtime() - lastSceneXyAtMs < 10_000L
+                if (prevXy != null && fresh) {
                     pendingHandoffXy = prevXy.copyOf()
+                    pendingHandoffAtMs = lastSceneXyAtMs
                     pendingHandoffNeutral = profile.neutralForSceneXy(prevXy)
+                    // The handoff value drives the render from the very
+                    // first frame - before the estimator's first step -
+                    // so the as-shot neutral never shows mid-scene.
+                    pendingHandoffNeutral?.let { estimatorNeutral = it }
                 }
-                // The handoff value drives the render from the very
-                // first frame - before the estimator's first step - so
-                // the as-shot neutral never shows mid-scene.
-                pendingHandoffNeutral?.let { estimatorNeutral = it }
             }
             CrashLogger.log(
                 TAG, "applyRawMetadata: ${meta.sensorWidth}x${meta.sensorHeight} white=${meta.whiteLevel} " +
@@ -3316,8 +3320,10 @@ class MainActivity : AppCompatActivity() {
         previewRenderer.wbGainB = 1f
         awbSmoother.reset()
         lastSceneXy = null
+        lastSceneXyAtMs = 0L
         pendingHandoffNeutral = null
         pendingHandoffXy = null
+        pendingHandoffAtMs = 0L
         estimatorStepsThisSession = 0
         previewRenderer.wbPhaseGains = null
         estimatorReady = false
@@ -3512,8 +3518,13 @@ class MainActivity : AppCompatActivity() {
             // a measurement that AGREES with the settled reference is
             // trustworthy and wins. Otherwise keep the reference and
             // let the EMA pull in the mature value.
-            val handoff = pendingHandoffNeutral
+            // Age guard: a minutes-old reference (session restart after
+            // backgrounding) is a prior, not a measurement - the fresh
+            // estimate must win, so the handoff is dropped.
+            val handoffFresh = SystemClock.elapsedRealtime() - pendingHandoffAtMs < 10_000L
+            val handoff = pendingHandoffNeutral.takeIf { handoffFresh }
             pendingHandoffNeutral = null
+            pendingHandoffXy = if (handoffFresh) pendingHandoffXy else null
             val ownNeutral = floatArrayOf(1f / colorGains[0], 1f, 1f / colorGains[2])
             val ownXy = rawColorProfile?.sceneXyForNeutral(ownNeutral)
             val handoffXy = handoff?.let { h ->
@@ -3573,6 +3584,10 @@ class MainActivity : AppCompatActivity() {
                     WhiteBalanceMath.chromaFromD65(xy[0], xy[1]) <= 0.15
                 }
             }
+            // Freshness belongs to the measurement, not to when a later
+            // session copies it: applyRawMetadata re-runs on resume and
+            // would otherwise re-stamp a minutes-old value as new.
+            if (lastSceneXy != null) lastSceneXyAtMs = SystemClock.elapsedRealtime()
         }
 
         // Mature two-sample comparison: a few settled steps in, the
@@ -4577,6 +4592,12 @@ override fun onResume() {
         orientationListener.enable()
         thermalManager.reset()
         disconnectBanner.visibility = View.GONE
+        // Backgrounded time is unknowable: whatever the estimator last
+        // measured is a prior, not a reference, and must not seed the
+        // next session regardless of whether the session survived.
+        lastSceneXy = null
+        pendingHandoffXy = null
+        pendingHandoffNeutral = null
         if (cameraReady) {
             // Re-entering with the session alive: the scene may have
             // changed while backgrounded, so the estimator earns trust
