@@ -16,6 +16,7 @@ class CaptureSessionImmutabilityTest {
         sensorOrientation = 90,
         focalLengthMm = 6.7f,
         agxSceneLinearTo709 = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f),
+        agxRawSceneLinearTo709 = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f),
         agxInsetMat = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f),
         agxOutsetMat = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f),
         agxToRec2020 = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f),

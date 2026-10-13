@@ -437,14 +437,16 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private fun preMergeGains(colorMap: IntArray): FloatArray =
         GreyWorldEstimate.preMergeGains(wbPhaseGains, colorMap)
 
-    @Volatile var ccMatrix: FloatArray? = null
-    // Luminance (Y) coefficients of the camera-native RGB space; used by the
-    // demosaic shader's clipping-neutralization step. Defaults to the Rec.709
-    // Y row when no camera-native -> XYZ map is available.
-    @Volatile var nativeLumaCoeffs = floatArrayOf(0.2126f, 0.7152f, 0.0722f)
+    // Camera-native -> Bradford-adapted workspace map (WB + Bradford). Applied
+    // by the demosaic shader; S5 then runs on this adapted signal.
+    @Volatile var bradfordMat: FloatArray? = null
+    // Bradford-adapted (PCS) -> linear sRGB gamut map, applied at the AgX input
+    // on the raw/Bayer path only (nrShader). Kept separate from
+    // agxSceneLinearTo709: the camera-JPEG/YUV path shares that field and must
+    // stay identity, otherwise the gamut would be applied twice.
+    @Volatile var agxRawSceneLinearTo709: FloatArray? = null
     // S5 SWGF must score windows in the same luma space as yccOf
-    // (0.25*R + 0.5*G + 0.25*B); the Rec.709 row above is only for
-    // demosaic clipping-neutralization and would bias st.r vs yccIn.x.
+    // (0.25*R + 0.5*G + 0.25*B); a Rec.709 row would bias st.r vs yccIn.x.
     val S5_LUMA_WEIGHTS = floatArrayOf(0.25f, 0.5f, 0.25f)
     // Leading factor of the clipping-neutralization exponent (factor * 5).
     @Volatile var clipAttenFactor = 0.1f
@@ -871,6 +873,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val buffer: ByteBuffer, val rawW: Int, val rawH: Int, val stridePixels: Int,
         val targetW: Int, val targetH: Int,
         val agxSceneLinearTo709: FloatArray,
+        val agxRawSceneLinearTo709: FloatArray,
         val agxInsetMat: FloatArray,
         val agxOutsetMat: FloatArray,
         val agxToRec2020: FloatArray,
@@ -894,7 +897,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     ) {
         pendingRawCaptureFrame = RawCaptureFrame(
             buffer, rawW, rawH, stridePixels, targetW, targetH,
-            session.agxSceneLinearTo709, session.agxInsetMat, session.agxOutsetMat, session.agxToRec2020,
+            session.agxSceneLinearTo709, session.agxRawSceneLinearTo709, session.agxInsetMat, session.agxOutsetMat, session.agxToRec2020,
             session.agxWhiteLevel, session.agxBlackLevel,
             session.agxLogMin, session.agxLogMax,
             session.agxLogMidgray, session.agxDisplayMidgray,
@@ -1414,12 +1417,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             boxBlend = boxBlend,
             wbGains = floatArrayOf(wbGainR, wbGainG, wbGainB),
             wbGains4 = preMergeGains(effColorMap),
-            colorMat = ccMatrix,
+            bradfordMat = bradfordMat,
             denoisedTextureId = demosaicDenoisedId,
             denoiseActive = demosaicDenoisedId != 0,
             scaleFactor = previewZoomK,
-            lumaCoeffs = nativeLumaCoeffs,
-            clipAttenFactor = clipAttenFactor,
             dpStrength = if (demosaicDenoisedId != 0) 0f else s1,
             rawNrStrength = if (demosaicDenoisedId != 0) 0f else s3,
             isoModelA = isoModelA,
@@ -1472,7 +1473,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             if (s5CActive) {
                 // Chroma source is the raw demosaic; the guide is whatever the
                 // luma branch produced (or the demosaic itself when S5-L is off).
-                // The EV fold lives inside runStage5C, shared with the capture path.
+                // No EV fold here, shared with the capture path: S5-C deliberately
+                // carries none (its sigma is the measured per-channel estimate).
+                // The EV picture gain lives in the S5-L ISO model (runStage5) and,
+                // as a formed-picture gain, in the AgX pass.
                 s5Tex = runStage5C(
                     demosaicFboWidth, demosaicFboHeight, demosaicFboTextureId, s5Tex,
                     whiteRange, isoModelA, isoModelB
@@ -1544,7 +1548,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         nrShader.draw(
             ispInputTex,
             exposureEv,
-            agxSceneLinearTo709,
+            agxRawSceneLinearTo709 ?: agxSceneLinearTo709,
             agxInsetMat,
             agxOutsetMat,
             agxToRec2020,
@@ -1552,7 +1556,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             agxLogMin, agxLogMax,
             agxLogMidgray, agxDisplayMidgray,
             agxContrast, agxToe, agxShoulder,
-            agxVibrance
+            agxVibrance,
+            clipAttenFactor
         )
         logGlError("after nrShader.draw", bayerRenderCount)
 
@@ -1802,8 +1807,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         if (!s5cShader.isReady()) return guideTex
         val s = outNrChromaStrength.coerceIn(0f, 1f)
         if (s <= 0f) return guideTex
-        // No EV-gain fold here: the certified S5-C chain (pysim.s5c) consumes
-        // the measured per-channel sigma directly, unlike the S5-L branch whose
+        // No EV-gain fold here: the S5-C chain consumes the measured
+        // per-channel sigma directly, unlike the S5-L branch whose
         // runStage5 folds the +EV picture gain into its ISO model. Keeping the
         // fold out of S5-C is what makes preview and capture agree.
         // Amendment-A1 window geometry: winScale = width / 640 is the S5-L
@@ -2903,12 +2908,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         boxAA = captureBoxAA,
                         wbGains = floatArrayOf(wbGainR, wbGainG, wbGainB),
                         wbGains4 = preMergeGains(bayerColorMap),
-                        colorMat = ccMatrix,
+                        bradfordMat = bradfordMat,
                         denoisedTextureId = if (legacyRawDenoiseActive) captureDenoisedTexId else 0,
                         denoiseActive = legacyRawDenoiseActive,
                         scaleFactor = captureK,
-                        lumaCoeffs = nativeLumaCoeffs,
-                        clipAttenFactor = clipAttenFactor,
                         dpStrength = dpcStrength.coerceIn(0f, 1f),
                         rawNrStrength = rawNrStrength.coerceIn(0f, 1f),
                         isoModelA = captureIsoModelA,
@@ -3014,7 +3017,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     nrShader.draw(
                         captureIspInputTex,
                         exposureEv,
-                        rawCaptureReq.agxSceneLinearTo709,
+                        rawCaptureReq.agxRawSceneLinearTo709,
                         rawCaptureReq.agxInsetMat,
                         rawCaptureReq.agxOutsetMat,
                         rawCaptureReq.agxToRec2020,
@@ -3022,7 +3025,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         rawCaptureReq.agxLogMin, rawCaptureReq.agxLogMax,
                         rawCaptureReq.agxLogMidgray, rawCaptureReq.agxDisplayMidgray,
                         rawCaptureReq.agxContrast, rawCaptureReq.agxToe, rawCaptureReq.agxShoulder,
-                        rawCaptureReq.agxVibrance
+                        rawCaptureReq.agxVibrance,
+                        clipAttenFactor
                     )
                     logGlError("raw after nrShader.draw", bayerRenderCount)
 
@@ -4184,7 +4188,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         private const val S5_SIGMA_DM2 = 10f
         private const val S5_CALIB_TO_RESIDUAL_SCALE = 1f / 32f
 
-        // S5-C constants, the frozen T0 dose set from PHASE1_SPEC.md / pysim.
+        // S5-C constants, the frozen dose set.
         // The stage-1 weight falloff S_W sets the distance-to-weight roll-off,
         // G_C is the guide-variance gain and G_LUM weights it, RETAIN shrinks
         // the guide sigma used to weigh the guide coordinate, and the cell

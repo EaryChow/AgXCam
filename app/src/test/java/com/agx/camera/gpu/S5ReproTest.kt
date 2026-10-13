@@ -20,9 +20,12 @@ import org.junit.experimental.categories.Category
  *     (fabricated RGB - models a clipped specular with the WB/colour-matrix
  *     cast seeping into the surround).
  *  2. A full synthetic-Bayer chain: 192x160 RGGB sensor with the same warm
- *     near-clipped disc + cool surround, demosaiced exactly like the preview
+ *     near-clipped disc + cool surround, demosaiced as the PRE-MOVE FLOOR
  *     (boxAA, WB, clip-attenuation, identity colour matrix) at 960x720, then
- *     fed to S5.  This is the faithful reproduction the fix must prove on.
+ *     fed to S5.  This is the reproduction the fix was calibrated on; it is no
+ *     longer the deployed demosaic (WB -> Bradford -> capacity-normalize) but
+ *     is retained as the historical floor.  See S3PreviewGLReproTest for the
+ *     moved-order demosaic mirror.
  *
  * Parameters mirror PreviewRenderer.runStage5 at ISO 800, s5 slider at full
  * strength (lumaEpsScale=1.4, chromaEpsScale=64, epsilon fixed at design
@@ -399,9 +402,10 @@ class S5ReproTest {
 
     // ------------------------------------------------------------------
     // Faithful synthetic-Bayer chain: sensor -> demosaic -> S5.
-    // Mirrors the preview: sensor 192x160 RGGB, black 64, white 1023; demosaic
-    // boxAA=4, WB gains (1,1,1), identity colour matrix, clipAttenFactor=0.1,
-    // Rec.709 luma coeffs, output 960x720; S3/DPC same-colour NR s1=s3=0.3.
+    // Mirrors the pre-move floor: sensor 192x160 RGGB, black 64, white 1023;
+    // demosaic boxAA=4, WB gains (1,1,1), identity colour matrix,
+    // clipAttenFactor=0.1, Rec.709 luma coeffs, output 960x720; S3/DPC
+    // same-colour NR s1=s3=0.3.
     // ------------------------------------------------------------------
 
     private val SENSOR_W = 192
@@ -668,8 +672,15 @@ class S5ReproTest {
                 }
                 val inv = 1f / (n * n)
                 r *= inv; g *= inv; b *= inv
-                // WB gains (1,1,1) - identity for the synthetic path.
-                // Clipping neutralization (factor 0.1 -> pow(inverted, 0.5)).
+                // PRE-MOVE FLOOR (historical).  This is the demosaic as it was
+                // before the order move: WB gains (1,1,1), the in-demosaic
+                // clipping neutralization (factor 0.1 -> pow(inverted, 0.5)),
+                // then the identity colour matrix.  The deployed shader now does
+                // WB -> Bradford -> capacity-normalize and runs the [0,1,0]
+                // neutralization AFTER S5, so this no longer models it; it is
+                // retained because this repro's seams/fix calibration was
+                // derived on the pre-move S5 input.  For the moved-order mirror
+                // see S3PreviewGLReproTest.renderPreviewFull.
                 var nr = r / clipScalar
                 var ng = g / clipScalar
                 var nb = b / clipScalar
@@ -756,7 +767,7 @@ class S5ReproTest {
         sb.append(
             "=== synthetic bayer chain ===\n" +
                 "sensor 192x160 RGGB, warm near-clip disc r=24 @(96,80) + cool surround, sigma=3 DN\n" +
-                "demosaic: boxAA=4 (preview), WB=(1,1,1), CM=I, clipAtten=0.1, s1=s3=0.3, output 960x720\n"
+                "demosaic: boxAA=4 (preview, PRE-MOVE FLOOR), WB=(1,1,1), CM=I, clipAtten=0.1, s1=s3=0.3, output 960x720\n"
         )
         val before = dumpDeltaMap(rgb, runS5(rgb, stats, Mode.ARGMIN), "before = ARGMIN + winner-centre chroma", sb, cx, cy, cr, seamX0, seamX1, 64)
         val soft2 = dumpDeltaMap(rgb, runS5(rgb, stats, Mode.SOFT2), "soft2 (soft luma, winner-centre chroma)", sb, cx, cy, cr, seamX0, seamX1, 64)

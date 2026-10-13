@@ -643,7 +643,24 @@ object RawColorMath {
     data class NeutralTransform(
         val wbGains: FloatArray,
         val colorMatrix: Mat3,
-        val lumaCoeffs: FloatArray
+        val lumaCoeffs: FloatArray,
+        // Moved-order split of [colorMatrix] (camera-native -> linear sRGB,
+        // WB removed). The S5 working-domain chain is
+        //   WB gains -> Bradford -> S5 -> clipping neutralization -> gamut -> AgX,
+        // so a pipeline that parks S5 in the Bradford-adapted working domain
+        // applies [bradfordMatrix] (camera-native -> PCS-adapted) at the
+        // demosaic, runs S5 there, then applies [gamutMatrix] (PCS -> linear
+        // sRGB) at the AgX input. The split satisfies
+        //   gamutMatrix * bradfordMatrix == colorMatrix.
+        // [lumaCoeffsBradford] is a diagnostic for the split: the luma row of the
+        // adapted signal, satisfying
+        //   w @ lumaCoeffs == (w @ bradfordMatrix^T) @ lumaCoeffsBradford.
+        // The shipped clipping neutralization gates on the signal-consistent
+        // [0,1,0] row of the adapted signal, not on this row, so it is not
+        // consumed by the render; it is retained for the split-identity check.
+        val bradfordMatrix: Mat3,
+        val gamutMatrix: Mat3,
+        val lumaCoeffsBradford: FloatArray
     )
 
     fun neutralTransform(
@@ -672,14 +689,30 @@ object RawColorMath {
         // Undo those gains on the folded matrix column-wise so that
         // colorMatrix * diag(wbGains) == folded matrix.
         val gInv = ColorMatrix.diagonal(1f / wbGains[0], 1f, 1f / wbGains[2])
+        val lumaCoeffs = floatArrayOf(
+            core.cameraToXyz.m[3],
+            core.cameraToXyz.m[4],
+            core.cameraToXyz.m[5]
+        )
+        // Moved-order split: camera-native -> PCS-adapted (Bradford, WB removed)
+        // and PCS-adapted -> linear sRGB (gamut). gamutMatrix * bradfordMatrix
+        // reproduces the folded colorMatrix exactly; pcsToSrgb() is the same
+        // PCS -> sRGB map neutralCore folds in, so the identity is exact.
+        val bradfordMatrix = ColorMatrix.multiply(core.cameraToXyz, gInv)
+        val gamutMatrix = pcsToSrgb()
+        // Solved so w @ lumaCoeffs == (w @ bradfordMatrix^T) @ lumaCoeffsBradford:
+        // bradfordMatrix^T @ lumaCoeffsBradford == lumaCoeffs.
+        val lumaCoeffsBradford = ColorMatrix.mulMatVec(
+            ColorMatrix.inverse(ColorMatrix.transpose(bradfordMatrix)),
+            lumaCoeffs
+        )
         return NeutralTransform(
             wbGains,
             ColorMatrix.multiply(core.colorMatrix, gInv),
-            floatArrayOf(
-                core.cameraToXyz.m[3],
-                core.cameraToXyz.m[4],
-                core.cameraToXyz.m[5]
-            )
+            lumaCoeffs,
+            bradfordMatrix,
+            gamutMatrix,
+            lumaCoeffsBradford
         )
     }
 

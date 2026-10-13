@@ -72,14 +72,12 @@ class BayerShaderProgram {
     private var dUBoxBlendLoc = 0
     private var dUWbGainsLoc = 0
     private var dUWbGains4Loc = 0
-    private var dUColorMatLoc = 0
+    private var dUBradfordMatLoc = 0
     private var dUWhiteLevelLoc = 0
     private var dUBlackLevelLoc = 0
     private var dUDenoisedTexLoc = 0
     private var dUDenoiseActiveLoc = 0
     private var dUScaleFactorLoc = 0
-    private var dULumaCoeffsLoc = 0
-    private var dUClipAttenLoc = 0
     private var dUDpStrengthLoc = 0
     private var dURawNrStrengthLoc = 0
     private var dUIsoModelALoc = 0
@@ -185,14 +183,12 @@ class BayerShaderProgram {
         dUBoxBlendLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_box_blend")
         dUWbGainsLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_wb_gains")
         dUWbGains4Loc = GLES20.glGetUniformLocation(demosaicProgramId, "u_wb_gains4")
-        dUColorMatLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_color_mat")
+        dUBradfordMatLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_bradford_mat")
         dUWhiteLevelLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_white_level")
         dUBlackLevelLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_black_level")
         dUDenoisedTexLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_denoisedTex")
         dUDenoiseActiveLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_denoise_active")
         dUScaleFactorLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_scale_factor")
-        dULumaCoeffsLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_luma_coeffs")
-        dUClipAttenLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_clip_atten_factor")
         dUDpStrengthLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_dp_strength")
         dURawNrStrengthLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_raw_nr_strength")
         dUIsoModelALoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_iso_model_a")
@@ -401,12 +397,10 @@ class BayerShaderProgram {
         boxBlend: Float = 0f,
         wbGains: FloatArray = floatArrayOf(1f, 1f, 1f),
         wbGains4: FloatArray = floatArrayOf(1f, 1f, 1f, 1f),
-        colorMat: FloatArray? = null,
+        bradfordMat: FloatArray? = null,
         denoisedTextureId: Int = 0,
         denoiseActive: Boolean = false,
         scaleFactor: Float = 1f,
-        lumaCoeffs: FloatArray = DEFAULT_LUMA_COEFFS,
-        clipAttenFactor: Float = CLIP_ATTEN_DEFAULT,
         dpStrength: Float = 0f,
         rawNrStrength: Float = 0f,
         isoModelA: Float = 0f,
@@ -458,24 +452,9 @@ class BayerShaderProgram {
         GLES20.glUniform3f(dUWbGainsLoc, wbGains[0], wbGains[1], wbGains[2])
         GLES20.glUniform4f(dUWbGains4Loc,
             wbGains4[0], wbGains4[1], wbGains4[2], wbGains4[3])
-        GLES20.glUniformMatrix3fv(dUColorMatLoc, 1, true, colorMat ?: COLOR_IDENTITY_9, 0)
+        GLES20.glUniformMatrix3fv(dUBradfordMatLoc, 1, true, bradfordMat ?: COLOR_IDENTITY_9, 0)
         GLES20.glUniform1f(dUWhiteLevelLoc, whiteLevel)
         GLES20.glUniform1f(dUBlackLevelLoc, blackLevel)
-        // The neutralization judges how close the SENSOR signal is to the
-        // Bayer clip, but it reads the post-gain demosaic output, and the
-        // gain split differs between white balance modes (daylight-anchored
-        // vs estimate): the same raw pixel reads different luma under
-        // different modes and the attenuation lands differently, which
-        // reads as a cast difference in bright content. Dividing the
-        // coefficients by the gains restores the pre-gain (sensor) luma,
-        // so the neutralization is invariant to how the balance is split.
-        GLES20.glUniform3f(
-            dULumaCoeffsLoc,
-            lumaCoeffs[0] / wbGains[0].coerceAtLeast(1e-6f),
-            lumaCoeffs[1] / wbGains[1].coerceAtLeast(1e-6f),
-            lumaCoeffs[2] / wbGains[2].coerceAtLeast(1e-6f)
-        )
-        GLES20.glUniform1f(dUClipAttenLoc, clipAttenFactor)
         GLES20.glUniform1f(dUDpStrengthLoc, dpStrength)
         GLES20.glUniform1f(dURawNrStrengthLoc, rawNrStrength)
         GLES20.glUniform1f(dUIsoModelALoc, isoModelA)
@@ -610,13 +589,6 @@ class BayerShaderProgram {
             0f, 1f, 0f,
             0f, 0f, 1f
         )
-
-        // Rec.709 Y row of RGB->XYZ(D65); fallback when no camera-native ->
-        // XYZ map exists (YUV end of the app or unknown sensor).
-        private val DEFAULT_LUMA_COEFFS = floatArrayOf(0.2126f, 0.7152f, 0.0722f)
-
-        // Leading factor of the clip-neutralization exponent (u_clip_atten_factor * 5).
-        private const val CLIP_ATTEN_DEFAULT = 0.1f
 
         private val QUAD_COORDS = floatArrayOf(
             -1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f
@@ -855,9 +827,12 @@ uniform vec3 u_wb_gains;
 // merges sites. Red and blue stay at 1 here and are applied once, after the
 // merge, by u_wb_gains.
 uniform vec4 u_wb_gains4;
-uniform mat3 u_color_mat;
-uniform vec3 u_luma_coeffs;
-uniform float u_clip_atten_factor;
+// Moved-order floor: WB + Bradford adapt into the S5 working domain (the
+// Bradford-adapted camera-native "PCS" signal), capacity-normalized. The
+// clipping neutralization and the gamut (PCS -> linear sRGB) matrix are NOT
+// applied here - they run after S5 and at the AgX input respectively, so S5
+// works on the pure linear WB+Bradford signal.
+uniform mat3 u_bradford_mat;
 uniform float u_dp_strength;
 uniform float u_raw_nr_strength;
 uniform float u_iso_model_a;
@@ -1754,32 +1729,17 @@ void main() {
     lsSensorUV = clamp(lsSensorUV, vec2(0.0), u_sensorSize - vec2(1.0));
 
     vec3 linearRGB = demosaicBilinear(u_bayerTex, sensorUV, lsSensorUV);
-    linearRGB *= u_wb_gains;
 
-    // Clipping neutralization: the sensor clips in the Bayer domain, so after
-    // demosaic + white balance the clipped regions pick up a color cast
-    // (often magenta). Normalize to the sensor clipping value, collapse the
-    // chrominance toward an intensity-preserving neutral (the peak channel,
-    // max(r,g,b)) by an attenuation factor that fades in as the luminance
-    // approaches the clip, then undo the normalization. Peak-preserving
-    // keeps the clipped regions' intensity intact instead of dragging them to
-    // the luminance average (which reads as darker). The exponent's leading
-    // factor (u_clip_atten_factor) is a slider. At factor == 0 the step is
-    // skipped.
-    if (u_clip_atten_factor > 0.0) {
-        float clipScalar = max(u_white_level - u_black_level, 1.0);
-        vec3 norm = linearRGB / clipScalar;
-        norm = compensateNegatives(norm);
-        float luma = max(dot(u_luma_coeffs, norm), 0.0);
-        float peak = max(norm.r, max(norm.g, norm.b));
-        float inverted = max(1.0 - luma, 0.0);
-        float attenuation = pow(inverted, u_clip_atten_factor * 5.0);
-        linearRGB = (norm - vec3(peak)) * attenuation + vec3(peak);
-        linearRGB *= clipScalar;
-    }
-
-    linearRGB = u_color_mat * linearRGB;
-    linearRGB = linearRGB / max(u_white_level - u_black_level, 1.0);
+    // Moved-order Stage-4 floor: white balance, then the Bradford adapt into the
+    // S5 working domain, capacity-normalized (divide by the sensor range) with
+    // negative lobes compensated. The clipping neutralization and the gamut
+    // matrix are deliberately NOT applied here: S5 runs on this pure linear
+    // WB+Bradford signal (so its residual covariance stays the constant
+    // Bradford-adapted one), the neutralization runs on the S5 output, and the
+    // gamut (PCS -> linear sRGB) matrix is applied once at the AgX input.
+    vec3 wb = linearRGB * u_wb_gains;
+    vec3 adapted = u_bradford_mat * wb;
+    linearRGB = compensateNegatives(adapted / max(u_white_level - u_black_level, 1.0));
     fragColor = vec4(linearRGB, 1.0);
 
     // S5 defect mask (MRT location 1).  The uniform gate keeps the cost off

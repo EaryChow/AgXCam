@@ -8,10 +8,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
 
-// Ports of the validated scenarios in exp_awb_smoothing.py: the dual-rate
-// state machine must snap the first trusted estimate, hand over to the slow
-// pole only on a settled estimate, fast-acquire genuine changes in seconds,
-// and hold still under oscillation.
+// Scenarios for the dual-rate AWB state machine: it must snap the first
+// trusted estimate, hand over to the slow pole only on a settled estimate,
+// fast-acquire genuine changes in seconds, and hold still under oscillation.
 class AwbIlluminantSmootherTest {
 
     private val tung = floatArrayOf(0.85f, 1f, 1f, 1.10f)

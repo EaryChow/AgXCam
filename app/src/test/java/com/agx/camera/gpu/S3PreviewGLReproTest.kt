@@ -960,7 +960,11 @@ class S3PreviewGLReproTest {
         return t * t * (3f - 2f * t)
     }
 
-    /** compensateNegatives + luma-attenuation from the shader main(). */
+    /** Pre-move demosaic colour tail: compensateNegatives + the old
+     *  luma-attenuation clipping neutralization. Retained ONLY as the relative
+     *  S3/magenta behaviour harness for the tests that use renderPreview; the
+     *  deployed demosaic now runs WB + Bradford with no in-shader
+     *  neutralization (see renderPreviewFull). */
     private fun composeMain(rgb: FloatArray): FloatArray {
         var r = rgb[0] / CLIP_SCALAR
         var g = rgb[1] / CLIP_SCALAR
@@ -980,13 +984,15 @@ class S3PreviewGLReproTest {
         return floatArrayOf((r - peak) * atten + peak, (g - peak) * atten + peak, (b - peak) * atten + peak)
     }
 
-    /** FULL shader main() mirror: demosaic -> xWB -> clip-neutralization ->
-     *  xcolorMat -> /CLIP_SCALAR (the deployed DEMOSAIC_FRAGMENT_SHADER).
-     *  The neighbours here re-run the pack read exactly as demosaicAt does. */
+    /** FULL shader main() mirror: demosaic -> xWB -> xBradford -> /CLIP_SCALAR
+     *  (the deployed DEMOSAIC_FRAGMENT_SHADER: WB then the Bradford adapt into
+     *  the S5 working domain, capacity-normalized). The in-shader clipping
+     *  neutralization was removed when it moved to the S5 output, so none runs
+     *  here. The neighbours re-run the pack read exactly as demosaicAt does. */
     private fun renderPreviewFull(
         scene: ShortArray, pack: FloatArray, v: View, s1: Float, s3: Float,
         wbR: Float, wbB: Float,
-        colorMat: FloatArray? = null,
+        bradfordMat: FloatArray? = null,
         shiftX: Int = 0, shiftY: Int = 0,
         boxAA: Int = previewBoxAA(v, s1, s3),
         nrRadius: Int = previewNrRadius(boxAA),
@@ -1021,7 +1027,14 @@ class S3PreviewGLReproTest {
             var r = sum[0] * wbR
             var g = sum[1]
             var b = sum[2] * wbB
-            // clip-neutralization (u_clip_atten_factor -> exp 0.5, 709 luma)
+            // u_bradford_mat * wb (identity when null, e.g. no camera profile)
+            if (bradfordMat != null) {
+                val x = r; val y = g; val z = b
+                r = bradfordMat[0] * x + bradfordMat[1] * y + bradfordMat[2] * z
+                g = bradfordMat[3] * x + bradfordMat[4] * y + bradfordMat[5] * z
+                b = bradfordMat[6] * x + bradfordMat[7] * y + bradfordMat[8] * z
+            }
+            // /CLIP_SCALAR + compensateNegatives (no in-shader neutralization)
             var nr = r / CLIP_SCALAR
             var ng = g / CLIP_SCALAR
             var nb = b / CLIP_SCALAR
@@ -1034,21 +1047,7 @@ class S3PreviewGLReproTest {
                 ng = max((ng - minimum) * ratio, 0f)
                 nb = max((nb - minimum) * ratio, 0f)
             }
-            val luma = 0.2126f * nr + 0.7152f * ng + 0.0722f * nb
-            val atten = sqrt(max(1f - luma, 0f))
-            val peak = max(max(nr, ng), nb)
-            nr = (nr - peak) * atten + peak
-            ng = (ng - peak) * atten + peak
-            nb = (nb - peak) * atten + peak
-            r = nr * CLIP_SCALAR; g = ng * CLIP_SCALAR; b = nb * CLIP_SCALAR
-            // u_color_mat * (rgb / CLIP_SCALAR)
-            if (colorMat != null) {
-                var x = r / CLIP_SCALAR; var y = g / CLIP_SCALAR; var z = b / CLIP_SCALAR
-                r = (colorMat[0] * x + colorMat[1] * y + colorMat[2] * z) * CLIP_SCALAR
-                g = (colorMat[3] * x + colorMat[4] * y + colorMat[5] * z) * CLIP_SCALAR
-                b = (colorMat[6] * x + colorMat[7] * y + colorMat[8] * z) * CLIP_SCALAR
-            }
-            out[gy][gx * 3] = r; out[gy][gx * 3 + 1] = g; out[gy][gx * 3 + 2] = b
+            out[gy][gx * 3] = nr; out[gy][gx * 3 + 1] = ng; out[gy][gx * 3 + 2] = nb
         }
         return out
     }
@@ -1989,7 +1988,7 @@ class S3PreviewGLReproTest {
 
     // ------------------------------------------------------------------
     // Cross-phase boxedBlend drag with IMbalanced phase bases (real-sensor
-    // shape) + the full shader main() WB/colorMat chain.  The equal-base flat
+    // shape) + the full shader main() WB/Bradford chain.  The equal-base flat
     // scene above makes the drag a fixed point (iavg==center), which is why the
     // main suite can show magDN=0 while the device shows magenta: on a real
     // sensor R/G/B phase bases differ, the boxed mean's cross-phase iavg pulls

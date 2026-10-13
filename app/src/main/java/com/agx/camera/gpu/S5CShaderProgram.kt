@@ -277,19 +277,6 @@ float axisMinSig2(ivec2 base, int p) {
     return 2.1981 * 0.5 * m;
 }
 
-// Measured cross-correlation table index: piecewise-linear over the anchors
-// (0.05, 0.10, 0.20, 0.35, 0.50, 0.65) in the C-domain luma, clamped outside
-// the measured range. Mirrors numpy.interp in pysim.s5c.propagate_sigma.
-float rhoOf(float x, float v0, float v1, float v2, float v3, float v4, float v5) {
-    if (x <= 0.05) return v0;
-    if (x <= 0.10) return mix(v0, v1, (x - 0.05) / 0.05);
-    if (x <= 0.20) return mix(v1, v2, (x - 0.10) / 0.10);
-    if (x <= 0.35) return mix(v2, v3, (x - 0.20) / 0.15);
-    if (x <= 0.50) return mix(v3, v4, (x - 0.35) / 0.15);
-    if (x <= 0.65) return mix(v4, v5, (x - 0.50) / 0.15);
-    return v5;
-}
-
 void main() {
     ivec2 base = ivec2(gl_FragCoord.xy);
     vec4 center = texelFetch(u_inTex, base, 0);
@@ -307,14 +294,23 @@ void main() {
     float sigG2 = max(axisMinSig2(base, 1), floor2);
     float sigB2 = max(axisMinSig2(base, 2), floor2);
 
-    // Full T Sigma T^t propagation with the measured cross-correlation tables,
-    // exactly as pysim.s5c.propagate_sigma: the correlations are indexed on the
-    // raw (C-domain) luma of this pixel. sigma_Y^2 and sigma_C2^2 differ by the
-    // cross terms, and both consumers need the true propagated luma variance:
-    // the d^2 guide term (sigma_Y,retain) and the stage-2 guide guard.
-    float pRg = rhoOf(luma, -0.470, -0.430, -0.261,  0.044,  0.331,  0.494);
-    float pRb = rhoOf(luma, -0.003,  0.014,  0.087,  0.189,  0.378,  0.639);
-    float pGb = rhoOf(luma, -0.342, -0.352, -0.372, -0.284, -0.046,  0.339);
+    // Full T Sigma T^t propagation of the per-channel variances through the
+    // luma/chroma transform. The cross terms use the constants below: after the
+    // order move S5-C runs on the Bradford-adapted signal, so the S5-input
+    // residual cross-correlation is constant across signal level and WB state.
+    // The old luma-indexed linear-sRGB tables were a matrix-rotation artifact
+    // and no longer apply; these constants are the Bradford rotation of the
+    // per-phase covariance. sigma_Y^2 and sigma_C2^2 differ by the cross terms,
+    // and both consumers need the true propagated luma variance: the d^2 guide
+    // term (sigma_Y,retain) and the stage-2 guide guard. rho_RG +0.598,
+    // rho_RB +0.221, rho_GB -0.122 are the camera-native values rounded to
+    // 3 dp; the lowest-signal anchor (signal <= 0.05) reads +0.220 / -0.126 and
+    // is dropped because the difference is O(0.004) and only at the lowest
+    // signal levels. The [0,1,0] clip neutralization now runs after S5, so it
+    // no longer enters this propagation.
+    float pRg =  0.598;
+    float pRb =  0.221;
+    float pGb = -0.122;
     float sR = sqrt(max(sigR2, 0.0));
     float sG = sqrt(max(sigG2, 0.0));
     float sB = sqrt(max(sigB2, 0.0));
@@ -513,7 +509,7 @@ void main() {
 
     // The certified chain tiles only the floor(h/8) x floor(w/8) interior; the
     // right/bottom border keeps the stage-1 result. A partial cell has no full
-    // 8x8 sample set, so leave it alone (lambda 0) to match pysim.s5c.s5c_mottle.
+    // 8x8 sample set, so leave it alone (lambda 0).
     bool partial = (base.x + CELL > size.x) || (base.y + CELL > size.y);
 
     // Uniform-weight Weiszfeld over the cell's chroma samples.

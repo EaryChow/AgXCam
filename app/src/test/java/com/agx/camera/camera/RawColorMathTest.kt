@@ -396,6 +396,51 @@ class RawColorMathTest {
     }
 
     @Test
+    fun neutralTransform_bradfordGamutSplit_reproducesTheFoldedMatrix() {
+        // The moved order (WB -> Bradford -> S5 -> neutralization -> gamut -> AgX)
+        // parks S5 in the Bradford-adapted domain, so the camera-native -> linear
+        // sRGB matrix has to be handed out as two factors: the adapted-domain map
+        // (bradfordMatrix) applied at the demosaic and the PCS -> sRGB map
+        // (gamutMatrix) applied at the AgX input. The split must reconstruct the
+        // folded matrix exactly, or S5 would run in one domain while the render
+        // assumes another.
+        for ((cm1, cm2) in listOf(
+            chromaticMatrix1 to chromaticMatrix2,
+            chromaticMatrix1 to chromaticMatrix1,
+            ID to ID
+        )) {
+            for (fwd in listOf(null, ColorMatrix.diagonal(0.9505f, 1f, 1.0888f))) {
+                val t = RawColorMath.neutralTransform(
+                    cm1, cm2, ID, ID, fwd, fwd, T1, T2, matMulVec(cm1, d65Xyz())
+                ) ?: throw AssertionError("transform must exist")
+
+                val rebuilt = ColorMatrix.multiply(t.gamutMatrix, t.bradfordMatrix)
+                for (i in 0..8) {
+                    assertClose(
+                        "gamut*bradford[$i] == colorMatrix[$i]",
+                        t.colorMatrix.m[i], rebuilt.m[i], 1e-3f
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun neutralTransform_lumaCoeffsBradford_matchesTheWbDomainLuma() {
+        // Diagnostic split-identity check: a luma row carried into the adapted
+        // domain (w @ bradfordMatrix^T @ lumaCoeffsBradford) has to equal the
+        // WB-domain luma (w @ lumaCoeffs) for every camera-native w, i.e.
+        // bradfordMatrix^T @ lumaCoeffsBradford == lumaCoeffs. The shipped
+        // clipping neutralization gates on the signal-consistent [0,1,0] row
+        // instead, so lumaCoeffsBradford is not consumed by the render.
+        val t = daylightTransform() ?: throw AssertionError("must exist")
+        val back = matMulVec(ColorMatrix.transpose(t.bradfordMatrix), t.lumaCoeffsBradford)
+        for (i in 0..2) {
+            assertClose("bradford^T*lumaBradford[$i] == lumaCoeffs[$i]", t.lumaCoeffs[i], back[i], 1e-3f)
+        }
+    }
+
+    @Test
     fun daylightTransform_gainsAreTheD65Response() {
         // The anchor itself. The gains must be the reciprocal of what the sensor
         // answers for a D65 white, read straight off the two reference matrices

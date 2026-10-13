@@ -2918,24 +2918,25 @@ class MainActivity : AppCompatActivity() {
             }
 
             if (profileTransform != null) {
-                previewRenderer.ccMatrix = profileTransform.colorMatrix.m
-                previewRenderer.nativeLumaCoeffs = profileTransform.lumaCoeffs
+                previewRenderer.bradfordMat = profileTransform.bradfordMatrix.m
+                previewRenderer.agxRawSceneLinearTo709 = profileTransform.gamutMatrix.m
             } else if (ccMat != null) {
-                previewRenderer.ccMatrix = ccMat
-                previewRenderer.nativeLumaCoeffs = luminanceFromSrgbMatrix(ccMat)
+                // No split available: the demosaic gets an identity adapt (S5
+                // runs in raw WB-only camera-native space) and the whole
+                // native->sRGB matrix is applied at the AgX input instead.
+                previewRenderer.bradfordMat = null
+                previewRenderer.agxRawSceneLinearTo709 = ccMat
             } else {
-                previewRenderer.ccMatrix = null
-                previewRenderer.nativeLumaCoeffs = DEFAULT_LUMA_COEFFS.copyOf()
+                previewRenderer.bradfordMat = null
+                previewRenderer.agxRawSceneLinearTo709 = null
             }
 
             if (!estimatorOwnsGains) {
                 if (profileTransform != null) {
                     // Profile path: split into sensor-space white-balance gains
-                    // and the WB-removed native->sRGB matrix so the demosaic
-                    // shader can neutralize clipped regions between the two
-                    // stages. The matrix no longer folds in the WB, and its Y row
-                    // provides the camera-native luminance coefficients for the
-                    // neutralization.
+                    // and the WB-removed native->sRGB matrix. The matrix no longer
+                    // folds in the WB; the clipping neutralization runs on the S5
+                    // output (see NrShaderProgram), not in the demosaic.
                     previewRenderer.wbGainR = profileTransform.wbGains[0]
                     previewRenderer.wbGainG = profileTransform.wbGains[1]
                     previewRenderer.wbGainB = profileTransform.wbGains[2]
@@ -3205,22 +3206,23 @@ class MainActivity : AppCompatActivity() {
                 val tr = profile.neutralTransformForNeutral(meta.neutralColorPoint)
                 if (tr != null) {
                     // Split white balance (sensor-space gains) from the
-                    // WB-removed native->sRGB matrix; the demosaic shader
-                    // neutralizes clipped regions in between. The matrix
-                    // no longer folds in the WB.
-                    previewRenderer.ccMatrix = tr.colorMatrix.m
+                    // WB-removed native->sRGB matrix. The matrix no longer folds
+                    // in the WB; the clipping neutralization runs on the S5
+                    // output (see NrShaderProgram), not in the demosaic.
+                    previewRenderer.bradfordMat = tr.bradfordMatrix.m
+                    previewRenderer.agxRawSceneLinearTo709 = tr.gamutMatrix.m
                     previewRenderer.wbGainR = tr.wbGains[0]
                     previewRenderer.wbGainG = tr.wbGains[1]
                     previewRenderer.wbGainB = tr.wbGains[2]
-                    previewRenderer.nativeLumaCoeffs = tr.lumaCoeffs
                 } else {
                     // Degenerate neutral: fall back to gains-neutral and the
                     // plain matrix, keeping the pre-split behaviour.
                     previewRenderer.wbGainR = 1f
                     previewRenderer.wbGainG = 1f
                     previewRenderer.wbGainB = 1f
-                    previewRenderer.ccMatrix = profile.srgbMatrixForNeutral(meta.neutralColorPoint)?.m
-                    previewRenderer.nativeLumaCoeffs = DEFAULT_LUMA_COEFFS.copyOf()
+                    previewRenderer.bradfordMat = null
+                    previewRenderer.agxRawSceneLinearTo709 =
+                        profile.srgbMatrixForNeutral(meta.neutralColorPoint)?.m
                 }
             } else {
                 rawColorProfile = null
@@ -3228,8 +3230,8 @@ class MainActivity : AppCompatActivity() {
                 previewRenderer.wbGainR = sensorGains[0]
                 previewRenderer.wbGainG = sensorGains[1]
                 previewRenderer.wbGainB = sensorGains[2]
-                previewRenderer.ccMatrix = null
-                previewRenderer.nativeLumaCoeffs = DEFAULT_LUMA_COEFFS.copyOf()
+                previewRenderer.bradfordMat = null
+                previewRenderer.agxRawSceneLinearTo709 = null
             }
             wbEstimateFrame = 0
             // The green sites belong to this sensor, so the smoothed illuminant
@@ -3297,7 +3299,7 @@ class MainActivity : AppCompatActivity() {
                     (if (profile.available)
                         "illum=${profile.colorTemperature1.toInt()}K/${profile.colorTemperature2.toInt()}K fwd=${profile.hasForwardMatrix} " +
                             "neutral=[${meta.neutralColorPoint.joinToString { String.format("%.3f", it) }}] " +
-                            "mat=[${previewRenderer.ccMatrix?.joinToString { String.format("%.4f", it) } ?: "null"}]"
+                            "mat=[${previewRenderer.bradfordMat?.joinToString { String.format("%.4f", it) } ?: "null"}]"
                     else
                         "wbGains=[${String.format("%.2f", previewRenderer.wbGainR)}, " +
                             "${String.format("%.2f", previewRenderer.wbGainG)}, " +
@@ -3327,7 +3329,6 @@ class MainActivity : AppCompatActivity() {
         estimatorStepsThisSession = 0
         previewRenderer.wbPhaseGains = null
         estimatorReady = false
-        previewRenderer.nativeLumaCoeffs = DEFAULT_LUMA_COEFFS.copyOf()
         rawColorProfile = null
         rawDaylightGains = null
         rawNeutralSeed = floatArrayOf(1f, 1f, 1f)
@@ -3356,16 +3357,6 @@ class MainActivity : AppCompatActivity() {
         for (i in limitedGateWindow.indices) limitedGateWindow[i] = 0f
         limitedGateIndex = 0
         aeConvergedOnce = false
-    }
-
-    // Luminance (Y) coefficients of the camera-native RGB space, derived from a
-    // camera-native -> linear-sRGB matrix (the HAL COLOR_CORRECTION_TRANSFORM).
-    // The Y row of rgbToXYZ(REC709) * matrix maps the camera-space signal onto
-    // the D65 XYZ luminance axis used by the demosaic clipping neutralization.
-    private fun luminanceFromSrgbMatrix(mat: FloatArray?): FloatArray {
-        if (mat == null) return DEFAULT_LUMA_COEFFS.copyOf()
-        val camToXyz = ColorMatrix.multiply(ColorMatrix.rgbToXYZ(ColorMatrix.REC709), ColorMatrix.Mat3(mat))
-        return floatArrayOf(camToXyz.m[3], camToXyz.m[4], camToXyz.m[5])
     }
 
     private fun preparePreviewPipeline(previewSize: Size, targetAspect: Float) {
@@ -4016,7 +4007,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun logRenderDrift() {
-        val mat = previewRenderer.ccMatrix
+        val mat = previewRenderer.bradfordMat
         val tgt = limitedTargetXy
         val drift = moved(driftPrevWbR, previewRenderer.wbGainR) ||
             moved(driftPrevWbB, previewRenderer.wbGainB) ||
@@ -4992,6 +4983,8 @@ override fun onResume() {
             } ?: 4.0f,
             focalLength35mm = lensManager.activeLens?.let { Math.round(it.focalLength35mmEq) } ?: 0,
             agxSceneLinearTo709 = previewRenderer.agxSceneLinearTo709.copyOf(),
+            agxRawSceneLinearTo709 = previewRenderer.agxRawSceneLinearTo709?.copyOf()
+                ?: ColorMatrix.identity().m,
             agxInsetMat = previewRenderer.agxInsetMat.copyOf(),
             agxOutsetMat = previewRenderer.agxOutsetMat.copyOf(),
             agxToRec2020 = previewRenderer.agxToRec2020.copyOf(),
@@ -5276,6 +5269,7 @@ override fun onResume() {
         val focalLengthMm: Float,
         val focalLength35mm: Int,
         val agxSceneLinearTo709: FloatArray,
+        val agxRawSceneLinearTo709: FloatArray,
         val agxInsetMat: FloatArray,
         val agxOutsetMat: FloatArray,
         val agxToRec2020: FloatArray,
@@ -5752,9 +5746,6 @@ override fun onResume() {
         private const val TAG = "MainActivity"
         const val DEFAULT_WB_KELVIN = KelvinState.DEFAULT_KELVIN
         const val DEFAULT_WB_TINT = KelvinState.DEFAULT_TINT
-        // Rec.709 Y row of RGB->XYZ(D65); fallback camera-native luminance
-        // coefficients when no native->XYZ map is available.
-        private val DEFAULT_LUMA_COEFFS = floatArrayOf(0.2126f, 0.7152f, 0.0722f)
         private const val REQUEST_CAMERA = 100
         private const val FOCUS_ROLLER_MAX_INDEX = 100
         private const val PREF_PREVIEW_RES_CAP = "preview_res_cap"
