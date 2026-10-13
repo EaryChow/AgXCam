@@ -425,8 +425,7 @@ class MainActivity : AppCompatActivity() {
         enableEdgeToEdge()
         window.addFlags(
             android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
-            android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN or
-            android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+            android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN
         )
         window.decorView.systemUiVisibility = (
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
