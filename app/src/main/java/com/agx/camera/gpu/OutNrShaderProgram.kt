@@ -7,7 +7,7 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 /**
- * Stage 5-L - output-domain luma denoise: weighted YC1C2 + SWGF
+ * Stage 5-L - post-demosaic luma denoise: weighted YC1C2 + SWGF
  * self-guided filter (I=p, 8 side windows, min-variance window chosen) with a
  * Fast-GF style separable box-statistic prefilter. The pass runs twice with a
  * beta=0.3 noise return; round 2 raises the epsilon multiplier to 1.96 = (kappa x 1.4)^2 -

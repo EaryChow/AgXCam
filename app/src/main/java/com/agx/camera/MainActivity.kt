@@ -296,7 +296,7 @@ class MainActivity : AppCompatActivity() {
     private var lastAutoIso = 200
     private var lastAutoShutterNs = 33_333_333L
     // Multi-stage denoise strengths (0..1, 0 = bypass): S1 DPC, S3 RAW
-    // green-guided GF, S5 output-domain SWGF. Persisted in agxcam_settings.
+    // green-guided GF, S5 post-demosaic SWGF. Persisted in agxcam_settings.
     private var dpcStrength = 0f
     private var rawNrStrength = 0f
     private var outNrStrength = 0f

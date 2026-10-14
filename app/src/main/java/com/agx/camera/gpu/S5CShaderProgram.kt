@@ -7,14 +7,14 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 /**
- * Stage 5-C - output-domain chroma denoise, split from the luma branch.
+ * Stage 5-C - post-demosaic chroma denoise, split from the luma branch.
  *
  * S5-L (OutNrShaderProgram) filters luma and passes chroma through bit-exactly.
  * This program consumes that result: it reads the S5-L luma as its guide and
  * the demosaic RGB as its chroma source, then filters the two chroma
- * coordinates with a guided box-mean stage followed by a per-cell chroma
- * mottle stage. The luma coordinate is never written, so the two branches
- * cannot fight over it.
+ * coordinates with a guided soft-weight weighted-mean stage followed by a
+ * per-cell chroma mottle stage. The luma coordinate is never written, so the
+ * two branches cannot fight over it.
  *
  * Transform T (used throughout, and its own inverse):
  *   Y  = 0.25 R + 0.5 G + 0.25 B
@@ -27,14 +27,12 @@ import java.nio.FloatBuffer
  *            Stage-0 ISO model floor, then propagated FULLY (T Sigma T^t with
  *            the measured cross-correlation tables). Output
  *            (sigY2, sigC1_2, sigC2_2).
- *   hbox   : horizontal leg of the stage-1 estimate. Sums the chroma over the
- *            (2*r_support+1) row window at the law radius (edge-clamped); the
- *            main pass sums these partials vertically, so the box mean is
- *            separable.
- *   main   : the guided chroma stage. Averages the hbox partials vertically to
- *            the unweighted box mean over the (2*r_support+1)^2 support window,
- *            and pulls the pixel's chroma toward it by a guide variance D^2
- *            ratio. Output is the full RGB image rebuilt with the guide luma.
+ *   main   : the guided chroma stage. Soft-weight weighted mean over the dense
+ *            (2*r_support+1)^2 support window with a luma pre-cull (a tap whose
+ *            luma-only weight cannot reach the cull threshold skips the chroma
+ *            fetch and the chroma distance), then pulls the pixel's chroma
+ *            toward it by a guide variance D^2 ratio. Output is the full RGB
+ *            image rebuilt with the guide luma.
  *   cell   : one texel per 8x8 cell of the stage-1 image. Reports that cell's
  *            vector-median chroma and the mottle blend weight per chroma
  *            coordinate; a variance guard disables a cell that sits on a
@@ -43,14 +41,13 @@ import java.nio.FloatBuffer
  *            owning cell's median by the cell weights, and rebuilds RGB with
  *            the guide luma. Pixels outside the cell grid pass through.
  *
- * The host drives all five in order (PreviewRenderer.runStage5C); a strength of
+ * The host drives all four in order (PreviewRenderer.runStage5C); a strength of
  * 0 makes lambda zero at every stage, so the chain is a bit-exact identity and
  * the caller skips it entirely.
  */
 class S5CShaderProgram {
 
     private var sigmaProgramId = 0
-    private var hboxProgramId = 0
     private var mainProgramId = 0
     private var cellProgramId = 0
     private var blendProgramId = 0
@@ -69,11 +66,10 @@ class S5CShaderProgram {
 
     fun create() {
         sigmaProgramId = createProgram(VERTEX_SHADER, SIGMA_FRAGMENT)
-        hboxProgramId = createProgram(VERTEX_SHADER, HBOX_FRAGMENT)
         mainProgramId = createProgram(VERTEX_SHADER, MAIN_FRAGMENT)
         cellProgramId = createProgram(VERTEX_SHADER, CELL_FRAGMENT)
         blendProgramId = createProgram(VERTEX_SHADER, BLEND_FRAGMENT)
-        if (sigmaProgramId == 0 || hboxProgramId == 0 || mainProgramId == 0 ||
+        if (sigmaProgramId == 0 || mainProgramId == 0 ||
             cellProgramId == 0 || blendProgramId == 0
         ) {
             Log.e(TAG, "Failed to create Stage-5C chroma programs")
@@ -81,9 +77,9 @@ class S5CShaderProgram {
             return
         }
         ready = true
-        Log.d(TAG, "Stage-5C programs created: s=$sigmaProgramId h=$hboxProgramId m=$mainProgramId c=$cellProgramId b=$blendProgramId")
+        Log.d(TAG, "Stage-5C programs created: s=$sigmaProgramId m=$mainProgramId c=$cellProgramId b=$blendProgramId")
         com.agx.camera.CrashLogger.log(
-            TAG, "Program created: s5c=($sigmaProgramId,$hboxProgramId,$mainProgramId,$cellProgramId,$blendProgramId)"
+            TAG, "Program created: s5c=($sigmaProgramId,$mainProgramId,$cellProgramId,$blendProgramId)"
         )
     }
 
@@ -91,13 +87,11 @@ class S5CShaderProgram {
 
     fun destroy() {
         GLES20.glDeleteProgram(sigmaProgramId)
-        GLES20.glDeleteProgram(hboxProgramId)
         GLES20.glDeleteProgram(mainProgramId)
         GLES20.glDeleteProgram(cellProgramId)
         GLES20.glDeleteProgram(blendProgramId)
         ready = false
         sigmaProgramId = 0
-        hboxProgramId = 0
         mainProgramId = 0
         cellProgramId = 0
         blendProgramId = 0
@@ -154,28 +148,14 @@ class S5CShaderProgram {
     }
 
     /**
-     * Horizontal leg of the stage-1 estimate. Reads the demosaic RGB and writes
-     * the sum of its chroma over the (2*[rSupport]+1) row window, edge-clamped,
-     * into the red/green channels. The main pass averages these partials down
-     * the column to complete the separable box mean.
-     */
-    fun drawHBox(inTex: Int, rSupport: Float) {
-        if (hboxProgramId == 0) return
-        GLES20.glUseProgram(hboxProgramId)
-        setTex(hboxProgramId, "u_inTex", 0, inTex)
-        setF(hboxProgramId, "u_r_support", rSupport)
-        drawQuad(hboxProgramId)
-    }
-
-    /**
      * Stage-1 chroma filter. [guideTex] is the S5-L output (or the demosaic
      * input itself when S5-L is off); its luma is the guide and is what the
-     * rebuilt RGB carries. [hboxTex] is the horizontal box-sum leg. [rSupport]
-     * is the dense support-window radius and [rGuide] the dense guide-window
-     * radius, both from the Amendment-A1 window-geometry law.
+     * rebuilt RGB carries. [rSupport] is the dense support-window radius and
+     * [rGuide] the dense guide-window radius, both from the
+     * window-geometry resolution law.
      */
     fun drawStage1(
-        inTex: Int, guideTex: Int, sigmaTex: Int, hboxTex: Int, strength: Float,
+        inTex: Int, guideTex: Int, sigmaTex: Int, strength: Float,
         s: Float, sW: Float, gC: Float, gLum: Float, rRetain: Float, mCx: Float, mCy: Float,
         rSupport: Float, rGuide: Float
     ) {
@@ -184,7 +164,6 @@ class S5CShaderProgram {
         setTex(mainProgramId, "u_inTex", 0, inTex)
         setTex(mainProgramId, "u_guideTex", 1, guideTex)
         setTex(mainProgramId, "u_sigmaTex", 2, sigmaTex)
-        setTex(mainProgramId, "u_hboxTex", 3, hboxTex)
         setF(mainProgramId, "u_strength", strength)
         setF(mainProgramId, "u_s", s)
         setF(mainProgramId, "u_s_w", sW)
@@ -325,36 +304,6 @@ void main() {
 }
 """
 
-        // Horizontal leg of the separable stage-1 box mean: the row sum of the
-        // chroma at the law support radius, edge-clamped to match the reference
-        // edge-replicated padding.
-        private const val HBOX_FRAGMENT = """
-#version 300 es
-precision highp float;
-precision highp int;
-
-in vec2 v_texCoord;
-out vec4 outColor;
-
-uniform sampler2D u_inTex;
-uniform float u_r_support;
-
-vec2 chroma(vec3 rgb) { return vec2((rgb.b - rgb.r) * 0.25, (rgb.r - 2.0 * rgb.g + rgb.b) * 0.25); }
-
-void main() {
-    ivec2 base = ivec2(gl_FragCoord.xy);
-    int rs = max(1, int(u_r_support));
-    ivec2 maxT = textureSize(u_inTex, 0) - ivec2(1);
-
-    vec2 sumC = vec2(0.0);
-    for (int dx = -rs; dx <= rs; dx++) {
-        ivec2 t = clamp(base + ivec2(dx, 0), ivec2(0), maxT);
-        sumC += chroma(texelFetch(u_inTex, t, 0).rgb);
-    }
-    outColor = vec4(sumC, 0.0, 0.0);
-}
-"""
-
         private const val MAIN_FRAGMENT = """
 #version 300 es
 precision highp float;
@@ -366,7 +315,6 @@ out vec4 outColor;
 uniform sampler2D u_inTex;
 uniform sampler2D u_guideTex;
 uniform sampler2D u_sigmaTex;
-uniform sampler2D u_hboxTex;
 uniform float u_strength;
 uniform float u_s;
 uniform float u_s_w;
@@ -374,7 +322,7 @@ uniform float u_g_c;
 uniform float u_g_lum;
 uniform float u_r_retain;
 uniform vec2 u_m_c;
-// Window-geometry resolution law (spec amendment A1): the support is a dense
+// Window-geometry resolution law: the support is a dense
 // (2*r_support+1)^2 window and the D^2 guide a dense (2*r_guide+1)^2 window,
 // both keyed on winScale = width / 640 (the same idiom as the S5-L radius
 // law). The 9x9/5x5 origin (winScale 1.5) and the 35x35/19x19 1:1
@@ -401,39 +349,50 @@ void main() {
     float yhat = luma(texelFetch(u_guideTex, base, 0).rgb);
     vec2 cin = chroma(texelFetch(u_inTex, base, 0).rgb) - u_m_c;
 
-    // Stage-1 estimate (amendment A2): unweighted box mean over the dense
-    // (2*rs+1)^2 support window at the law radius. The hbox pass summed the rows;
-    // this pass sums those partials down the columns, so the whole estimate costs
-    // 2*(2*rs+1) taps with no iteration and no per-tap weight. The edge clamp in
-    // both legs reproduces the reference edge-replicated padding. No support
-    // floor: the mean is defined for every pixel.
-    vec2 sumC = vec2(0.0);
-    for (int dy = -rs; dy <= rs; dy++) {
-        ivec2 t = clamp(base + ivec2(0, dy), ivec2(0), maxT);
-        sumC += texelFetch(u_hboxTex, t, 0).rg;
-    }
-    float winN = float((2 * rs + 1) * (2 * rs + 1));
-    vec2 chat = sumC / winN - u_m_c;
-
-    // Guide variance D^2 over the dense (2*rg+1)^2 guide window, weighted by
-    // the same soft gate. At the origin (rg=2) this is the certified 5x5.
+    // Stage-1 estimate and guide variance accumulate in one sweep over the
+    // dense (2*rs+1)^2 support window: the (2*rg+1)^2 guide window sits inside
+    // it at every resolution (the guide radius law has half the support
+    // slope), so the guide reuses the same taps instead of a second pass. A
+    // tap whose luma-only weight cannot reach CULL_W carries a full weight
+    // below CULL_W (the chroma terms only ever shrink the weight); outside
+    // the guide window its chroma fetch is skipped entirely, inside the guide
+    // window the cull only skips the chat accumulation, because the guide
+    // weights are unculled. Chroma-disparate taps reach chat only through the
+    // soft weight, which is what kills the unweighted box mean's chroma halo;
+    // the support floor stays omitted because the weighted mean is defined at
+    // every pixel. The edge clamp reproduces the reference edge-replicated
+    // padding.
+    const float CULL_W = 0.05;
+    int rg = max(1, int(u_r_guide));
+    vec2 sumWc = vec2(0.0);
+    float sumW = 0.0;
     float acc = 0.0;
     float wsum = 0.0;
-    int rg = max(1, int(u_r_guide));
-    for (int dy = -rg; dy <= rg; dy++) {
-        for (int dx = -rg; dx <= rg; dx++) {
+    for (int dy = -rs; dy <= rs; dy++) {
+        for (int dx = -rs; dx <= rs; dx++) {
             ivec2 t = clamp(base + ivec2(dx, dy), ivec2(0), maxT);
             float yv = luma(texelFetch(u_guideTex, t, 0).rgb);
-            vec2 cv = chroma(texelFetch(u_inTex, t, 0).rgb) - u_m_c;
             float dyv = yv - yhat;
+            float lterm = dyv * dyv / sy2;
+            float wL = u_s_w / (lterm + u_s_w);
+            bool inGuide = abs(dy) <= rg && abs(dx) <= rg;
+            if (wL < CULL_W && !inGuide) continue;
+            vec2 cv = chroma(texelFetch(u_inTex, t, 0).rgb) - u_m_c;
             float dc1 = cv.x - cin.x;
             float dc2 = cv.y - cin.y;
-            float d2 = dyv * dyv / sy2 + dc1 * dc1 / sigC1_2 + dc2 * dc2 / sigC2_2;
+            float d2 = lterm + dc1 * dc1 / sigC1_2 + dc2 * dc2 / sigC2_2;
             float w = u_s_w / (d2 + u_s_w);
-            acc += w * dyv * dyv;
-            wsum += w;
+            if (wL >= CULL_W) {
+                sumWc += w * cv;
+                sumW += w;
+            }
+            if (inGuide) {
+                acc += w * dyv * dyv;
+                wsum += w;
+            }
         }
     }
+    vec2 chat = sumWc / max(sumW, 1.0e-12);
     float d2guide = acc / max(wsum, 1.0e-12);
 
     float g = u_s * u_g_c * u_strength * u_g_lum;

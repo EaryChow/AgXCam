@@ -140,7 +140,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     // written by the demosaic's MRT flag output.  Zero when DPC/S5 are off.
     private var captureFlagTexId = 0
 
-    // Stage 5 (output-domain SWGF) buffers: separable box-stats pair and two
+    // Stage 5 (post-demosaic SWGF) buffers: separable box-stats pair and two
     // iteration outputs. RGBA32F at the demosaic resolution.
     private var statsHFboId = 0
     private var statsHTexId = 0
@@ -153,7 +153,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var outNrBufferWidth = 0
     private var outNrBufferHeight = 0
 
-    // Stage 5-C (output-domain chroma) buffers: the propagated sigma texture,
+    // Stage 5-C (post-demosaic chroma) buffers: the propagated sigma texture,
     // the stage-1 chroma-filtered image, and the per-8x8-cell mottle plane.
     // RGBA32F at the demosaic resolution except the cell plane (ceil/8).
     private var s5cSigmaFboId = 0
@@ -214,7 +214,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         set(value) { /* no-op, computed from agxWhiteLevel */ }
     var bayerNrStrength = 0f
     // Stage sliders (independent, 0 = bypass): S1 DPC, S3 RAW green-guided
-    // GF, S5 output-domain SWGF.
+    // GF, S5 post-demosaic SWGF.
     @Volatile var dpcStrength = 0f
     @Volatile var rawNrStrength = 0f
     @Volatile var outNrStrength = 0f
@@ -1642,7 +1642,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         GLES20.glViewport(0, 0, width, height)
     }
 
-    /** Stage 5 - output-domain SWGF over the demosaiced RGB.
+    /** Stage 5 - post-demosaic SWGF over the demosaiced RGB.
      *  Two iterations with a beta=0.3 noise return and kappa x 1.4 on round 2. "kappa x 1.4"
      *  is the round-2 sigma multiplier; because epsilon proportional to sigma_hat^2 here, the round-2 epsilon
      *  multiplier is (kappa x 1.4)^2 = 1.96 (see the round-2 comment below). The
@@ -1792,14 +1792,13 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         return outNr2TexId
     }
 
-    /** Stage 5-C - output-domain chroma over the demosaiced RGB, guided by the
-     *  S5-L luma output. Five passes: propagated per-channel sigma, the
-     *  horizontal leg of the separable box-mean support, the guided chroma
-     *  stage, the per-cell mottle plane, and the final chroma blend. Returns
-     *  the blended texture, or [guideTex] when the branch is inactive. Slider 0
-     *  is a bit-exact bypass. The window geometry (support radius, guide radius)
-     *  follows the Amendment-A1 resolution law, keyed on winScale = width / 640;
-     *  the mottle cell stays 8x8. */
+    /** Stage 5-C - post-demosaic chroma over the demosaiced RGB, guided by the
+     *  S5-L luma output. Four passes: propagated per-channel sigma, the guided
+     *  chroma stage, the per-cell mottle plane, and the final chroma blend.
+     *  Returns the blended texture, or [guideTex] when the branch is inactive.
+     *  Slider 0 is a bit-exact bypass. The window geometry (support radius,
+     *  guide radius) follows the window-geometry resolution law, keyed on winScale
+     *  = width / 640; the mottle cell stays 8x8. */
     private fun runStage5C(
         w: Int, h: Int, chromaTex: Int, guideTex: Int,
         whiteRange: Float, isoModelA: Float, isoModelB: Float
@@ -1811,7 +1810,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // per-channel sigma directly, unlike the S5-L branch whose
         // runStage5 folds the +EV picture gain into its ISO model. Keeping the
         // fold out of S5-C is what makes preview and capture agree.
-        // Amendment-A1 window geometry: winScale = width / 640 is the S5-L
+        // Window-geometry law: winScale = width / 640 is the S5-L
         // radius-law idiom. The support radius r = round(4/1.5 * winScale) and
         // the guide radius round(2/1.5 * winScale) give the certified 9x9/5x5
         // at the 960 preview origin and 35x35/19x19 at a 4096-wide 1:1 capture.
@@ -1826,18 +1825,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         s5cShader.drawSigma(chromaTex, w.toFloat(), h.toFloat(), isoModelA, isoModelB, inverseRange2)
         gpuTimers.end("S5C.sigma")
 
-        // The horizontal leg is scratch: it lands in the blend texture, which
-        // nothing else touches until the final blend pass overwrites it, so the
-        // separable mean needs no extra full-resolution buffer.
-        gpuTimers.begin("S5C.hbox")
-        bindTarget(s5cBlendFboId, w, h)
-        s5cShader.drawHBox(chromaTex, rSupport)
-        gpuTimers.end("S5C.hbox")
-
         gpuTimers.begin("S5C.main")
         bindTarget(s5cStage1FboId, w, h)
         s5cShader.drawStage1(
-            chromaTex, guideTex, s5cSigmaTexId, s5cBlendTexId, s,
+            chromaTex, guideTex, s5cSigmaTexId, s,
             S5C_S, S5C_S_W, S5C_G_C, S5C_G_LUM, S5C_RETAIN, 0f, 0f, rSupport, rGuide
         )
         gpuTimers.end("S5C.main")
@@ -2927,7 +2918,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     }
                     logGlError("raw after drawDemosaic", bayerRenderCount)
 
-                    // Stage-5 output-domain SWGF at capture resolution, fed from
+                    // Stage-5 post-demosaic SWGF at capture resolution, fed from
                     // the ISO noise model (the S2 grid stays preview-only).
                     // The S5 windows live in output-pixel space, so at full-res
                     // capture (up to 3-4x the preview FBO) the fixed +-2 px geometry
