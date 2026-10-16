@@ -169,6 +169,26 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var s5cCellWidth = 0
     private var s5cCellHeight = 0
 
+    // Stage 5-W (octave-band chroma noise-floor) buffers: one full-res MRT
+    // level FBO (two RGBA16F attachments, two chroma coordinates each), the
+    // per-8x8-cell gain plane, and no output buffer of its own - the blend
+    // pass reuses the S5-C stage-1 target, which is dead after S5-C's blend
+    // pass and is rewritten by S5-C at the start of every frame.
+    private var s5wLevelFboId = 0
+    private var s5wLevel01TexId = 0
+    private var s5wLevel23TexId = 0
+    private var s5wGainFboId = 0
+    private var s5wGainTexId = 0
+    private var s5wBufferWidth = 0
+    private var s5wBufferHeight = 0
+    private var s5wCellWidth = 0
+    private var s5wCellHeight = 0
+    // Set when the buffer allocation failed at the recorded size: the stage
+    // then bypasses quietly instead of re-attempting the allocation (and
+    // re-logging) on every frame. Cleared on a size mismatch and by
+    // releaseS5WBuffers, so a resolution change or a fresh surface retries.
+    private var s5wAllocFailed = false
+
     // 1x1 RGBA32F zero texture bound to float samplers that have no real data
     // behind them (DPC avg/flag inputs while packing, sigma_hat fallback).
     private var fallbackFloatTexId = 0
@@ -184,6 +204,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private val rawDenoiseShader = RawDenoiseShaderProgram()
     private val outNrShader = OutNrShaderProgram()
     private val s5cShader = S5CShaderProgram()
+    private val s5wShader = S5WShaderProgram()
 
     /** Green focus-peak overlay on the final blit. Enabled while the MF roller is
      *  actively editable (focus panel open + manual focus). [focusPeakRadius] is the
@@ -1481,6 +1502,13 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     demosaicFboWidth, demosaicFboHeight, demosaicFboTextureId, s5Tex,
                     whiteRange, isoModelA, isoModelB
                 )
+                if (s5wShader.isReady()) {
+                    // S5-W is the noise-floor component of the S5-C chain: it
+                    // runs exactly when the chroma branch runs, at the S5-C
+                    // strength, and reads the sigma plane written above.
+                    s5Tex = runStage5W(s5Tex, demosaicFboWidth, demosaicFboHeight)
+                    logGlError("after stage5w floor", bayerRenderCount)
+                }
                 logGlError("after stage5c chroma", bayerRenderCount)
             }
             ispInputTex = s5Tex
@@ -1844,6 +1872,59 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         gpuTimers.end("S5C.blend")
 
         return s5cBlendTexId
+    }
+
+    /** Stage 5-W - the octave-band chroma noise-floor component of the S5-C
+     *  chain, run over the S5-C output. Three passes: the MRT level sweep
+     *  (one stride-2 sweep writing both level planes), the per-8x8-cell gain
+     *  plane, and the full-res band blend written into the S5-C stage-1
+     *  target, which is dead after S5-C's blend pass and rewritten by S5-C
+     *  at the start of every frame. There is no independent control: the
+     *  stage rides the S5-C strength and runs only when the chroma branch
+     *  runs (the caller nests it inside the S5-C branch in both chains).
+     *  Returns the blended texture, or [inputTex] when the stage is inactive
+     *  or its buffers failed to allocate. The radii follow the
+     *  window-geometry law keyed on winScale = width / 640: constant
+     *  output-pixel radii at winScale >= 1.5, scaling down below it; the
+     *  sweep samples every 2nd tap (radii in sampled units ceil(r/2)),
+     *  covering the same span at half tap density. Stills-oriented: a future
+     *  video path would need a cadence or downsampled variant. */
+    private fun runStage5W(inputTex: Int, w: Int, h: Int): Int {
+        if (!s5wShader.isReady()) return inputTex
+        val s = outNrChromaStrength.coerceIn(0f, 1f)
+        if (s <= 0f) return inputTex
+        // The stage's noise floor is the S5-C propagated sigma and its output
+        // reuses the S5-C stage-1 target; without either, the stage stays off.
+        if (s5cSigmaTexId == 0 || s5cStage1FboId == 0) return inputTex
+        val winScale = w / 640f
+        val sc = minOf(1f, winScale / 1.5f)
+        val r0 = maxOf(1, (S5W_BASE_RADII[0] * sc + 0.5f).toInt()).toFloat()
+        val r1 = maxOf(1, (S5W_BASE_RADII[1] * sc + 0.5f).toInt()).toFloat()
+        val r2 = maxOf(1, (S5W_BASE_RADII[2] * sc + 0.5f).toInt()).toFloat()
+        val r3 = maxOf(1, (S5W_BASE_RADII[3] * sc + 0.5f).toInt()).toFloat()
+        if (!ensureS5WBuffers(w, h)) return inputTex
+        // EV PP multiplies the linear scene by 2^EV after Stage 5, so the
+        // noise target this stage writes against must carry the squared gain
+        // to stay effective at high EV - the same fold, anchored at the +1.5
+        // EV default, that runStage5 applies to its ISO model.
+        val evGain2 = Math.pow(2.0, 2.0 * (exposureEv - 1.5)).toFloat().coerceIn(1f / 8f, 16f)
+
+        gpuTimers.begin("S5W.level")
+        bindTarget(s5wLevelFboId, w, h)
+        s5wShader.drawLevel(inputTex, s5cSigmaTexId, w.toFloat(), h.toFloat(), r0, r1, r2, r3)
+        gpuTimers.end("S5W.level")
+
+        gpuTimers.begin("S5W.gain")
+        bindTarget(s5wGainFboId, s5wCellWidth, s5wCellHeight)
+        s5wShader.drawGain(inputTex, s5wLevel01TexId, s5wLevel23TexId, s5cSigmaTexId, evGain2)
+        gpuTimers.end("S5W.gain")
+
+        gpuTimers.begin("S5W.blend")
+        bindTarget(s5cStage1FboId, w, h)
+        s5wShader.drawBlend(inputTex, s5wLevel01TexId, s5wLevel23TexId, s5wGainTexId, w.toFloat(), h.toFloat(), s)
+        gpuTimers.end("S5W.blend")
+
+        return s5cStage1TexId
     }
 
     /**
@@ -2935,10 +3016,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     // at a reduced target the demosaic boxAA is ON (boxAA=4) and the
                     // residual is preview-like, so 16 would over-soften the means
                     // and push the output onto the sparse windows (blocky patches).
-                    val previewS5W = demosaicFboWidth
+                    // Preview stage-5 width the capture window scale keys on.
+                    val previewStage5W = demosaicFboWidth
                     val capWinScale = maxOf(
                         1f,
-                        rawDemosaicFboWidth.toFloat() / maxOf(previewS5W, 1).toFloat()
+                        rawDemosaicFboWidth.toFloat() / maxOf(previewStage5W, 1).toFloat()
                     )
                     val capEpsBoost = if (captureBoxAA > 0) 1f else 16f
                     // Stage 2: sigma_hat re-estimation on the demosaiced still. Capture
@@ -2997,6 +3079,15 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                             captureIspInputTex,
                             captureWhiteRange, captureIsoModelA, captureIsoModelB
                         )
+                        if (s5wShader.isReady()) {
+                            // Same nesting as the preview chain: S5-W is the
+                            // S5-C chain's noise-floor component and reads the
+                            // sigma plane runStage5C wrote above.
+                            captureIspInputTex = runStage5W(
+                                captureIspInputTex, rawDemosaicFboWidth, rawDemosaicFboHeight
+                            )
+                            logGlError("raw after Stage-5W floor", bayerRenderCount)
+                        }
                         logGlError("raw after Stage-5C chroma", bayerRenderCount)
                     }
 
@@ -3143,6 +3234,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         rawDenoiseShader.destroy()
         outNrShader.destroy()
         s5cShader.destroy()
+        s5wShader.destroy()
     }
 
     fun initEgl() {
@@ -3259,6 +3351,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         rawDenoiseShader.create()
         outNrShader.create()
         s5cShader.create()
+        s5wShader.create()
         // The two diagnostic programs are created up front so arming a switch
         // never pays a shader compile mid-frame; their draws are gated by the
         // switches themselves.
@@ -3299,6 +3392,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             "dpc" to dpcShader.budgetProgramId(),
             "outNr" to outNrShader.budgetProgramId(),
             "s5c" to s5cShader.budgetProgramId(),
+            "s5w" to s5wShader.budgetProgramId(),
             "sigmaHat" to sigmaHatShader.budgetProgramId(),
             "rawDenoise" to rawDenoiseShader.budgetProgramId(),
             "sigmaBucket" to sigmaBucketShader.budgetProgramId(),
@@ -3742,6 +3836,53 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         return Pair(tex, fbo)
     }
 
+    // Builds the S5-W level target: one FBO with two same-format float
+    // attachments, both drawn (MRT). RGBA16F halves the full-res pair's
+    // footprint; when a 16F framebuffer is not renderable the pair is retried
+    // as RGBA32F, and when that is still incomplete everything is torn down
+    // and the caller bypasses the stage.
+    private fun allocS5WLevelFbo(width: Int, height: Int): Boolean {
+        for (half in booleanArrayOf(true, false)) {
+            val t1 = if (half) allocRgba16fTexture(width, height) else allocRgba32fTexture(width, height)
+            val t2 = if (half) allocRgba16fTexture(width, height) else allocRgba32fTexture(width, height)
+            if (t1 == 0 || t2 == 0) {
+                // Texture ids can fail independently of renderability, so
+                // tear down and let the loop try the 32F form rather than
+                // giving up on the pair.
+                if (t1 != 0) GLES20.glDeleteTextures(1, intArrayOf(t1), 0)
+                if (t2 != 0) GLES20.glDeleteTextures(1, intArrayOf(t2), 0)
+                continue
+            }
+            val fboBuf = IntArray(1)
+            GLES20.glGenFramebuffers(1, fboBuf, 0)
+            val fbo = fboBuf[0]
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo)
+            GLES20.glFramebufferTexture2D(
+                GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+                GLES20.GL_TEXTURE_2D, t1, 0
+            )
+            GLES20.glFramebufferTexture2D(
+                GLES20.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT1,
+                GLES20.GL_TEXTURE_2D, t2, 0
+            )
+            GLES30.glDrawBuffers(2, intArrayOf(GLES20.GL_COLOR_ATTACHMENT0, GLES30.GL_COLOR_ATTACHMENT1), 0)
+            val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
+            if (status == GLES20.GL_FRAMEBUFFER_COMPLETE) {
+                s5wLevelFboId = fbo
+                s5wLevel01TexId = t1
+                s5wLevel23TexId = t2
+                CrashLogger.log(TAG, "Stage-5W level FBO: ${width}x${height} half=$half fbo=$fbo")
+                return true
+            }
+            val msg = "Stage-5W level FBO incomplete: $status (half=$half)"
+            Log.e(TAG, msg)
+            CrashLogger.log(TAG, msg)
+            deleteFboTex(fbo, t1)
+            GLES20.glDeleteTextures(1, intArrayOf(t2), 0)
+        }
+        return false
+    }
+
     private fun deleteFboTex(fboId: Int, texId: Int) {
         if (fboId != 0) GLES20.glDeleteFramebuffers(1, intArrayOf(fboId), 0)
         if (texId != 0) GLES20.glDeleteTextures(1, intArrayOf(texId), 0)
@@ -4020,6 +4161,55 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         s5cCellHeight = 0
     }
 
+    private fun ensureS5WBuffers(width: Int, height: Int): Boolean {
+        if (s5wBufferWidth == width && s5wBufferHeight == height) {
+            if (s5wLevelFboId != 0 && s5wGainFboId != 0) return true
+            // Known-dead at this size: bypass quietly, no per-frame alloc churn.
+            if (s5wAllocFailed) return false
+        } else {
+            // New size: the cached failure no longer describes this resolution.
+            s5wAllocFailed = false
+        }
+        releaseS5WBuffers()
+        val cellW = (width + S5C_CELL - 1) / S5C_CELL
+        val cellH = (height + S5C_CELL - 1) / S5C_CELL
+        s5wBufferWidth = width
+        s5wBufferHeight = height
+        s5wCellWidth = cellW
+        s5wCellHeight = cellH
+
+        val levelOk = allocS5WLevelFbo(width, height)
+        val (g, gf) = allocRgba32fFbo(cellW, cellH)
+        s5wGainTexId = g; s5wGainFboId = gf
+        if (!levelOk || s5wGainFboId == 0) {
+            // No partial state: the stage bypasses rather than drawing into a
+            // missing target. The failure is cached against this size so the
+            // next frames skip straight to the bypass.
+            CrashLogger.log(TAG, "Stage-5W buffers unavailable at ${width}x${height}; stage bypassed")
+            logGlError("stage5w alloc", bayerRenderCount)
+            releaseS5WBuffers()
+            s5wAllocFailed = true
+            s5wBufferWidth = width
+            s5wBufferHeight = height
+            return false
+        }
+        CrashLogger.log(TAG, "Stage-5W buffers: ${width}x${height} (cells ${cellW}x$cellH) level01=$s5wLevel01TexId level23=$s5wLevel23TexId gain=$s5wGainTexId")
+        return true
+    }
+
+    private fun releaseS5WBuffers() {
+        deleteFboTex(s5wLevelFboId, s5wLevel01TexId)
+        if (s5wLevel23TexId != 0) GLES20.glDeleteTextures(1, intArrayOf(s5wLevel23TexId), 0)
+        deleteFboTex(s5wGainFboId, s5wGainTexId)
+        s5wLevelFboId = 0; s5wLevel01TexId = 0; s5wLevel23TexId = 0
+        s5wGainFboId = 0; s5wGainTexId = 0
+        s5wBufferWidth = 0
+        s5wBufferHeight = 0
+        s5wCellWidth = 0
+        s5wCellHeight = 0
+        s5wAllocFailed = false
+    }
+
     private fun destroyEgl() {
         if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
             EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
@@ -4105,6 +4295,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             outNr1FboId = 0; outNr1TexId = 0
             outNr2FboId = 0; outNr2TexId = 0
             releaseS5CBuffers()
+            releaseS5WBuffers()
             releaseSigmaBucketBuffer()
             releaseStructureMapBuffer()
             sigmaBucketShader.destroy()
@@ -4195,6 +4386,15 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // Mottle cell edge in output pixels. Frozen 8x8 at every resolution;
         // cell scaling is a separate follow-up, not part of the A1 law.
         private const val S5C_CELL = 8
+
+        // S5-W radii-law base radii, one per octave band: constant in output
+        // pixels once winScale >= 1.5 and scaled down below it (the winScale
+        // idiom runStage5C uses). The sweep samples every 2nd tap, so the
+        // shader converts them to ceil(r/2) sampled units; the band shape
+        // fractions, the chain total-gain and the gain law itself live in the
+        // S5-W GLSL, in the same class as the S5-C propagated
+        // cross-correlation constants.
+        private val S5W_BASE_RADII = intArrayOf(2, 4, 8, 16)
 
         // Above this per-frame class churn the structure map is reporting its
         // own instability, which would show up as flicker in anything that

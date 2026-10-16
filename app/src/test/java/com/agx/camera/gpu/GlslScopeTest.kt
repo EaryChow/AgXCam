@@ -228,7 +228,8 @@ class GlslScopeTest {
         // worth catching here where it costs seconds.
         val programs = listOf(
             "StructureMapShaderProgram" to listOf("VERTEX_SHADER", "FRAGMENT_SHADER"),
-            "OutNrShaderProgram" to listOf("VERTEX_SHADER", "MAIN_FRAGMENT")
+            "OutNrShaderProgram" to listOf("VERTEX_SHADER", "MAIN_FRAGMENT"),
+            "S5WShaderProgram" to listOf("VERTEX_SHADER", "LEVEL_FRAGMENT", "GAIN_FRAGMENT", "BLEND_FRAGMENT")
         )
         val failures = ArrayList<String>()
         for ((program, blocks) in programs) {

@@ -293,10 +293,11 @@ class ShaderBudget {
             "bayer", "demosaic", "nr", "spatialNr", "dpc", "outNr"
         )
 
-        /** The chroma branch added when S5 was split into independent luma and
-         *  chroma sliders. Counted in the resident-size list but not reported
-         *  as a Phase-1 addition. */
-        val SPLIT_PROGRAMS = listOf("s5c")
+        /** The chroma programs added on top of the S5 luma/chroma split: the
+         *  split-stage chroma filter and the octave-band noise-floor write
+         *  that reads its output. Counted in the resident-size list but not
+         *  reported as Phase-1 additions. */
+        val SPLIT_PROGRAMS = listOf("s5c", "s5w")
 
         private val ALL_PROGRAMS = BASELINE_PROGRAMS + PHASE1_PROGRAMS + SPLIT_PROGRAMS
 
