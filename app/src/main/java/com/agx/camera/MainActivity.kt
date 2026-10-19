@@ -94,6 +94,20 @@ class MainActivity : AppCompatActivity() {
     // render. Gains are sticky across estimator steps.
     private var lastEstimatorColorGains = floatArrayOf(1f, 1f, 1f)
     private var lastEstimatorPhaseGains: FloatArray? = null
+    // The DNG capture state, snapshotted per dispatch from the same values
+    // written to the renderer. DngPairWriter records these; when a pipeline
+    // change adds a new consumed quantity, extend the snapshots and the
+    // recipe so the next capture carries it.
+    @Volatile
+    private var lastDispatchSceneNeutral: FloatArray = floatArrayOf(1f, 1f, 1f)
+    // The sensor white the current render maps to display white: the full
+    // gains->Bradford->primaries chain inverted onto the sRGB white. Null when
+    // no primaries transform is active. The DNG writer prefers this over
+    // [lastDispatchSceneNeutral]: the scene estimate is the pre-adaptation
+    // light, while the render may deliberately keep part of the scene's
+    // color cast (limited-AWB adaptation gate).
+    @Volatile
+    private var lastDispatchFoldedWhite: FloatArray? = null
     // Sticky latch: the limited path has acquired its reference and
     // drives the render until the session resets. Gate distance ring
     // for the min-of-N outlier rejection.
@@ -180,6 +194,13 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var lastHalMapWidth = 0
     @Volatile private var lastHalMapHeight = 0
     private var lastEstimatorMap: LensShadingData? = null
+    // The strength-scaled shading map actually applied to the render (set in
+    // submitSampledMap). The DNG pair writer embeds this as a GainMap opcode
+    // so a standard decode de-vignettes the raw with the same correction
+    // the pipeline applied - the file's bayer is uncorrected, and without
+    // the map every reader sees the vignette the app removed.
+    @Volatile
+    private var lastAppliedShadingMap: LensShadingData? = null
     private var lensShadingUiFrameCount = 0
     // One-shot startup notice that live sampling exists: shown only once per
     // launch when no HAL map is available and no learned map exists yet, never
@@ -241,6 +262,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var thermalIndicator: TextView
     private lateinit var criticalThermalOverlay: TextView
     private lateinit var thermalProtectionSwitch: android.widget.Switch
+    private lateinit var saveDngSwitch: android.widget.Switch
     // Measurement switches. All default off; nothing here touches the pipeline
     // until it is explicitly armed, and the off state is bit-identical.
     @Volatile private var measurementEnabled = false
@@ -249,6 +271,7 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var lastThermalTempC = 0f
     @Volatile private var lastThermalState = ThermalManager.State.NORMAL
     @Volatile private var thermalProtectionEnabled = true
+    @Volatile private var saveDngWithCapture = false
     // True while the confirm-disable dialog is alive. During that window the
     // switch is owned by the dialog: extra taps are consumed (and the switch
     // restored to the still-applied state) instead of applying anything, so the
@@ -537,6 +560,7 @@ class MainActivity : AppCompatActivity() {
         thermalIndicator = findViewById(R.id.thermal_indicator)
         criticalThermalOverlay = findViewById(R.id.critical_thermal_overlay)
         thermalProtectionSwitch = findViewById(R.id.thermal_protection_switch)
+        saveDngSwitch = findViewById(R.id.save_dng_switch)
         criticalBlinkWarning = findViewById(R.id.critical_blink_warning)
         criticalBlinkController = CriticalBlinkController(mainHandler) { visible ->
             criticalBlinkWarning.visibility = if (visible) View.VISIBLE else View.GONE
@@ -596,6 +620,8 @@ class MainActivity : AppCompatActivity() {
         focusIndicatorTimeoutMs = previewResPrefs.getLong(PREF_FOCUS_TIMEOUT, 0L)
         maxPreviewDimensions = getMaxPreviewDimensions()
         thermalProtectionEnabled = previewResPrefs.getBoolean(PREF_THERMAL_PROTECTION_ENABLED, true)
+        saveDngWithCapture = previewResPrefs.getBoolean(PREF_SAVE_DNG, false)
+        CrashLogger.log(TAG, "saveDngWithCapture=$saveDngWithCapture")
         limitedAutoWb = previewResPrefs.getBoolean(PREF_LIMITED_WB, true)
         clipAttenFactor = previewResPrefs.getFloat(PREF_CLIP_ATTEN, 0.1f).coerceIn(0f, 1f)
         dpcStrength = previewResPrefs.getFloat(PREF_S1_DPC, 0f).coerceIn(0f, 1f)
@@ -737,6 +763,11 @@ class MainActivity : AppCompatActivity() {
             loadPreset(PresetManager.PRESET_DEFAULT)
         }
         thermalProtectionSwitch.isChecked = thermalProtectionEnabled
+        saveDngSwitch.isChecked = saveDngWithCapture
+        saveDngSwitch.setOnClickListener {
+            saveDngWithCapture = saveDngSwitch.isChecked
+            previewResPrefs.edit().putBoolean(PREF_SAVE_DNG, saveDngWithCapture).apply()
+        }
         // Cold start with protection already off and the battery already warm:
         // derive the tier + render the corner strip immediately instead of
         // waiting for the next temperature callback (which may be seconds away).
@@ -843,7 +874,7 @@ class MainActivity : AppCompatActivity() {
             val rawFrame = if (previewRenderer.useBayerPath) previewRenderer.pullBayerCopy() else null
             if (rawFrame != null) {
                 CrashLogger.log(TAG, "shutter: RAW snapshot ${rawFrame.width}x${rawFrame.height}")
-                processRawSnapshot(rawFrame, session, thumbnailLatch, thumbnailRef)
+                processRawSnapshot(rawFrame, session, thumbnailLatch, thumbnailRef, saveDngWithCapture)
                 mainHandler.post {
                     isCapturing = false
                     shutterController.onCaptureComplete()
@@ -855,8 +886,9 @@ class MainActivity : AppCompatActivity() {
                 }
             } else {
             camera2Manager.captureStill(
-                onCaptureAvailable = { image, result ->
-                    processCapture(image, result, session, thumbnailLatch, thumbnailRef)
+                wantDng = saveDngWithCapture,
+                onCaptureAvailable = { image, result, rawImage ->
+                    processCapture(image, result, rawImage, session, thumbnailLatch, thumbnailRef)
                     mainHandler.post {
                         isCapturing = false
                         shutterController.onCaptureComplete()
@@ -2822,6 +2854,9 @@ class MainActivity : AppCompatActivity() {
             } else {
                 rawNeutralSeed
             }
+            // Snapshot for the DNG pair writer: the white the render folded
+            // this frame, from whichever branch produced it (see the field).
+            lastDispatchSceneNeutral = floatArrayOf(neutral[0], neutral[1], neutral[2])
 
             // Every mode reduces to one scene chromaticity, and that number is the
             // only thing that differs between them: AUTO measures it, a preset reads
@@ -2918,7 +2953,7 @@ class MainActivity : AppCompatActivity() {
 
             if (profileTransform != null) {
                 previewRenderer.bradfordMat = profileTransform.bradfordMatrix.m
-                previewRenderer.agxRawSceneLinearTo709 = profileTransform.gamutMatrix.m
+                previewRenderer.agxRawSceneLinearTo709 = profileTransform.primariesMatrix.m
             } else if (ccMat != null) {
                 // No split available: the demosaic gets an identity adapt (S5
                 // runs in raw WB-only camera-native space) and the whole
@@ -2996,6 +3031,38 @@ class MainActivity : AppCompatActivity() {
                         (if (currentWbMode == WhiteBalanceMode.AUTO) " adapt=$adaptation" else "")
                 )
                 }
+            }
+            // Folded white for the DNG pair writer: the sensor response the
+            // current render maps to display white. It is the whole linear
+            // chain (wb gains -> Bradford adaptation -> primaries transform) inverted onto
+            // the sRGB white: diag(wbGains)^-1 * Bradford^-1 * primariesMatrix^-1 *
+            // (1,1,1), read back from the state just written so the snapshot
+            // describes this dispatch in every branch (profile, estimator,
+            // ccMat fallback). AsShotNeutral must claim THIS white, not the
+            // scene estimate: when the adaptation gate holds back (limited
+            // AWB on a warm light) the render deliberately keeps part of
+            // the scene warmth, and shipping the estimate over-whitens a
+            // standard decode (measured: decode WB err 0.22-0.28 vs the
+            // embedded thumbnail on the warm room scene).
+            lastDispatchFoldedWhite = run {
+                val g = floatArrayOf(
+                    previewRenderer.wbGainR,
+                    previewRenderer.wbGainG,
+                    previewRenderer.wbGainB
+                )
+                val to709 = previewRenderer.agxRawSceneLinearTo709
+                if (to709 != null && g.all { it.isFinite() && it > 0f }) {
+                    var w = ColorMatrix.mulMatVec(
+                        ColorMatrix.inverse(ColorMatrix.Mat3(to709.copyOf())),
+                        floatArrayOf(1f, 1f, 1f)
+                    )
+                    previewRenderer.bradfordMat?.let { b ->
+                        w = ColorMatrix.mulMatVec(
+                            ColorMatrix.inverse(ColorMatrix.Mat3(b.copyOf())), w
+                        )
+                    }
+                    floatArrayOf(w[0] / g[0], w[1] / g[1], w[2] / g[2])
+                } else null
             }
             // Flicker forensics: in a static scene the renderer's white
             // balance inputs must be identical frame to frame. Log any
@@ -3209,7 +3276,7 @@ class MainActivity : AppCompatActivity() {
                     // in the WB; the clipping neutralization runs on the S5
                     // output (see NrShaderProgram), not in the demosaic.
                     previewRenderer.bradfordMat = tr.bradfordMatrix.m
-                    previewRenderer.agxRawSceneLinearTo709 = tr.gamutMatrix.m
+                    previewRenderer.agxRawSceneLinearTo709 = tr.primariesMatrix.m
                     previewRenderer.wbGainR = tr.wbGains[0]
                     previewRenderer.wbGainG = tr.wbGains[1]
                     previewRenderer.wbGainB = tr.wbGains[2]
@@ -3668,6 +3735,7 @@ class MainActivity : AppCompatActivity() {
     private fun submitSampledMap(map: LensShadingData) {
         if (useStockMap) return
         val scaled = scaleLensShadingGains(map, lensShadingStrength)
+        lastAppliedShadingMap = scaled
         previewRenderer.submitLensShadingMap(
             scaled.toRgba16fFlipped(rawBayerPattern), scaled.width, scaled.height
         )
@@ -5044,6 +5112,7 @@ override fun onResume() {
     private fun processCapture(
         image: android.media.Image,
         result: android.hardware.camera2.TotalCaptureResult,
+        rawImage: android.media.Image?,
         session: CaptureSession,
         thumbnailLatch: CountDownLatch,
         thumbnailRef: java.util.concurrent.atomic.AtomicReference<Bitmap?>
@@ -5135,6 +5204,22 @@ override fun onResume() {
                     } else null
 
                 saveCaptureJpeg(jpegData, thumbnailJpeg, session, metadata)
+
+
+                if (rawImage != null) {
+                    try {
+                        val dngBytes = writeCaptureDng(
+                            rawImage, chars, result, metadata.exifOrientation,
+                            previewRenderer.exposureEv
+                        )
+                        if (dngBytes != null) {
+                            val dngUri = mediaStoreSaver.saveDng(dngBytes, metadata)
+                            CrashLogger.log(TAG, "stillCapture dng saved uri=$dngUri bytes=${dngBytes.size}")
+                        }
+                    } catch (e: Exception) {
+                        CrashLogger.log(TAG, "stillCapture dng save failed: " + e.message)
+                    }
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Capture processing failed", e)
                 mainHandler.post {
@@ -5142,9 +5227,145 @@ override fun onResume() {
                 }
             } finally {
                 image.close()
+                rawImage?.close()
                 tempFile?.delete()
             }
         }.start()
+    }
+
+    /** Serialize the capture's RAW_SENSOR frame through the platform DNG
+     *  writer: the pair then carries the camera2-mandated tag set (CFA,
+     *  black level, calibration matrices, capture neutral) with no hand
+     *  tag table to maintain. The EVPP picture gain rides in
+     *  BaselineExposure (tag 50730, SRATIONAL), same table as the
+     *  synthetic reference writer: positive value tells the converter to
+     *  lift by that many stops, which is what the pipeline's +EV gain did
+     *  on the device. [baselineExposureEv] is the EVPP offset relative to
+     *  the renderer's exposureEv itself (default included - the app's
+     *  default render is already a lifted picture). The app's other runtime
+     *  state (shading map, noise model) is not part of the DNG. */
+    private fun writeCaptureDng(
+        rawImage: android.media.Image,
+        chars: android.hardware.camera2.CameraCharacteristics?,
+        result: android.hardware.camera2.TotalCaptureResult,
+        exifOrientation: Int,
+        baselineExposureEv: Float
+    ): ByteArray? {
+        if (chars == null) return null
+        return try {
+            val out = java.io.ByteArrayOutputStream()
+            android.hardware.camera2.DngCreator(chars, result).use { creator ->
+                creator.setOrientation(exifOrientation)
+                creator.writeImage(out, rawImage)
+            }
+            patchBaselineExposure(out.toByteArray(), baselineExposureEv)
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "DNG encode failed", e)
+            null
+        }
+    }
+
+
+    /** Set DNG BaselineExposure (50730, SRATIONAL) in the serialized file.
+     *  In place when the tag already exists; inserted into IFD0 only for
+     *  the simple single-IFD layout (no SubIFDs/EXIF-GPS pointers, no
+     *  multi-entry offset arrays, no trailing IFD). Anything unexpected
+     *  bails and returns the unpatched bytes - the DNG stays valid, the
+     *  tag is simply absent. */
+    private fun patchBaselineExposure(dng: ByteArray, evStops: Float): ByteArray {
+        if (kotlin.math.abs(evStops) < 0.005f) return dng
+        try {
+            val le = dng[0] == 'I'.toByte() && dng[1] == 'I'.toByte()
+            val be = dng[0] == 'M'.toByte() && dng[1] == 'M'.toByte()
+            if (!le && !be) return dng
+            val typeSize = intArrayOf(1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8)
+            fun u16(o: Int): Int =
+                if (le) (dng[o].toInt() and 0xff) or ((dng[o + 1].toInt() and 0xff) shl 8)
+                else ((dng[o].toInt() and 0xff) shl 8) or (dng[o + 1].toInt() and 0xff)
+            fun u32(o: Int): Int {
+                var v = 0
+                if (le) {
+                    for (k in 3 downTo 0) v = (v shl 8) or (dng[o + k].toInt() and 0xff)
+                } else {
+                    for (k in 0..3) v = (v shl 8) or (dng[o + k].toInt() and 0xff)
+                }
+                return v
+            }
+            fun w16(b: ByteArray, o: Int, v: Int) {
+                if (le) { b[o] = v.toByte(); b[o + 1] = (v shr 8).toByte() }
+                else { b[o] = (v shr 8).toByte(); b[o + 1] = v.toByte() }
+            }
+            fun w32(b: ByteArray, o: Int, v: Int) {
+                if (le) for (k in 0..3) b[o + k] = (v shr (8 * k)).toByte()
+                else for (k in 0..3) b[o + k] = (v shr (8 * (3 - k))).toByte()
+            }
+            val ifd0 = u32(4)
+            if (ifd0 <= 0 || ifd0 + 2 > dng.size) return dng
+            val n = u16(ifd0)
+            if (n <= 0 || ifd0 + 2 + n * 12 + 4 > dng.size) return dng
+            val entriesStart = ifd0 + 2
+            val num = kotlin.math.round(evStops * 10000f).toInt()
+            val den = 10000
+            var found = -1
+            var i = 0
+            while (i < n) {
+                if (u16(entriesStart + i * 12) == 50730) { found = entriesStart + i * 12; break }
+                i++
+            }
+            if (found >= 0) {
+                if (u16(found + 2) != 10 || u32(found + 4) != 1) return dng
+                val voff = u32(found + 8)
+                if (voff + 8 > dng.size) return dng
+                w32(dng, voff, num)
+                w32(dng, voff + 4, den)
+                CrashLogger.log(TAG, "dng BaselineExposure patched in place $num/$den")
+                return dng
+            }
+            // insert: bail on layouts whose offset arrays would need element fixes
+            val banned = intArrayOf(273, 279, 322, 323, 324, 325, 330, 34665, 34853)
+            var t = 0
+            while (t < n) {
+                val e = entriesStart + t * 12
+                val tag = u16(e)
+                if (banned.contains(tag)) return dng
+                t++
+            }
+            val nextIfdPos = entriesStart + n * 12
+            if (u32(nextIfdPos) != 0) return dng
+            val oldBody = nextIfdPos + 4
+            val out = ByteArray(dng.size + 12 + 8)
+            System.arraycopy(dng, 0, out, 0, ifd0)
+            w16(out, ifd0, n + 1)
+            val ne = ifd0 + 2
+            w16(out, ne, 50730)
+            w16(out, ne + 2, 10)
+            w32(out, ne + 4, 1)
+            w32(out, ne + 8, dng.size + 12)
+            System.arraycopy(dng, entriesStart, out, ne + 12, n * 12)
+            w32(out, ne + 12 + n * 12, 0)
+            System.arraycopy(dng, oldBody, out, oldBody + 12, dng.size - oldBody)
+            // every out-of-line value offset shifted by the 12-byte growth
+            i = 0
+            while (i < n) {
+                val e = ne + 12 + i * 12
+                val ts = typeSize.getOrElse(u16(e + 2)) { return dng } - 1
+                val cnt = u32(e + 4)
+                if (ts < 0 || cnt < 0) return dng
+                if (typeSize[u16(e + 2) - 1].toLong() * cnt > 4L) {
+                    val vo = u32(e + 8)
+                    if (vo in 1 until oldBody) return dng
+                    if (vo != 0) w32(out, e + 8, vo + 12)
+                }
+                i++
+            }
+            w32(out, out.size - 8, num)
+            w32(out, out.size - 4, den)
+            CrashLogger.log(TAG, "dng BaselineExposure inserted $num/$den")
+            return out
+        } catch (err: Throwable) {
+            CrashLogger.log(TAG, "dng BaselineExposure patch failed: " + err.message)
+            return dng
+        }
     }
 
     /** Encodes the already-processed bitmap to JPEG and builds capture EXIF metadata. */
@@ -5216,7 +5437,8 @@ override fun onResume() {
         frame: com.agx.camera.gpu.PreviewRenderer.RawFrameCopy,
         session: CaptureSession,
         thumbnailLatch: CountDownLatch,
-        thumbnailRef: java.util.concurrent.atomic.AtomicReference<Bitmap?>
+        thumbnailRef: java.util.concurrent.atomic.AtomicReference<Bitmap?>,
+        wantDng: Boolean = false
     ) {
         val gpuBitmapRef = java.util.concurrent.atomic.AtomicReference<Bitmap?>(null)
         val gpuLatch = java.util.concurrent.CountDownLatch(1)
@@ -5249,6 +5471,119 @@ override fun onResume() {
                 } else null
 
                 saveCaptureJpeg(jpegData, thumbnailJpeg, session, metadata)
+                if (wantDng) {
+                    var templateRaw: android.media.Image? = null
+                    try {
+                        templateRaw = camera2Manager.grabRawFrame()
+                        val dngResult = camera2Manager.lastCaptureResult()
+                        val activeLens = lensManager.activeLens ?: lensManager.selectPrimary()
+                        val chars = activeLens?.let { lensManager.getCharacteristicsForLens(it) }
+                        val bv = frame.buffer.asReadOnlyBuffer()
+                        bv.position(0)
+                        // AsShotNeutral is the scene white the current render
+                        // actually folded (the dispatch's `neutral`, snapshot
+                        // per frame). That is the only self-consistent choice
+                        // across both gain branches: when the estimator owns
+                        // the gains it IS the inverse of the applied gains,
+                        // and when the profile owns them it is the neutral
+                        // the adaptation matrix was solved from - the profile
+                        // branch leaves the scene white balance in the matrix
+                        // while its gains stay the constant daylight anchor,
+                        // so 1/gains would claim the anchor as the scene
+                        // white and multiplier-only readers would bleach the
+                        // file (measured: decode WB error 0.62 vs the
+                        // thumbnail, fixed to 0.03 by this neutral). Paired
+                        // with the daylight-anchor-corrected ColorMatrix1/2,
+                        // matrix-chain readers resolve the same white through
+                        // the corrected calibration. AsShotWhiteXY records
+                        // the same neutral's chromaticity.
+                        val sceneNeutral = lastDispatchFoldedWhite
+                            ?: lastDispatchSceneNeutral
+                        val gNorm = sceneNeutral[1]
+                        val dngNeutral = if (gNorm.isFinite() && gNorm > 0f &&
+                            sceneNeutral.all { it.isFinite() && it > 0f }
+                        ) {
+                            floatArrayOf(
+                                sceneNeutral[0] / gNorm, 1f, sceneNeutral[2] / gNorm
+                            )
+                        } else null
+                        val cm1 = rawColorProfile?.let {
+                            val m = it.correctedColorMatrix1
+                            if (m != null) m.m.copyOf() else null
+                        }
+                        val cm2 = rawColorProfile?.let {
+                            val m = it.correctedColorMatrix2
+                            if (m != null) m.m.copyOf() else null
+                        }
+                        val correctedCm = if (cm1 != null && cm2 != null) cm1 + cm2 else null
+                        val dngXy = rawColorProfile?.dngSceneWhiteXy(sceneNeutral)
+                        // Render recipe: the effective AgX params (which the
+                        // active preset may have changed from the data-class
+                        // defaults) and the NR slider strengths the pipeline
+                        // ran with. Without this in the file, an offline
+                        // reproduction cannot know the preset's rotation /
+                        // attenuation / purity values and guesses wrong on
+                        // warm scenes (measured: a chromaticity angle
+                        // residual vs the embedded JPG). Private tag 55001,
+                        // UTF-8 JSON.
+                        val recipeJson = run {
+                            val p = agxParams
+                            val o = JSONObject()
+                            o.put("general_contrast", p.contrast.toDouble())
+                            o.put("toe_contrast", p.toe.toDouble())
+                            o.put("shoulder_contrast", p.shoulder.toDouble())
+                            o.put("middle_gray", p.middleGray.toDouble())
+                            o.put("rotation", JSONArray(p.rotation.toList()))
+                            o.put("attenuation", JSONArray(p.attenuation.toList()))
+                            o.put("reverse_rotation", JSONArray(p.reverseRotation.toList()))
+                            o.put("purity_boost", JSONArray(p.purityBoost.toList()))
+                            o.put("tinting_scale", p.tintingScale.toDouble())
+                            o.put("tinting_hue", p.tintingHue.toDouble())
+                            o.put("vibrance", p.vibrance.toDouble())
+                            o.put("use_rotation_for_reverse", p.useRotationForReverse)
+                            o.put("use_attenuation_for_boost", p.useAttenuationForBoost)
+                            o.put("dpc", dpcStrength.toDouble())
+                            o.put("s3_raw", rawNrStrength.toDouble())
+                            o.put("s5_luma", outNrStrength.toDouble())
+                            o.put("s5_chroma", outNrChromaStrength.toDouble())
+                            o.put("clip_atten", clipAttenFactor.toDouble())
+                            // The exact capture-time color transform: the
+                            // folded white alone pins the white point, but
+                            // the full transform is not inferable from it
+                            // (several branch/gate states fold to the same
+                            // white). Recording the renderer state makes
+                            // the offline reproduction exact instead of
+                            // guessed.
+                            o.put("wb_gains", JSONArray(listOf(
+                                previewRenderer.wbGainR.toDouble(),
+                                previewRenderer.wbGainG.toDouble(),
+                                previewRenderer.wbGainB.toDouble())))
+                            previewRenderer.bradfordMat?.let {
+                                o.put("bradford", JSONArray(it.toList()))
+                            }
+                            previewRenderer.agxRawSceneLinearTo709?.let {
+                                o.put("primaries", JSONArray(it.toList()))
+                            }
+                            o.toString()
+                        }
+                        val dngBytes = com.agx.camera.io.DngPairWriter.write(
+                            bv, frame.width, frame.height,
+                            templateRaw, chars, dngResult, metadata.exifOrientation,
+                            previewRenderer.exposureEv, jpegData, dngNeutral, dngXy,
+                            correctedCm, recipeJson, lastAppliedShadingMap
+                        )
+                        if (dngBytes != null) {
+                            val dngUri = mediaStoreSaver.saveDng(dngBytes, metadata)
+                            CrashLogger.log(TAG, "rawSnapshot bayer dng saved uri=$dngUri bytes=${dngBytes.size}")
+                        } else {
+                            CrashLogger.log(TAG, "rawSnapshot bayer dng skipped template=${templateRaw != null} result=${dngResult != null} chars=${chars != null}")
+                        }
+                    } catch (e: Exception) {
+                        CrashLogger.log(TAG, "rawSnapshot bayer dng failed: " + e.message)
+                    } finally {
+                        templateRaw?.close()
+                    }
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "RAW capture processing failed", e)
                 mainHandler.post {
@@ -5751,6 +6086,7 @@ override fun onResume() {
         private const val PREF_FOCUS_TIMEOUT = "focus_indicator_timeout"
         private const val PREF_STARTUP_PRESET = "startup_preset"
         private const val PREF_THERMAL_PROTECTION_ENABLED = "thermal_protection_enabled"
+        private const val PREF_SAVE_DNG = "save_dng_with_capture"
 
     /**
      * Captured-frame attachments kept in Downloads. Three is enough to hold the

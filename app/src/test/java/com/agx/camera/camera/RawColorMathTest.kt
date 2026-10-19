@@ -396,12 +396,12 @@ class RawColorMathTest {
     }
 
     @Test
-    fun neutralTransform_bradfordGamutSplit_reproducesTheFoldedMatrix() {
-        // The moved order (WB -> Bradford -> S5 -> neutralization -> gamut -> AgX)
+    fun neutralTransform_bradfordPrimariesSplit_reproducesTheFoldedMatrix() {
+        // The moved order (WB -> Bradford -> S5 -> neutralization -> primaries transform -> AgX)
         // parks S5 in the Bradford-adapted domain, so the camera-native -> linear
         // sRGB matrix has to be handed out as two factors: the adapted-domain map
         // (bradfordMatrix) applied at the demosaic and the PCS -> sRGB map
-        // (gamutMatrix) applied at the AgX input. The split must reconstruct the
+        // (primariesMatrix) applied at the AgX input. The split must reconstruct the
         // folded matrix exactly, or S5 would run in one domain while the render
         // assumes another.
         for ((cm1, cm2) in listOf(
@@ -414,10 +414,10 @@ class RawColorMathTest {
                     cm1, cm2, ID, ID, fwd, fwd, T1, T2, matMulVec(cm1, d65Xyz())
                 ) ?: throw AssertionError("transform must exist")
 
-                val rebuilt = ColorMatrix.multiply(t.gamutMatrix, t.bradfordMatrix)
+                val rebuilt = ColorMatrix.multiply(t.primariesMatrix, t.bradfordMatrix)
                 for (i in 0..8) {
                     assertClose(
-                        "gamut*bradford[$i] == colorMatrix[$i]",
+                        "primaries*bradford[$i] == colorMatrix[$i]",
                         t.colorMatrix.m[i], rebuilt.m[i], 1e-3f
                     )
                 }

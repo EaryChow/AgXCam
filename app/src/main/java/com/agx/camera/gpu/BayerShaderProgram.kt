@@ -829,7 +829,7 @@ uniform vec3 u_wb_gains;
 uniform vec4 u_wb_gains4;
 // Moved-order floor: WB + Bradford adapt into the S5 working domain (the
 // Bradford-adapted camera-native "PCS" signal), capacity-normalized. The
-// clipping neutralization and the gamut (PCS -> linear sRGB) matrix are NOT
+// clipping neutralization and the primaries transform (PCS -> linear sRGB) are NOT
 // applied here - they run after S5 and at the AgX input respectively, so S5
 // works on the pure linear WB+Bradford signal.
 uniform mat3 u_bradford_mat;
@@ -1732,11 +1732,11 @@ void main() {
 
     // Moved-order Stage-4 floor: white balance, then the Bradford adapt into the
     // S5 working domain, capacity-normalized (divide by the sensor range) with
-    // negative lobes compensated. The clipping neutralization and the gamut
+    // negative lobes compensated. The clipping neutralization and the primaries transform
     // matrix are deliberately NOT applied here: S5 runs on this pure linear
     // WB+Bradford signal (so its residual covariance stays the constant
     // Bradford-adapted one), the neutralization runs on the S5 output, and the
-    // gamut (PCS -> linear sRGB) matrix is applied once at the AgX input.
+    // primaries transform (PCS -> linear sRGB) is applied once at the AgX input.
     vec3 wb = linearRGB * u_wb_gains;
     vec3 adapted = u_bradford_mat * wb;
     linearRGB = compensateNegatives(adapted / max(u_white_level - u_black_level, 1.0));

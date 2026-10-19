@@ -58,6 +58,46 @@ class MediaStoreSaver(private val context: Context) {
             return null
         }
     }
+
+    /** DNG twin of [saveJpeg]: same base name so a capture's pair sits
+     *  side by side in the album, with the standard raw MIME type. */
+    fun saveDng(dngData: ByteArray, metadata: CaptureMetadata): Uri? {
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date(metadata.captureWallClockMs))
+        val displayName = "AgX_${timestamp}.dng"
+        val relativePath = Environment.DIRECTORY_DCIM + "/AgXCam"
+
+        val contentValues = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/x-adobe-dng")
+            put(MediaStore.Images.Media.DATE_ADDED, metadata.captureWallClockMs / 1000)
+            put(MediaStore.Images.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, relativePath)
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
+        }
+
+        val resolver = context.contentResolver
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+            ?: return null
+
+        try {
+            resolver.openOutputStream(uri)?.use { stream ->
+                stream.write(dngData)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                contentValues.clear()
+                contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+                resolver.update(uri, contentValues, null, null)
+            }
+            Log.d(TAG, "Saved DNG: $displayName -> $uri")
+            return uri
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save DNG: $displayName", e)
+            resolver.delete(uri, null, null)
+            return null
+        }
+    }
 }
 
 private const val TAG = "MediaStoreSaver"

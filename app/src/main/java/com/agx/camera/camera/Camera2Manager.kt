@@ -1380,16 +1380,35 @@ class Camera2Manager(private val context: Context) {
         }
     }
 
-    fun captureStill(onCaptureAvailable: (Image, TotalCaptureResult) -> Unit, onCaptureFailed: () -> Unit) {
+    fun captureStill(
+        onCaptureAvailable: (Image, TotalCaptureResult, Image?) -> Unit,
+        onCaptureFailed: () -> Unit,
+        wantDng: Boolean = false
+    ) {
         val camera = cameraDevice ?: run { CrashLogger.log(TAG, "captureStill: cameraDevice is null"); onCaptureFailed(); return }
         val session = captureSession ?: run { CrashLogger.log(TAG, "captureStill: captureSession is null"); onCaptureFailed(); return }
         val reader = captureReader ?: run { CrashLogger.log(TAG, "captureStill: captureReader is null"); onCaptureFailed(); return }
+        // Local snapshot: the property is mutable, so the smart cast needs
+        // an immutable alias for the DNG raw-frame plumbing below.
+        val rawReader = this.rawReader
+        CrashLogger.log(TAG, "captureStill wantDng=$wantDng rawAvailable=${rawReader != null}")
 
         val afMode = safeAfMode(CaptureRequest.CONTROL_AF_MODE_AUTO)
         val aeMode = safeAeMode(if (isManualExposure) CaptureRequest.CONTROL_AE_MODE_OFF else CaptureRequest.CONTROL_AE_MODE_ON)
         CrashLogger.log(TAG, "captureStill afMode=$afMode aeMode=$aeMode manual=$isManualExposure")
 
         captureImageLatch = CountDownLatch(1)
+        // Optional DNG twin: latch the next raw frame and swap the raw
+        // reader's listener so the framegrab path cannot race the acquire.
+        var dngRawLatch: CountDownLatch? = null
+        if (wantDng) {
+            if (rawReader == null) {
+                CrashLogger.log(TAG, "stillCapture dng requested but no raw stream")
+            } else {
+                dngRawLatch = CountDownLatch(1)
+                rawReader.setOnImageAvailableListener({ dngRawLatch.countDown() }, backgroundHandler)
+            }
+        }
         reader.setOnImageAvailableListener({ r ->
             CrashLogger.log(TAG, "stillCapture onImageAvailable")
             captureImageLatch.countDown()
@@ -1398,6 +1417,7 @@ class Camera2Manager(private val context: Context) {
         val preview = previewReader?.surface
         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
             addTarget(reader.surface)
+            if (wantDng) rawReader?.let { addTarget(it.surface) }
             if (preview != null) addTarget(preview)
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
             applyAwb()
@@ -1432,9 +1452,22 @@ class Camera2Manager(private val context: Context) {
                     CrashLogger.log(TAG, "stillCapture latch waited imageReady=$imageReady")
                     val image = captureReader?.acquireLatestImage()
                     reader.setOnImageAvailableListener(null, null)
+                    var dngRaw: Image? = null
+                    val rawLatch = dngRawLatch
+                    if (wantDng && rawReader != null) {
+                        val rawReady = rawLatch?.await(2, TimeUnit.SECONDS) == true
+                        if (rawReady) dngRaw = rawReader.acquireLatestImage()
+                        val rawTs = dngRaw?.timestamp
+                        val resTs = result.get(CaptureResult.SENSOR_TIMESTAMP)
+                        CrashLogger.log(
+                            TAG, "stillCapture dngRaw=${dngRaw != null} " +
+                                "tsMatch=${rawTs != null && rawTs == resTs}"
+                        )
+                        rawReader.setOnImageAvailableListener(rawListener, backgroundHandler)
+                    }
                     if (image != null) {
                         CrashLogger.log(TAG, "stillCapture image acquired ${image.width}x${image.height}")
-                        onCaptureAvailable(image, result)
+                        onCaptureAvailable(image, result, dngRaw)
                     } else {
                         CrashLogger.log(TAG, "stillCapture image is null after latch")
                         Log.e(TAG, "Capture image not available after onImageAvailable latch")
@@ -1443,6 +1476,7 @@ class Camera2Manager(private val context: Context) {
                 }
 
                 override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+                    if (wantDng) rawReader?.setOnImageAvailableListener(rawListener, backgroundHandler)
                     CrashLogger.log(TAG, "stillCapture onCaptureFailed reason=${failure.reason} wasImageCaptured=${failure.wasImageCaptured()}")
                     captureImageLatch.countDown()
                     reader.setOnImageAvailableListener(null, null)
@@ -1582,8 +1616,37 @@ CaptureRequest.CONTROL_AWB_MODE_SHADE -> "SHADE"
         if (deviceMaxAeRegions > 0) set(CaptureRequest.CONTROL_AE_REGIONS, regions)
     }
 
+    @Volatile
+    private var lastTotalResult: TotalCaptureResult? = null
+
+    fun lastCaptureResult(): TotalCaptureResult? = lastTotalResult
+
+    /** Latch the next RAW_SENSOR frame from the continuously-running raw
+     *  stream. Bayer-path captures never issue a still request, so the
+     *  captureStill DNG plumbing cannot serve them; this grabs the nearest
+     *  raw instead (its own result records the true ISO/exposure). The
+     *  framegrab listener is swapped out for the wait and restored after.
+     *  The caller owns and must close the returned image. */
+    fun grabRawFrame(timeoutMs: Long = 1500): Image? {
+        val reader = rawReader ?: return null
+        val latch = CountDownLatch(1)
+        reader.setOnImageAvailableListener({ latch.countDown() }, backgroundHandler)
+        return try {
+            val ok = latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+            if (!ok) {
+                CrashLogger.log(TAG, "grabRawFrame timed out")
+                null
+            } else {
+                reader.acquireLatestImage()
+            }
+        } finally {
+            reader.setOnImageAvailableListener(rawListener, backgroundHandler)
+        }
+    }
+
     private val aeReadoutCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+            lastTotalResult = result
             val afState = result.get(CaptureResult.CONTROL_AF_STATE)
             val lensFocusD = result.get(CaptureResult.LENS_FOCUS_DISTANCE)
             if (lensFocusD != null && !isManualFocus && afState != CaptureResult.CONTROL_AF_STATE_PASSIVE_SCAN &&

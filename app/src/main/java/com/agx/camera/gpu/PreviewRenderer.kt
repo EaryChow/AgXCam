@@ -461,10 +461,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     // Camera-native -> Bradford-adapted workspace map (WB + Bradford). Applied
     // by the demosaic shader; S5 then runs on this adapted signal.
     @Volatile var bradfordMat: FloatArray? = null
-    // Bradford-adapted (PCS) -> linear sRGB gamut map, applied at the AgX input
+    // Bradford-adapted (PCS) -> linear sRGB primaries transform, applied at the AgX input
     // on the raw/Bayer path only (nrShader). Kept separate from
     // agxSceneLinearTo709: the camera-JPEG/YUV path shares that field and must
-    // stay identity, otherwise the gamut would be applied twice.
+    // stay identity, otherwise the primaries transform would be applied twice.
     @Volatile var agxRawSceneLinearTo709: FloatArray? = null
     // S5 SWGF must score windows in the same luma space as yccOf
     // (0.25*R + 0.5*G + 0.25*B); a Rec.709 row would bias st.r vs yccIn.x.

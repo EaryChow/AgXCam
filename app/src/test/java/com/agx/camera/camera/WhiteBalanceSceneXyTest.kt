@@ -47,8 +47,8 @@ class WhiteBalanceSceneXyTest {
         assertEquals(presets.size, WhiteBalanceMode.entries.size - 2)
         for (mode in presets) {
             val xy = xyOf(mode)
-            assertTrue("${mode.name} x in gamut", xy[0] > 0f && xy[0] < 1f)
-            assertTrue("${mode.name} y in gamut", xy[1] > 0f && xy[1] < 1f)
+            assertTrue("${mode.name} x within primaries", xy[0] > 0f && xy[0] < 1f)
+            assertTrue("${mode.name} y within primaries", xy[1] > 0f && xy[1] < 1f)
             assertTrue("${mode.name} inside the chromaticity triangle", xy[0] + xy[1] < 1f)
         }
         assertNull(WhiteBalanceMode.AUTO.sceneXy())

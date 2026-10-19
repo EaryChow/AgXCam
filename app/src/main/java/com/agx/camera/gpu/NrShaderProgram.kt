@@ -183,7 +183,7 @@ ${AgxCoreGlsl.AGX_FORMATION_NORM}
 // and Bradford, capacity-normalized). The luma gate is the signal-consistent
 // [0, 1, 0] channel of that adapted signal, so the gate and the neutralized
 // operand share one workspace and the step is invariant to how the white
-// balance was split. The gamut (PCS -> linear sRGB) matrix is applied next, by
+// balance was split. The primaries transform (PCS -> linear sRGB) is applied next, by
 // agxFormationNorm via u_scene_linear_to_709. At factor == 0 the step is skipped.
 vec3 clippingNeutralize(vec3 norm, float atten) {
     if (atten <= 0.0) {

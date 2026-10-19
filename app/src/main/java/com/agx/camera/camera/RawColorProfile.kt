@@ -81,6 +81,14 @@ class RawColorProfile(chars: CameraCharacteristics) {
         get() = correctedColorMatrix(rawColorMatrix1)
     private val effectiveColorMatrix2: Mat3
         get() = correctedColorMatrix(rawColorMatrix2)
+
+    /** Public accessors for the DNG writer: the daylight-anchor-corrected
+     *  reference matrices - the device's true calibration, against which
+     *  the pipeline's white-balance gains are expressed. */
+    val correctedColorMatrix1: Mat3?
+        get() = if (available) effectiveColorMatrix1 else null
+    val correctedColorMatrix2: Mat3?
+        get() = if (available) effectiveColorMatrix2 else null
     private val calibration1: Mat3
     private val calibration2: Mat3
     private val forwardMatrix1: Mat3?
@@ -327,6 +335,23 @@ class RawColorProfile(chars: CameraCharacteristics) {
         val neutral = RawColorMath.normalize(neutralSensorRgb) ?: return null
         val cameraToXyz = cameraToXyzAtDaylight() ?: return null
         return RawColorMath.xyFromXyz(ColorMatrix.mulMatVec(cameraToXyz, neutral))
+    }
+
+    /** AsShotWhiteXY for the DNG pair writer: the neutral pushed through the
+     *  INVERSE of the (corrected) ColorMatrix1 the file itself ships - the
+     *  same CM1 a standard reader applies to AsShotNeutral. The spec asks
+     *  the two tags to be consistent with the calibration set, and readers
+     *  that prefer 50729 over the 50728+CM1 chain balance to this tag
+     *  directly: any disagreement becomes a white-balance split between
+     *  reader families. The daylight-blended [cameraToXyzAtDaylight] is the
+     *  render's adaptation model; what the file claims must go through the
+     *  shipped CM1 instead. */
+    fun dngSceneWhiteXy(neutralSensorRgb: FloatArray): FloatArray? {
+        if (!available) return null
+        val neutral = RawColorMath.normalize(neutralSensorRgb) ?: return null
+        val m = correctedColorMatrix1 ?: return null
+        val xyz = ColorMatrix.mulMatVec(ColorMatrix.inverse(m), neutral)
+        return RawColorMath.xyFromXyz(xyz)
     }
 
     /**
@@ -646,12 +671,12 @@ object RawColorMath {
         val lumaCoeffs: FloatArray,
         // Moved-order split of [colorMatrix] (camera-native -> linear sRGB,
         // WB removed). The S5 working-domain chain is
-        //   WB gains -> Bradford -> S5 -> clipping neutralization -> gamut -> AgX,
+        //   WB gains -> Bradford -> S5 -> clipping neutralization -> primaries transform -> AgX,
         // so a pipeline that parks S5 in the Bradford-adapted working domain
         // applies [bradfordMatrix] (camera-native -> PCS-adapted) at the
-        // demosaic, runs S5 there, then applies [gamutMatrix] (PCS -> linear
+        // demosaic, runs S5 there, then applies [primariesMatrix] (PCS -> linear
         // sRGB) at the AgX input. The split satisfies
-        //   gamutMatrix * bradfordMatrix == colorMatrix.
+        //   primariesMatrix * bradfordMatrix == colorMatrix.
         // [lumaCoeffsBradford] is a diagnostic for the split: the luma row of the
         // adapted signal, satisfying
         //   w @ lumaCoeffs == (w @ bradfordMatrix^T) @ lumaCoeffsBradford.
@@ -659,7 +684,7 @@ object RawColorMath {
         // [0,1,0] row of the adapted signal, not on this row, so it is not
         // consumed by the render; it is retained for the split-identity check.
         val bradfordMatrix: Mat3,
-        val gamutMatrix: Mat3,
+        val primariesMatrix: Mat3,
         val lumaCoeffsBradford: FloatArray
     )
 
@@ -695,11 +720,11 @@ object RawColorMath {
             core.cameraToXyz.m[5]
         )
         // Moved-order split: camera-native -> PCS-adapted (Bradford, WB removed)
-        // and PCS-adapted -> linear sRGB (gamut). gamutMatrix * bradfordMatrix
+        // and PCS-adapted -> linear sRGB). primariesMatrix * bradfordMatrix
         // reproduces the folded colorMatrix exactly; pcsToSrgb() is the same
         // PCS -> sRGB map neutralCore folds in, so the identity is exact.
         val bradfordMatrix = ColorMatrix.multiply(core.cameraToXyz, gInv)
-        val gamutMatrix = pcsToSrgb()
+        val primariesMatrix = pcsToSrgb()
         // Solved so w @ lumaCoeffs == (w @ bradfordMatrix^T) @ lumaCoeffsBradford:
         // bradfordMatrix^T @ lumaCoeffsBradford == lumaCoeffs.
         val lumaCoeffsBradford = ColorMatrix.mulMatVec(
@@ -711,7 +736,7 @@ object RawColorMath {
             ColorMatrix.multiply(core.colorMatrix, gInv),
             lumaCoeffs,
             bradfordMatrix,
-            gamutMatrix,
+            primariesMatrix,
             lumaCoeffsBradford
         )
     }
