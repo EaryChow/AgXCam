@@ -269,9 +269,9 @@ object StructureMapClassifier {
         val r1 = classify(iso, ratioAt(0.28f), edgeCoherence = 0.08f, organization = 0.10f)
         out.add(ProbeResult("1 flat noise patch", r1, PLAIN, r1 == PLAIN, "residual at the retention anchor"))
 
-        // 2. high-saturation fine texture.
+        // 2. high-chroma fine texture.
         val r2 = classify(iso, ratioAt(9.0f), edgeCoherence = 0.22f, organization = 0.85f)
-        out.add(ProbeResult("2 saturated fine texture", r2, TEXTURE, r2 == TEXTURE, "residual far above prediction, connected"))
+        out.add(ProbeResult("2 chromatic fine texture", r2, TEXTURE, r2 == TEXTURE, "residual far above prediction, connected"))
 
         // 3. chroma edge x luma texture overlap.
         val r3 = classify(iso, ratioAt(5.0f), edgeCoherence = 0.80f, organization = 0.70f)
