@@ -157,7 +157,7 @@ class S5CShaderProgram {
     fun drawStage1(
         inTex: Int, guideTex: Int, sigmaTex: Int, strength: Float,
         s: Float, sW: Float, gC: Float, gLum: Float, rRetain: Float, mCx: Float, mCy: Float,
-        rSupport: Float, rGuide: Float
+        rSupport: Float, rGuide: Float, mottleFix: Float = 1f
     ) {
         if (mainProgramId == 0) return
         GLES20.glUseProgram(mainProgramId)
@@ -173,6 +173,7 @@ class S5CShaderProgram {
         set2F(mainProgramId, "u_m_c", mCx, mCy)
         setF(mainProgramId, "u_r_support", rSupport)
         setF(mainProgramId, "u_r_guide", rGuide)
+        setF(mainProgramId, "u_mottle_fix", mottleFix)
         drawQuad(mainProgramId)
     }
 
@@ -329,6 +330,10 @@ uniform vec2 u_m_c;
 // (winScale 6.4) are certified.
 uniform float u_r_support;
 uniform float u_r_guide;
+// Shaped dark-noise boost: scale the tap-weight variances (not the blend
+// dosage below) to compensate the Stage-0 model's underestimation in dark
+// content; mirrors the sim's shaped_dark_boost.
+uniform float u_mottle_fix;
 
 float luma(vec3 rgb) { return 0.25 * rgb.r + 0.5 * rgb.g + 0.25 * rgb.b; }
 vec2 chroma(vec3 rgb) { return vec2((rgb.b - rgb.r) * 0.25, (rgb.r - 2.0 * rgb.g + rgb.b) * 0.25); }
@@ -344,10 +349,24 @@ void main() {
     float sigY2 = max(sig.r, 1.0e-12);
     float sigC1_2 = max(sig.g, 1.0e-12);
     float sigC2_2 = max(sig.b, 1.0e-12);
-    float sy2 = max(u_r_retain * u_r_retain * sigY2, 1.0e-12);
-
     float yhat = luma(texelFetch(u_guideTex, base, 0).rgb);
     vec2 cin = chroma(texelFetch(u_inTex, base, 0).rgb) - u_m_c;
+
+    // The weight variances get the shaped boost; the blend dosage keeps the
+    // unscaled planes (decoupling, measured against a reflective decal).
+    float wC1_2 = sigC1_2;
+    float wC2_2 = sigC2_2;
+    if (u_mottle_fix > 0.5) {
+        vec3 px = rgbOf(yhat, cin + u_m_c);
+        float yy = max(luma(px), 0.0);
+        float qq = (max(px.r, max(px.g, px.b)) - min(px.r, min(px.g, px.b)))
+            / max(yy, 1.0e-6);
+        float gate = 1.0 / (1.0 + pow(qq / 0.6, 4.0));
+        float boost = 1.0 + 11.0 * exp(-yy / 0.2) * gate;
+        wC1_2 = sigC1_2 * boost;
+        wC2_2 = sigC2_2 * boost;
+    }
+    float sy2 = max(u_r_retain * u_r_retain * sigY2, 1.0e-12);
 
     // Stage-1 estimate and guide variance accumulate in one sweep over the
     // dense (2*rs+1)^2 support window: the (2*rg+1)^2 guide window sits inside
@@ -380,7 +399,7 @@ void main() {
             vec2 cv = chroma(texelFetch(u_inTex, t, 0).rgb) - u_m_c;
             float dc1 = cv.x - cin.x;
             float dc2 = cv.y - cin.y;
-            float d2 = lterm + dc1 * dc1 / sigC1_2 + dc2 * dc2 / sigC2_2;
+            float d2 = lterm + dc1 * dc1 / wC1_2 + dc2 * dc2 / wC2_2;
             float w = u_s_w / (d2 + u_s_w);
             if (wL >= CULL_W) {
                 sumWc += w * cv;

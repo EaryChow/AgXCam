@@ -148,7 +148,10 @@ class S5WShaderProgram {
      *  the squared EV PP gain folded into every band's noise target (1.0 at
      *  the +1.5 EV default), the same fold runStage5 applies to its ISO
      *  model. */
-    fun drawGain(inTex: Int, level01Tex: Int, level23Tex: Int, sigmaTex: Int, evGain2: Float) {
+    fun drawGain(
+        inTex: Int, level01Tex: Int, level23Tex: Int, sigmaTex: Int,
+        evGain2: Float, mottleFix: Float = 1f
+    ) {
         if (gainProgramId == 0) return
         GLES20.glUseProgram(gainProgramId)
         setTex(gainProgramId, "u_input_tex", 0, inTex)
@@ -156,6 +159,7 @@ class S5WShaderProgram {
         setTex(gainProgramId, "u_level23_tex", 2, level23Tex)
         setTex(gainProgramId, "u_sigma_tex", 3, sigmaTex)
         setF(gainProgramId, "u_ev_gain2", evGain2)
+        setF(gainProgramId, "u_mottle_fix", mottleFix)
         drawQuad(gainProgramId)
     }
 
@@ -297,6 +301,9 @@ uniform sampler2D u_sigma_tex;
 // the +1.5 EV default (1.0 there) and clamped on the host exactly like the
 // S5-L ISO-model fold.
 uniform float u_ev_gain2;
+// Shaped dark-noise boost on the noise target (the sim's
+// shaped_dark_boost); mirrors the S5-C stage-1 weight-variances scale.
+uniform float u_mottle_fix;
 
 const int CELL = 8;
 const int N = CELL * CELL;
@@ -351,6 +358,14 @@ void main() {
     ivec2 cbase = clamp(base + ivec2(CELL / 2), ivec2(0), size - ivec2(1));
     vec4 sg = texelFetch(u_sigma_tex, cbase, 0);
     float sigC = max(sg.g + sg.b, 0.0);
+    if (u_mottle_fix > 0.5) {
+        vec3 px = texelFetch(u_input_tex, cbase, 0).rgb;
+        float yy = max(0.25 * px.r + 0.5 * px.g + 0.25 * px.b, 0.0);
+        float qq = (max(px.r, max(px.g, px.b)) - min(px.r, min(px.g, px.b)))
+            / max(yy, 1.0e-6);
+        float gate = 1.0 / (1.0 + pow(qq / 0.6, 4.0));
+        sigC *= 1.0 + 11.0 * exp(-yy / 0.2) * gate;
+    }
     float sn0 = sigC * K_BAND0 * CAL * u_ev_gain2;
     float sn1 = sigC * K_BAND1 * CAL * u_ev_gain2;
     float sn2 = sigC * K_BAND2 * CAL * u_ev_gain2;
