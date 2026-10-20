@@ -3042,8 +3042,7 @@ class MainActivity : AppCompatActivity() {
             // scene estimate: when the adaptation gate holds back (limited
             // AWB on a warm light) the render deliberately keeps part of
             // the scene warmth, and shipping the estimate over-whitens a
-            // standard decode (measured: decode WB err 0.22-0.28 vs the
-            // embedded thumbnail on the warm room scene).
+            // standard decode.
             lastDispatchFoldedWhite = run {
                 val g = floatArrayOf(
                     previewRenderer.wbGainR,
@@ -5491,8 +5490,7 @@ override fun onResume() {
                         // while its gains stay the constant daylight anchor,
                         // so 1/gains would claim the anchor as the scene
                         // white and multiplier-only readers would bleach the
-                        // file (measured: decode WB error 0.62 vs the
-                        // thumbnail, fixed to 0.03 by this neutral). Paired
+                        // file. Paired
                         // with the daylight-anchor-corrected ColorMatrix1/2,
                         // matrix-chain readers resolve the same white through
                         // the corrected calibration. AsShotWhiteXY records
@@ -5522,9 +5520,7 @@ override fun onResume() {
                         // defaults) and the NR slider strengths the pipeline
                         // ran with. Without this in the file, an offline
                         // reproduction cannot know the preset's rotation /
-                        // attenuation / purity values and guesses wrong on
-                        // warm scenes (measured: a chromaticity angle
-                        // residual vs the embedded JPG). Private tag 55001,
+                        // attenuation / purity values. Private tag 55001,
                         // UTF-8 JSON.
                         val recipeJson = run {
                             val p = agxParams
@@ -5551,9 +5547,7 @@ override fun onResume() {
                             // folded white alone pins the white point, but
                             // the full transform is not inferable from it
                             // (several branch/gate states fold to the same
-                            // white). Recording the renderer state makes
-                            // the offline reproduction exact instead of
-                            // guessed.
+                            // white), so the renderer state is recorded.
                             o.put("wb_gains", JSONArray(listOf(
                                 previewRenderer.wbGainR.toDouble(),
                                 previewRenderer.wbGainG.toDouble(),
@@ -5563,6 +5557,27 @@ override fun onResume() {
                             }
                             previewRenderer.agxRawSceneLinearTo709?.let {
                                 o.put("primaries", JSONArray(it.toList()))
+                            }
+                            // Forward matrices from the HAL profile, for
+                            // offline reconstruction of this transform: the
+                            // pair DNG does not carry ForwardMatrix, so
+                            // without these the camera->XYZ chain cannot be
+                            // rebuilt as the pipeline used it.
+                            rawColorProfile?.let { p ->
+                                p.dcpForwardMatrix1?.let {
+                                    o.put("fwd1", JSONArray(it.m.toList()))
+                                }
+                                p.dcpForwardMatrix2?.let {
+                                    o.put("fwd2", JSONArray(it.m.toList()))
+                                }
+                                // Live daylight-anchor correction. The
+                                // file's ColorMatrix tags already embed it;
+                                // recording it documents that fact at full
+                                // precision (dc = identity means the
+                                // estimator had not converged at capture)
+                                // and lets an offline reconstruction skip
+                                // re-deriving the anchor.
+                                o.put("dc", JSONArray(p.daylightCorrection.toList()))
                             }
                             o.toString()
                         }

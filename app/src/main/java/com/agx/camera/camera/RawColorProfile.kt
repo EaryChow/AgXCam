@@ -89,6 +89,13 @@ class RawColorProfile(chars: CameraCharacteristics) {
         get() = if (available) effectiveColorMatrix1 else null
     val correctedColorMatrix2: Mat3?
         get() = if (available) effectiveColorMatrix2 else null
+    /** Uncorrected forward matrices, verbatim from the HAL profile. The
+     *  offline reconstruction consumes these to rebuild the app's
+     *  camera->XYZ chain; the pair DNG itself does not carry them. */
+    val dcpForwardMatrix1: Mat3?
+        get() = if (available) forwardMatrix1 else null
+    val dcpForwardMatrix2: Mat3?
+        get() = if (available) forwardMatrix2 else null
     private val calibration1: Mat3
     private val calibration2: Mat3
     private val forwardMatrix1: Mat3?

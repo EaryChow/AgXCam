@@ -330,9 +330,9 @@ uniform vec2 u_m_c;
 // (winScale 6.4) are certified.
 uniform float u_r_support;
 uniform float u_r_guide;
-// Shaped dark-noise boost: scale the tap-weight variances (not the blend
-// dosage below) to compensate the Stage-0 model's underestimation in dark
-// content; mirrors the sim's shaped_dark_boost.
+// Shaped low-signal boost: scale the tap-weight variances (not the
+// blend dosage below) where the Stage-0 model underestimates the
+// chroma noise at low signal.
 uniform float u_mottle_fix;
 
 float luma(vec3 rgb) { return 0.25 * rgb.r + 0.5 * rgb.g + 0.25 * rgb.b; }
@@ -353,7 +353,7 @@ void main() {
     vec2 cin = chroma(texelFetch(u_inTex, base, 0).rgb) - u_m_c;
 
     // The weight variances get the shaped boost; the blend dosage keeps the
-    // unscaled planes (decoupling, measured against a reflective decal).
+    // unscaled planes; the blend dosage is not raised with them.
     float wC1_2 = sigC1_2;
     float wC2_2 = sigC2_2;
     if (u_mottle_fix > 0.5) {

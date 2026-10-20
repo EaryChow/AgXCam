@@ -301,8 +301,8 @@ uniform sampler2D u_sigma_tex;
 // the +1.5 EV default (1.0 there) and clamped on the host exactly like the
 // S5-L ISO-model fold.
 uniform float u_ev_gain2;
-// Shaped dark-noise boost on the noise target (the sim's
-// shaped_dark_boost); mirrors the S5-C stage-1 weight-variances scale.
+// Shaped low-signal boost on the noise target, same form as the
+// S5-C stage-1 weight-variances scale.
 uniform float u_mottle_fix;
 
 const int CELL = 8;
