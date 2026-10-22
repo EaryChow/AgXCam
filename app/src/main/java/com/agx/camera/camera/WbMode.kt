@@ -14,6 +14,9 @@ object WbMode {
     /** Cells of the estimator's stride grid averaged into one median block. */
     const val BLOCK_CELLS = 8
 
+    /** Gate weight below which a block is left out of the weighted median. */
+    const val MIN_BLOCK_WEIGHT = 0.5f
+
     /** Cell responses of the sparse walk, grouped by block. */
     class Blocks(
         val rows: Int,
@@ -160,26 +163,47 @@ object WbMode {
     }
 
     /**
-     * Component-wise median of the valid blocks' neutrals, or null when no block
-     * carried signal. The median is taken per component, green stays at 1.
+     * Component-wise median of the valid block neutrals. With [weightOf], a
+     * block votes only when its gate weight reaches [MIN_BLOCK_WEIGHT]; blocks
+     * below it are left out entirely, so a large chromatic region (a screen,
+     * signage) cannot drag the estimate. When too few blocks survive, the
+     * unweighted median is used instead: an overwhelmingly chromatic scene is
+     * its own light and is estimated as such.
      */
-    fun medianNeutral(samples: Samples): FloatArray? {
+    fun medianNeutral(samples: Samples, weightOf: ((FloatArray) -> Float)? = null): FloatArray? {
         var count = 0
         for (i in 0 until samples.size) if (samples.valid[i]) count++
         if (count == 0) return null
         val red = DoubleArray(count)
         val blue = DoubleArray(count)
-        var j = 0
+        var kept = 0
+        val cell = FloatArray(3)
         for (i in 0 until samples.size) {
             if (!samples.valid[i]) continue
-            red[j] = samples.neutrals[i * 3].toDouble()
-            blue[j] = samples.neutrals[i * 3 + 2].toDouble()
-            j++
+            cell[0] = samples.neutrals[i * 3]
+            cell[1] = 1f
+            cell[2] = samples.neutrals[i * 3 + 2]
+            val keep = weightOf == null || weightOf(cell) >= MIN_BLOCK_WEIGHT
+            if (keep) {
+                red[kept] = samples.neutrals[i * 3].toDouble()
+                blue[kept] = samples.neutrals[i * 3 + 2].toDouble()
+                kept++
+            }
+        }
+        if (weightOf != null && kept * 2 < count) {
+            // Too little of the frame is white-lit: fall back to all blocks.
+            kept = 0
+            for (i in 0 until samples.size) {
+                if (!samples.valid[i]) continue
+                red[kept] = samples.neutrals[i * 3].toDouble()
+                blue[kept] = samples.neutrals[i * 3 + 2].toDouble()
+                kept++
+            }
         }
         return floatArrayOf(
-            median(red, red.size).toFloat(),
+            median(red, kept).toFloat(),
             1f,
-            median(blue, blue.size).toFloat()
+            median(blue, kept).toFloat()
         )
     }
 
@@ -196,11 +220,12 @@ object WbMode {
         colorMap: IntArray,
         daylight: FloatArray?,
         cellStride: Int,
-        whiteLevel: Int
+        whiteLevel: Int,
+        weightOf: ((FloatArray) -> Float)? = null
     ): FloatArray? {
         val blocks = scanBlocks(buffer, width, height, cellStride, whiteLevel)
         val samples = blockSamples(blocks, blackLevels, colorMap, daylight)
-        val neutral = medianNeutral(samples) ?: return null
+        val neutral = medianNeutral(samples, weightOf) ?: return null
         val layout = channels(colorMap, daylight)
         if (layout.greens.size != 2) return null
         val illuminant = FloatArray(GreyWorldEstimate.PHASE_COUNT) { 1f }

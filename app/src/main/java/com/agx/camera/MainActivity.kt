@@ -87,6 +87,10 @@ class MainActivity : AppCompatActivity() {
     // smoothed gains.
     @Volatile
     private var limitedAutoWb = false
+    // Weight the block-median estimate by the same gate: chromatic content
+    // (signage, a screen) votes with low weight, so it cannot move the light.
+    @Volatile
+    private var weightedEstimation = true
     @Volatile
     private var smoothedAdaptation = 1f
     // The estimator's latest product, stored for the dispatch to write
@@ -242,6 +246,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var daylightAnchorStartBtn: TextView
     private lateinit var daylightAnchorResetBtn: TextView
     private lateinit var limitedAwbCheckBox: CheckBox
+
+    private lateinit var weightedEstimationCheckBox: CheckBox
 
     private lateinit var orientationListener: OrientationEventListener
 
@@ -508,6 +514,7 @@ class MainActivity : AppCompatActivity() {
         daylightAnchorStartBtn = findViewById(R.id.daylight_anchor_start_btn)
         daylightAnchorResetBtn = findViewById(R.id.daylight_anchor_reset_btn)
         limitedAwbCheckBox = findViewById(R.id.limited_awb_checkbox)
+        weightedEstimationCheckBox = findViewById(R.id.weighted_estimation_checkbox)
         finishingCaptureOverlay = findViewById(R.id.finishing_capture_overlay)
         lensSwitchOverlay = findViewById(R.id.lens_switch_overlay)
         lensInfoOverlay = findViewById(R.id.lens_info_overlay)
@@ -635,6 +642,7 @@ class MainActivity : AppCompatActivity() {
         saveDngWithCapture = previewResPrefs.getBoolean(PREF_SAVE_DNG, false)
         CrashLogger.log(TAG, "saveDngWithCapture=$saveDngWithCapture")
         limitedAutoWb = previewResPrefs.getBoolean(PREF_LIMITED_WB, true)
+        weightedEstimation = previewResPrefs.getBoolean(PREF_WEIGHTED_ESTIMATION, true)
         clipAttenFactor = previewResPrefs.getFloat(PREF_CLIP_ATTEN, 0.1f).coerceIn(0f, 1f)
         dpcStrength = previewResPrefs.getFloat(PREF_S1_DPC, 0f).coerceIn(0f, 1f)
         rawNrStrength = previewResPrefs.getFloat(PREF_S3_RAW, 0f).coerceIn(0f, 1f)
@@ -818,6 +826,13 @@ class MainActivity : AppCompatActivity() {
             limitedAutoWb = limitedAwbCheckBox.isChecked
             previewResPrefs.edit().putBoolean(PREF_LIMITED_WB, limitedAutoWb).apply()
             CrashLogger.log(TAG, "limitedAWB: enabled=$limitedAutoWb")
+        }
+
+        weightedEstimationCheckBox.isChecked = weightedEstimation
+        weightedEstimationCheckBox.setOnClickListener {
+            weightedEstimation = weightedEstimationCheckBox.isChecked
+            previewResPrefs.edit().putBoolean(PREF_WEIGHTED_ESTIMATION, weightedEstimation).apply()
+            CrashLogger.log(TAG, "weightedEstimation: enabled=$weightedEstimation")
         }
 
         wbButton.setOnClickListener {
@@ -3570,9 +3585,14 @@ class MainActivity : AppCompatActivity() {
         // median of the per-block neutrals is the content-robust light, and
         // feeding it here means the existing dual-rate smoother, the gate
         // window and the neutral EMA apply to it unchanged.
+        val weightOf: ((FloatArray) -> Float)? = if (weightedEstimation) {
+            { neutral -> gateWeightOf(neutral) }
+        } else {
+            null
+        }
         val blockIlluminant = WbMode.medianIlluminant(
             buffer, w, h, previewRenderer.bayerBlackLevelPattern, colorMap,
-            daylight, cellStride, rawWhiteLevel
+            daylight, cellStride, rawWhiteLevel, weightOf
         )
         awbSmoother.step(blockIlluminant ?: estimate.illuminant, now)
         // Clamped as the product, through the estimator's own combine, so the array
@@ -3770,6 +3790,16 @@ class MainActivity : AppCompatActivity() {
     // blends in, and the target itself slides up the locus from the smoothed
     // CCT with the smoothed tint plus a warm scene bias. No temporal state is
     // kept here; the shared smoother governs every input.
+    // The limited-AWB gate's verdict on one block's neutral: 1 for a white
+    // light, 0 for chromatic content. Used to weight the estimator.
+    private fun gateWeightOf(neutral: FloatArray): Float {
+        val profile = rawColorProfile ?: return 1f
+        val xy = profile.estimateXyForNeutral(neutral) ?: return 1f
+        val duv = WhiteBalanceMath.signedLocusDistance(xy[0], xy[1]) ?: return 1f
+        val chroma = WhiteBalanceMath.chromaFromD65(xy[0], xy[1])
+        return WhiteBalanceMath.limitedAdaptation(chroma, kotlin.math.abs(duv[0]))
+    }
+
     private fun updateWbMode() {
         val profile = rawColorProfile ?: return
         val neutral = estimatorNeutral ?: return
@@ -6205,6 +6235,7 @@ override fun onResume() {
         // Limited auto white balance: gate the scene->D65 correction by how
         // much adaptation the estimated light earns (chromatic LEDs earn none).
         private const val PREF_LIMITED_WB = "limited_auto_wb"
+        private const val PREF_WEIGHTED_ESTIMATION = "weighted_estimation"
         // Low-pass on the degree of adaptation: ~1.5 s at the estimator's
         // ~0.5 s update cadence.
         private const val LIMITED_WB_SMOOTHING = 0.28f

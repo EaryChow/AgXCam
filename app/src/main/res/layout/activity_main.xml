@@ -1212,6 +1212,23 @@
                 android:textSize="10sp"
                 android:layout_marginBottom="8dp" />
 
+            <CheckBox
+                android:id="@+id/weighted_estimation_checkbox"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Weighted Estimation"
+                android:textColor="#FFFFFFFF"
+                android:textSize="12sp"
+                android:layout_marginBottom="2dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Weight the estimate by the same gate, so large chromatic content such as a screen or signage cannot move the white balance"
+                android:textColor="#FF888888"
+                android:textSize="10sp"
+                android:layout_marginBottom="8dp" />
+
             <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginBottom="8dp" />
 
             <!-- Thermal Settings -->

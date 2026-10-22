@@ -191,4 +191,41 @@ class WbModeTest {
         )
         assertNull(WbMode.medianNeutral(samples))
     }
+
+    @Test
+    fun medianNeutralDropsBlocksBelowTheGateWeight() {
+        val samples = WbMode.Samples(
+            neutrals = floatArrayOf(
+                0.50f, 1f, 2.00f,
+                0.52f, 1f, 2.02f,
+                0.20f, 1f, 4.00f,
+                0.18f, 1f, 4.10f
+            ),
+            valid = booleanArrayOf(true, true, true, true)
+        )
+        // The last two blocks read as coloured content and earn no weight.
+        // Two of four survive - exactly half - so the fallback does not apply.
+        val weightOf: (FloatArray) -> Float = { n -> if (n[0] > 0.3f) 1f else 0f }
+        val neutral = WbMode.medianNeutral(samples, weightOf)!!
+
+        assertEquals(0.51f, neutral[0], 1e-6f)
+        assertEquals(2.01f, neutral[2], 1e-6f)
+    }
+
+    @Test
+    fun medianNeutralFallsBackWhenTooFewBlocksSurvive() {
+        val samples = WbMode.Samples(
+            neutrals = floatArrayOf(
+                0.50f, 1f, 2.00f,
+                0.20f, 1f, 4.00f
+            ),
+            valid = booleanArrayOf(true, true)
+        )
+        // Nothing survives the gate; the unweighted median is the estimate.
+        val neutral = WbMode.medianNeutral(samples) { 0f }!!
+
+        assertEquals(0.35f, neutral[0], 1e-6f)
+        assertEquals(3.00f, neutral[2], 1e-6f)
+    }
+
 }

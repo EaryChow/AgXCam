@@ -224,7 +224,8 @@ object WhiteBalanceMath {
     // Signed offset of a chromaticity from the Planckian locus in CIE 1960 uv,
     // positive on the green side of the locus, together with the nearest locus
     // point's CCT. The locus and its normals are walked on a fixed ladder kept
-    // in tables; the mode asks for this once per estimator step.
+    // in tables; the mode asks for this once per estimator step, and the
+    // weighted estimator once per block.
     fun signedLocusDistance(x: Float, y: Float): DoubleArray? {
         val out = DoubleArray(2)
         return if (signedLocusDistance(x, y, out)) out else null
