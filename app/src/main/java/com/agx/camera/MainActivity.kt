@@ -118,6 +118,18 @@ class MainActivity : AppCompatActivity() {
     // sees a stable target.
     @Volatile
     private var limitedTargetXy: FloatArray? = null
+    // White-balance mode, refreshed on estimator steps: whether the frame is
+    // corrected rather than kept, and the chromaticity a corrected frame
+    // asserts. Held between steps so the per-frame dispatch sees one target.
+    @Volatile
+    private var modeActive = false
+    @Volatile
+    private var modeTargetXy: FloatArray? = null
+    // White-light weight from the gate's locus exemption on the smoothed
+    // estimate; it blends the corrected target in and carries no state of its
+    // own, so the existing temporal smoothing governs it.
+    @Volatile
+    private var modeWeight = 0f
     private val limitedGateWindow = FloatArray(3) { 0f }
     private var limitedGateIndex = 0
 
@@ -2905,6 +2917,12 @@ class MainActivity : AppCompatActivity() {
             val limitedDrivesRender = limitedAutoWb &&
                 currentWbMode == WhiteBalanceMode.AUTO &&
                 rawColorProfile != null && limitedHasReference
+            // The mode blends its assertion target in by the gate's own
+            // white-light weight, computed from the smoothed estimate: a
+            // near-locus light is a white light and takes the corrected
+            // target, an off-locus light keeps the limited chain's cast.
+            val modeTarget = modeTargetXy
+            val modeBlend = if (limitedDrivesRender && modeTarget != null) modeWeight else 0f
             val estimatorOwnsGains = currentWbMode == WhiteBalanceMode.AUTO &&
                 estimatorReady && !limitedDrivesRender
 
@@ -2944,9 +2962,23 @@ class MainActivity : AppCompatActivity() {
                 // lands on D65 either way.
                 val transformNeutral =
                     if (limitedDrivesRender) rawColorProfile?.daylightWhite() ?: neutral else neutral
-                val effectiveXy =
+                val baseTarget =
                     if (limitedDrivesRender) limitedTargetXy ?: sceneXy else sceneXy
-                rawColorProfile?.neutralTransformForSceneXy(transformNeutral, effectiveXy, adaptation)
+                // Ease between the keep target and the corrected target by the
+                // weight; at zero this is exactly the limited path.
+                val effectiveXy = if (modeBlend > 0f && modeTarget != null) {
+                    floatArrayOf(
+                        baseTarget[0] + modeBlend * (modeTarget[0] - baseTarget[0]),
+                        baseTarget[1] + modeBlend * (modeTarget[1] - baseTarget[1])
+                    )
+                } else {
+                    baseTarget
+                }
+                val effectiveAdaptation =
+                    if (modeBlend > 0f) adaptation + modeBlend * (1f - adaptation) else adaptation
+                rawColorProfile?.neutralTransformForSceneXy(
+                    transformNeutral, effectiveXy, effectiveAdaptation
+                )
             } else {
                 rawColorProfile?.neutralTransformForNeutral(neutral)
             }
@@ -2985,7 +3017,10 @@ class MainActivity : AppCompatActivity() {
                                 "wb=[${previewRenderer.wbGainR}, ${previewRenderer.wbGainG}, " +
                                 "${previewRenderer.wbGainB}] " +
                                 "mat=[${profileTransform.colorMatrix.m.joinToString { String.format("%.4f", it) }}]" +
-                        (if (limitedAutoWb && currentWbMode == WhiteBalanceMode.AUTO) " adapt=$adaptation" else "")
+                        (if (limitedAutoWb && currentWbMode == WhiteBalanceMode.AUTO)
+                            " adapt=${String.format("%.2f", adaptation)}" +
+                                " wbMode=${String.format("%.2f", modeBlend)}"
+                        else "")
                         )
                     }
                 } else if (gainsOk) {
@@ -3251,6 +3286,9 @@ class MainActivity : AppCompatActivity() {
             smoothedAdaptation = 1f
             limitedHasReference = false
             limitedTargetXy = null
+            modeActive = false
+            modeTargetXy = null
+            modeWeight = 0f
             for (i in limitedGateWindow.indices) limitedGateWindow[i] = 0f
             limitedGateIndex = 0
             rawColorProfile = profile
@@ -3419,6 +3457,9 @@ class MainActivity : AppCompatActivity() {
         smoothedAdaptation = 1f
         limitedHasReference = false
         limitedTargetXy = null
+        modeActive = false
+        modeTargetXy = null
+        modeWeight = 0f
         for (i in limitedGateWindow.indices) limitedGateWindow[i] = 0f
         limitedGateIndex = 0
         aeConvergedOnce = false
@@ -3525,7 +3566,15 @@ class MainActivity : AppCompatActivity() {
         // maturity, and a failed estimate must not age the session.
         estimatorStepsThisSession++
         val now = SystemClock.elapsedRealtimeNanos()
-        awbSmoother.step(estimate.illuminant, now)
+        // The illuminant stage is stepped from the block-median estimate: the
+        // median of the per-block neutrals is the content-robust light, and
+        // feeding it here means the existing dual-rate smoother, the gate
+        // window and the neutral EMA apply to it unchanged.
+        val blockIlluminant = WbMode.medianIlluminant(
+            buffer, w, h, previewRenderer.bayerBlackLevelPattern, colorMap,
+            daylight, cellStride, rawWhiteLevel
+        )
+        awbSmoother.step(blockIlluminant ?: estimate.illuminant, now)
         // Clamped as the product, through the estimator's own combine, so the array
         // the renderer holds is the one Estimate.phaseGains would describe for these
         // two stages. Multiplying here instead would leave the product unclamped
@@ -3692,6 +3741,11 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // The block-median estimate and the keep/correct decision run on the
+        // same frame and cadence as the mean estimate above. The mean chain is
+        // untouched and is exactly what a kept frame runs.
+        updateWbMode()
+
         if (logNow) {
             val greens = GreyWorldEstimate.greenPhases(colorMap)
             CrashLogger.log(
@@ -3705,7 +3759,41 @@ class MainActivity : AppCompatActivity() {
                     "colorGains=[${String.format("%.2f", colorGains[0])}," +
                     "${String.format("%.2f", colorGains[1])}," +
                     "${String.format("%.2f", colorGains[2])}] " +
-                    "neutral=[${estimatorNeutral?.joinToString { String.format("%.3f", it) } ?: "null"}]"
+                    "neutral=[${estimatorNeutral?.joinToString { String.format("%.3f", it) } ?: "null"}] " +
+                    "wbModeWeight=${String.format("%.2f", modeWeight)}"
+            )
+        }
+    }
+
+    // The corrected target's weight and chromaticity, both derived from the
+    // smoothed estimate: the gate's locus exemption sets how much the target
+    // blends in, and the target itself slides up the locus from the smoothed
+    // CCT with the smoothed tint plus a warm scene bias. No temporal state is
+    // kept here; the shared smoother governs every input.
+    private fun updateWbMode() {
+        val profile = rawColorProfile ?: return
+        val neutral = estimatorNeutral ?: return
+        val sceneXy = profile.estimateXyForNeutral(neutral) ?: return
+        val duv = WhiteBalanceMath.signedLocusDistance(sceneXy[0], sceneXy[1]) ?: return
+
+        // The gate's own white-light criterion on the smoothed estimate: a
+        // near-locus light is a white light and takes the corrected target; an
+        // off-locus light keeps the limited chain's cast. Both inputs come from
+        // the shared smoother, so no temporal state is duplicated here.
+        val weight = WhiteBalanceMath.duvExemption(kotlin.math.abs(duv[0]))
+        modeWeight = weight
+        modeTargetXy = if (weight > 0f) {
+            val (tx, ty) = WhiteBalanceMath.modeTargetXy(duv[0], duv[1])
+            floatArrayOf(tx, ty)
+        } else {
+            null
+        }
+        modeActive = weight > 0f
+        if (wbEstimateFrame % 90 == 0 || wbEstimateFrame <= 3) {
+            CrashLogger.log(
+                TAG, "wb mode: weight=${String.format("%.2f", weight)} " +
+                    "duv=${String.format("%+.4f", duv[0])} " +
+                    "cct=${duv[1].toInt()}"
             )
         }
     }
@@ -4074,7 +4162,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun logRenderDrift() {
         val mat = previewRenderer.bradfordMat
-        val tgt = limitedTargetXy
+        val tgt = if (modeActive) modeTargetXy else limitedTargetXy
         val drift = moved(driftPrevWbR, previewRenderer.wbGainR) ||
             moved(driftPrevWbB, previewRenderer.wbGainB) ||
             moved(driftPrevAdapt, smoothedAdaptation) ||

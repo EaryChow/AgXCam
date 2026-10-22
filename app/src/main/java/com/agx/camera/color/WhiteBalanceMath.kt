@@ -221,6 +221,94 @@ object WhiteBalanceMath {
         return (sceneXy[0] + (tx - locusXy[0])) to (sceneXy[1] + (ty - locusXy[1]))
     }
 
+    // Signed offset of a chromaticity from the Planckian locus in CIE 1960 uv,
+    // positive on the green side of the locus, together with the nearest locus
+    // point's CCT. The locus and its normals are walked on a fixed ladder kept
+    // in tables; the mode asks for this once per estimator step.
+    fun signedLocusDistance(x: Float, y: Float): DoubleArray? {
+        val out = DoubleArray(2)
+        return if (signedLocusDistance(x, y, out)) out else null
+    }
+
+    // The same result written into [out] as [signed duv, nearest CCT]; false
+    // when the chromaticity is outside the uv domain.
+    private fun signedLocusDistance(x: Float, y: Float, out: DoubleArray): Boolean {
+        require(out.size >= 2) { "the result needs a duv and a CCT slot" }
+        val d = -2.0 * x + 12.0 * y + 3.0
+        if (d <= 0.0) return false
+        val u = 4.0 * x / d
+        val v = 6.0 * y / d
+        val ladder = locusLadderUv
+        var best = 1e9
+        var bestIndex = 0
+        for (i in 0 until LOCUS_LADDER_SIZE) {
+            val du = u - ladder[2 * i]
+            val dv = v - ladder[2 * i + 1]
+            val dist = du * du + dv * dv
+            if (dist < best) {
+                best = dist
+                bestIndex = i
+            }
+        }
+        val normals = locusLadderNormal
+        val offsetU = u - ladder[2 * bestIndex]
+        val offsetV = v - ladder[2 * bestIndex + 1]
+        out[0] = offsetU * normals[2 * bestIndex] + offsetV * normals[2 * bestIndex + 1]
+        out[1] = LOCUS_LADDER_START_K + LOCUS_LADDER_STEP_K * bestIndex
+        return true
+    }
+
+    private val locusLadderUv: DoubleArray by lazy {
+        val out = DoubleArray(LOCUS_LADDER_SIZE * 2)
+        for (i in 0 until LOCUS_LADDER_SIZE) {
+            val (lu, lv) = planckianLocusUv(LOCUS_LADDER_START_K + LOCUS_LADDER_STEP_K * i)
+            out[2 * i] = lu
+            out[2 * i + 1] = lv
+        }
+        out
+    }
+
+    private val locusLadderNormal: DoubleArray by lazy {
+        val out = DoubleArray(LOCUS_LADDER_SIZE * 2)
+        for (i in 0 until LOCUS_LADDER_SIZE) {
+            val (nu, nv) = planckianLocusNormal(LOCUS_LADDER_START_K + LOCUS_LADDER_STEP_K * i)
+            out[2 * i] = nu
+            out[2 * i + 1] = nv
+        }
+        out
+    }
+
+    // Additive tint bias for warm scenes: none at or above 3700 K, the full
+    // 30 units at or below 3400 K, linear between.
+    fun ambienceTint(cct: Double): Double {
+        val t = ((AMBIENCE_CCT_ZERO - cct) / (AMBIENCE_CCT_ZERO - AMBIENCE_CCT_FULL))
+            .coerceIn(0.0, 1.0)
+        return AMBIENCE_TINT_MAX * t
+    }
+
+    // The target CCT of a corrected frame: a relative slide up the locus from
+    // the smoothed estimate's CCT, capped short of D65.
+    fun modeTargetCct(meanCct: Double): Double =
+        min(MODE_TARGET_CCT_CAP, meanCct + MODE_REL_SLIDE_K)
+
+    // Tint of that target in the kelvinToXy convention: the smoothed
+    // estimate's signed duv times 3000, plus the ambience bias.
+    fun modeTargetTint(blockDuv: Double, meanCct: Double): Double =
+        blockDuv * MODE_TINT_PER_DUV + ambienceTint(meanCct)
+
+    fun modeTargetXy(blockDuv: Double, meanCct: Double): Pair<Float, Float> =
+        kelvinToXy(
+            modeTargetCct(meanCct).toFloat(),
+            modeTargetTint(blockDuv, meanCct).toFloat()
+        )
+
+    // The gate's white-light criterion as a blend weight: 1 while a
+    // light's duv sits inside the near-locus white region, fading to 0
+    // across the exempt band. Colored lights (off the locus) earn 0.
+    fun duvExemption(duv: Double): Float =
+        (1.0 - smooth01((duv - DUV_FULL) / (DUV_ZERO - DUV_FULL)))
+            .toFloat().coerceIn(0f, 1f)
+
     private val D65_UV: Pair<Double, Double> =
         xyToUv(ColorMatrix.D65_X.toDouble(), ColorMatrix.D65_Y.toDouble())
 
@@ -232,7 +320,21 @@ object WhiteBalanceMath {
     // close in chroma, so the band between them is deliberate.
     private const val CHROMA_FULL = 0.052
     private const val CHROMA_ZERO = 0.072
-    const val ADAPT_TARGET_K = 5000.0
+    const val ADAPT_TARGET_K = 4900.0
+    // White-balance mode policy: a corrected frame asserts a target slid this
+    // far up the locus from the smoothed estimate's CCT, never reaching D65,
+    // with the same estimate's tint plus a warm scene bias.
+    private const val MODE_REL_SLIDE_K = 1250.0
+    private const val MODE_TARGET_CCT_CAP = 6490.0
+    private const val MODE_TINT_PER_DUV = 3000.0
+    private const val AMBIENCE_TINT_MAX = 30.0
+    private const val AMBIENCE_CCT_FULL = 3400.0
+    private const val AMBIENCE_CCT_ZERO = 3700.0
+    // The locus ladder the signed distance walks: 1500 K to 12000 K in 25 K
+    // steps, the same sampling locusNearest uses.
+    private const val LOCUS_LADDER_START_K = 1500.0
+    private const val LOCUS_LADDER_STEP_K = 25.0
+    private const val LOCUS_LADDER_SIZE = 421
 
     // Planck's law (2*h*c^2 factor dropped; only relative SPD matters):
     //   L(lambda, T) ~ lambda^-5 / (exp(c2 / (lambda * T)) - 1),  c2 = h*c/k = 1.438776877e-2 m K.
