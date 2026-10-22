@@ -362,20 +362,6 @@ class RawColorProfile(chars: CameraCharacteristics) {
     }
 
     /**
-     * The inverse of [sceneXyForNeutral]: the sensor neutral whose
-     * measured chromaticity is [sceneXy]. The cross-lens hold uses it
-     * to carry a validated illuminant from one lens's measurement
-     * space into another's: the chromaticity is lens-independent,
-     * and each lens renders it through its own corrected map, so
-     * every lens asserts the same light.
-     */
-    fun neutralForSceneXy(sceneXy: FloatArray): FloatArray? {
-        if (!available) return null
-        val cameraToXyz = cameraToXyzAtDaylight() ?: return null
-        return RawColorMath.neutralForSceneXy(cameraToXyz, sceneXy)
-    }
-
-    /**
      * The estimate's chromaticity without the chromaticity-triangle
      * rejection [sceneXyForNeutral] applies. Limited auto white balance
      * gates on the estimate's chroma, and a highly chromatic light (a
@@ -796,33 +782,6 @@ object RawColorMath {
             forwardMatrix1, forwardMatrix2, temperature1, temperature2,
             daylightWhite, D65_XY, D65_TEMP
         )
-    }
-
-    /**
-     * Inverse of measuring a neutral: the camera response whose measured
-     * chromaticity is [sceneXy], green-normalized. Carries a lens-
-     * independent chromaticity into a lens's gain space. Null when the
-     * chromaticity is degenerate or the map is singular - inverse()
-     * silently returns identity for near-singular input, which would
-     * otherwise pass a plausible-but-wrong neutral through.
-     */
-    fun neutralForSceneXy(cameraToXyz: Mat3, sceneXy: FloatArray): FloatArray? {
-        if (sceneXy.size < 2) return null
-        val x = sceneXy[0]
-        val y = sceneXy[1]
-        if (!x.isFinite() || !y.isFinite() || y <= 0f || x + y >= 1f) return null
-        val m = cameraToXyz.m
-        val det = m[0] * (m[4] * m[8] - m[5] * m[7]) -
-            m[1] * (m[3] * m[8] - m[5] * m[6]) +
-            m[2] * (m[3] * m[7] - m[4] * m[6])
-        if (!det.isFinite() || abs(det) < 1e-8f) return null
-        val v = ColorMatrix.mulMatVec(
-            ColorMatrix.inverse(cameraToXyz),
-            floatArrayOf(x / y, 1f, (1f - x - y) / y)
-        )
-        if (v.any { !it.isFinite() }) return null
-        if (v[1] <= 0f) return null
-        return floatArrayOf(v[0] / v[1], 1f, v[2] / v[1])
     }
 
     /**
