@@ -280,7 +280,7 @@ object WhiteBalanceMath {
     }
 
     // Additive tint bias for warm scenes: none at or above 3700 K, the full
-    // 30 units at or below 3400 K, linear between.
+    // 24 units at or below 3400 K, linear between.
     fun ambienceTint(cct: Double): Double {
         val t = ((AMBIENCE_CCT_ZERO - cct) / (AMBIENCE_CCT_ZERO - AMBIENCE_CCT_FULL))
             .coerceIn(0.0, 1.0)
@@ -328,7 +328,7 @@ object WhiteBalanceMath {
     private const val MODE_REL_SLIDE_K = 1250.0
     private const val MODE_TARGET_CCT_CAP = 6490.0
     private const val MODE_TINT_PER_DUV = 3000.0
-    private const val AMBIENCE_TINT_MAX = 30.0
+    private const val AMBIENCE_TINT_MAX = 24.0
     private const val AMBIENCE_CCT_FULL = 3400.0
     private const val AMBIENCE_CCT_ZERO = 3700.0
     // The locus ladder the signed distance walks: 1500 K to 12000 K in 25 K

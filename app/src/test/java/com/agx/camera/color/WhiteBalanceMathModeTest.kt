@@ -17,14 +17,14 @@ class WhiteBalanceMathModeTest {
 
     @Test
     fun ambienceTint_isFullAtAndBelowTheRampEnd() {
-        assertEquals(30.0, WhiteBalanceMath.ambienceTint(2900.0), epsilon)
-        assertEquals(30.0, WhiteBalanceMath.ambienceTint(2400.0), epsilon)
+        assertEquals(24.0, WhiteBalanceMath.ambienceTint(2900.0), epsilon)
+        assertEquals(24.0, WhiteBalanceMath.ambienceTint(2400.0), epsilon)
     }
 
     @Test
     fun ambienceTint_rampsAcrossTheBand() {
-        assertEquals(30.0, WhiteBalanceMath.ambienceTint(3350.0), 1e-6)
-        assertEquals(15.0, WhiteBalanceMath.ambienceTint(3550.0), 1e-6)
+        assertEquals(24.0, WhiteBalanceMath.ambienceTint(3350.0), 1e-6)
+        assertEquals(12.0, WhiteBalanceMath.ambienceTint(3550.0), 1e-6)
         assertEquals(0.0, WhiteBalanceMath.ambienceTint(3700.0), 1e-6)
     }
 
@@ -43,7 +43,7 @@ class WhiteBalanceMathModeTest {
     @Test
     fun modeTargetTint_addsTheBlockOffsetAndTheAmbienceBias() {
         // 0.004 duv is 12 tint units; 3000 K sits below the full-ramp end.
-        assertEquals(12.0 + 30.0,
+        assertEquals(12.0 + 24.0,
             WhiteBalanceMath.modeTargetTint(0.004, 3000.0), 1e-6)
         // Cool means carry no ambience bias.
         assertEquals(-6.0, WhiteBalanceMath.modeTargetTint(-0.002, 5200.0), 1e-6)
