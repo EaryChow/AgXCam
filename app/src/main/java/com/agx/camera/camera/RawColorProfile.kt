@@ -344,23 +344,6 @@ class RawColorProfile(chars: CameraCharacteristics) {
         return RawColorMath.xyFromXyz(ColorMatrix.mulMatVec(cameraToXyz, neutral))
     }
 
-    /** AsShotWhiteXY for the DNG pair writer: the neutral pushed through the
-     *  INVERSE of the (corrected) ColorMatrix1 the file itself ships - the
-     *  same CM1 a standard reader applies to AsShotNeutral. The spec asks
-     *  the two tags to be consistent with the calibration set, and readers
-     *  that prefer 50729 over the 50728+CM1 chain balance to this tag
-     *  directly: any disagreement becomes a white-balance split between
-     *  reader families. The daylight-blended [cameraToXyzAtDaylight] is the
-     *  render's adaptation model; what the file claims must go through the
-     *  shipped CM1 instead. */
-    fun dngSceneWhiteXy(neutralSensorRgb: FloatArray): FloatArray? {
-        if (!available) return null
-        val neutral = RawColorMath.normalize(neutralSensorRgb) ?: return null
-        val m = correctedColorMatrix1 ?: return null
-        val xyz = ColorMatrix.mulMatVec(ColorMatrix.inverse(m), neutral)
-        return RawColorMath.xyFromXyz(xyz)
-    }
-
     /**
      * The estimate's chromaticity without the chromaticity-triangle
      * rejection [sceneXyForNeutral] applies. Limited auto white balance

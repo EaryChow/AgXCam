@@ -5438,8 +5438,7 @@ override fun onResume() {
                         // file. Paired
                         // with the daylight-anchor-corrected ColorMatrix1/2,
                         // matrix-chain readers resolve the same white through
-                        // the corrected calibration. AsShotWhiteXY records
-                        // the same neutral's chromaticity.
+                        // the corrected calibration.
                         val sceneNeutral = lastDispatchFoldedWhite
                             ?: lastDispatchSceneNeutral
                         val gNorm = sceneNeutral[1]
@@ -5459,7 +5458,10 @@ override fun onResume() {
                             if (m != null) m.m.copyOf() else null
                         }
                         val correctedCm = if (cm1 != null && cm2 != null) cm1 + cm2 else null
-                        val dngXy = rawColorProfile?.dngSceneWhiteXy(sceneNeutral)
+                        val fwd1 = rawColorProfile?.dcpForwardMatrix1?.m?.copyOf()
+                        val fwd2 = rawColorProfile?.dcpForwardMatrix2?.m?.copyOf()
+                        val forwardMatrices =
+                            if (fwd1 != null && fwd2 != null) fwd1 + fwd2 else null
                         // Render recipe: the effective AgX params (which the
                         // active preset may have changed from the data-class
                         // defaults) and the NR slider strengths the pipeline
@@ -5529,8 +5531,8 @@ override fun onResume() {
                         val dngBytes = com.agx.camera.io.DngPairWriter.write(
                             bv, frame.width, frame.height,
                             templateRaw, chars, dngResult, metadata.exifOrientation,
-                            previewRenderer.exposureEv, jpegData, dngNeutral, dngXy,
-                            correctedCm, recipeJson, lastAppliedShadingMap
+                            previewRenderer.exposureEv, jpegData, dngNeutral,
+                            correctedCm, forwardMatrices, recipeJson, lastAppliedShadingMap
                         )
                         if (dngBytes != null) {
                             val dngUri = mediaStoreSaver.saveDng(dngBytes, metadata)

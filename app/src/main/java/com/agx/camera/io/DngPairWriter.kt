@@ -8,7 +8,7 @@ import com.agx.camera.camera.LensShadingData
  * pipeline processed.
  *
  * The file serves two consumers: standard readers (folded AsShotNeutral,
- * AsShotWhiteXY, the daylight-anchor corrected ColorMatrix1/2,
+ * the daylight-anchor corrected ColorMatrix1/2 with their ForwardMatrix,
  * BaselineExposure, the GainMap opcode) and offline reproduction (private
  * tag 55001, the render recipe: the exact transform, AgX params, and NR
  * strengths the pipeline consumed).
@@ -39,8 +39,8 @@ object DngPairWriter {
         baselineExposureEv: Float,
         thumbnailJpeg: ByteArray?,
         foldedNeutral: FloatArray?,
-        sceneXy: FloatArray?,
         correctedCm: FloatArray?,
+        forwardMatrices: FloatArray?,
         renderRecipeJson: String?,
         shadingMap: LensShadingData?
     ): ByteArray? {
@@ -82,7 +82,7 @@ object DngPairWriter {
             // template: the calibration is replaced with the daylight-anchor
             // corrected pair (the render whitens against the corrected
             // device truth, so the file must describe that same sensor), and
-            // ForwardMatrix was calibrated against the uncorrected pair.
+            // the template's ForwardMatrix belongs to the uncorrected pair.
             val drop = setOf(
                 256, 257, 258, 259, 262, 270, 273, 274, 277, 278, 279, 284, 317,
                 322, 323, 324, 325, 330, 34665, 34853, 34855, 33434, 50728, 50730,
@@ -121,23 +121,30 @@ object DngPairWriter {
                 for (v in correctedCm) cmData += sr(v.toDouble())
                 tlvs.add(Tlv(50721, 10, 9, cmData.copyOfRange(0, 72)))
                 tlvs.add(Tlv(50722, 10, 9, cmData.copyOfRange(72, 144)))
+                // ForwardMatrix is the same camera->XYZ chain the color
+                // matrices imply, pre-adapted to the D50 connection space.
+                // Readers that prefer it then take the calibrated path
+                // instead of rebuilding the chain from the matrices, and
+                // both paths land on the render's own white.
+                if (forwardMatrices != null && forwardMatrices.size >= 18) {
+                    var fmData = byteArrayOf()
+                    for (v in forwardMatrices) fmData += sr(v.toDouble())
+                    tlvs.add(Tlv(50964, 10, 9, fmData.copyOfRange(0, 72)))
+                    tlvs.add(Tlv(50965, 10, 9, fmData.copyOfRange(72, 144)))
+                }
             }
             // AsShotNeutral claims the white the render actually folded
             // (gains -> Bradford -> primaries transform inverted onto the sRGB white), so
             // a standard converter reproduces the app's look including the
-            // adaptation gate's deliberate residual color; AsShotWhiteXY
-            // records the same white's chromaticity through the shipped
-            // ColorMatrix1, keeping the two tags consistent with the
-            // calibration set for readers that prefer 50729.
+            // adaptation gate's deliberate residual color. It is the only
+            // white-balance tag written: the spec makes AsShotWhiteXY and
+            // AsShotNeutral mutually exclusive, and that white is a render
+            // state rather than an illuminant chromaticity, so stating it as
+            // one misdrives readers that adapt from it.
             if (foldedNeutral != null && foldedNeutral.size >= 3) {
                 val nr = Math.round(foldedNeutral[0] * 100000f).toLong()
                 val nb = Math.round(foldedNeutral[2] * 100000f).toLong()
                 tlvs.add(Tlv(50728, 5, 3, rat(nr, 100000L) + rat(1, 1L) + rat(nb, 100000L)))
-            }
-            if (sceneXy != null && sceneXy.size >= 2) {
-                val nx = Math.round(sceneXy[0] * 100000f).toLong()
-                val ny = Math.round(sceneXy[1] * 100000f).toLong()
-                tlvs.add(Tlv(50729, 5, 2, rat(nx, 100000L) + rat(ny, 100000L)))
             }
             if (Math.abs(baselineExposureEv) >= 0.005f) {
                 tlvs.add(
