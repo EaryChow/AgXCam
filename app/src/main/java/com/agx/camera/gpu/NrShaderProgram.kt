@@ -30,6 +30,7 @@ class NrShaderProgram {
     private var uShoulderLoc = 0
     private var uVibranceLoc = 0
     private var uClipAttenLoc = 0
+    private var uDitherLoc = 0
 
     private val quadVertices: FloatBuffer = ByteBuffer.allocateDirect(QUAD_COORDS.size * 4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer().put(QUAD_COORDS).also { it.position(0) }
@@ -61,6 +62,7 @@ class NrShaderProgram {
         uShoulderLoc = GLES20.glGetUniformLocation(programId, "u_shoulder")
         uVibranceLoc = GLES20.glGetUniformLocation(programId, "u_vibrance")
         uClipAttenLoc = GLES20.glGetUniformLocation(programId, "u_clip_atten_factor")
+        uDitherLoc = GLES20.glGetUniformLocation(programId, "u_dither")
 
         Log.d(TAG, "NR shader program created: $programId")
         com.agx.camera.CrashLogger.log(TAG, "Program created: nr=$programId")
@@ -78,7 +80,8 @@ class NrShaderProgram {
         logMidgray: Float, displayMidgray: Float,
         contrast: Float, toe: Float, shoulder: Float,
         vibrance: Float,
-        clipAttenFactor: Float
+        clipAttenFactor: Float,
+        dither: Float = 0f
     ) {
         GLES20.glUseProgram(programId)
 
@@ -102,6 +105,7 @@ class NrShaderProgram {
         GLES20.glUniform1f(uShoulderLoc, shoulder)
         GLES20.glUniform1f(uVibranceLoc, vibrance)
         GLES20.glUniform1f(uClipAttenLoc, clipAttenFactor)
+        GLES20.glUniform1f(uDitherLoc, dither)
 
         val posHandle = GLES20.glGetAttribLocation(programId, "a_position")
         val texHandle = GLES20.glGetAttribLocation(programId, "a_texCoord")
@@ -173,6 +177,9 @@ uniform float u_toe;
 uniform float u_shoulder;
 uniform float u_vibrance;
 uniform float u_clip_atten_factor;
+// Output-quantization TPDF dither: amplitude is one 8-bit step, 0 is a
+// bit-exact bypass. A switch only, never scaled.
+uniform float u_dither;
 
 ${AgxCoreGlsl.CORE_HELPERS}
 
@@ -195,10 +202,25 @@ vec3 clippingNeutralize(vec3 norm, float atten) {
     return (norm - vec3(peak)) * attenuation + vec3(peak);
 }
 
+// Two uniforms from the output coordinate, differenced into the triangular
+// pdf of support +-1 (hash without sine, deterministic per pixel).
+float tpdfDither(vec2 p) {
+    vec2 q = fract(p * vec2(0.1031, 0.1030) + 0.17);
+    q += dot(q, q.yx + 33.33);
+    float u1 = fract((q.x + q.y) * q.x);
+    vec2 r = fract(p.yx * vec2(0.1373, 0.1731) + 0.41);
+    r += dot(r, r.yx + 19.19);
+    float u2 = fract((r.x + r.y) * r.y);
+    return u1 - u2;
+}
+
 void main() {
     vec3 center = texture(u_demosaic_tex, v_texCoord).rgb;
     center = clippingNeutralize(center, u_clip_atten_factor);
-    fragColor = vec4(agxFormationNorm(center), 1.0);
+    vec3 formed = agxFormationNorm(center);
+    // One 8-bit step: the quantization this write lands on.
+    if (u_dither > 0.0) formed += u_dither * tpdfDither(gl_FragCoord.xy);
+    fragColor = vec4(formed, 1.0);
 }
 """
 

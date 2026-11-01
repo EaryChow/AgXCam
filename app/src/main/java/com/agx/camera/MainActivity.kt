@@ -142,6 +142,8 @@ class MainActivity : AppCompatActivity() {
     private var photoOutput = PhotoOutputSettings()
     // Leading factor of the demosaic clipping-neutralization exponent (factor * 5).
     private var clipAttenFactor = 0.1f
+    // Output-quantization TPDF dither for the still write, default off.
+    private var outputDither = false
     private var cameraReady = false
     private var openingCamera = false
     private var settingsPanelOpen = false
@@ -269,6 +271,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var criticalThermalOverlay: TextView
     private lateinit var thermalProtectionSwitch: android.widget.Switch
     private lateinit var saveDngSwitch: android.widget.Switch
+    private lateinit var outputDitherCheckbox: android.widget.CheckBox
     // Measurement switches. All default off; nothing here touches the pipeline
     // until it is explicitly armed, and the off state is bit-identical.
     @Volatile private var measurementEnabled = false
@@ -568,6 +571,7 @@ class MainActivity : AppCompatActivity() {
         criticalThermalOverlay = findViewById(R.id.critical_thermal_overlay)
         thermalProtectionSwitch = findViewById(R.id.thermal_protection_switch)
         saveDngSwitch = findViewById(R.id.save_dng_switch)
+        outputDitherCheckbox = findViewById(R.id.output_dither_checkbox)
         criticalBlinkWarning = findViewById(R.id.critical_blink_warning)
         criticalBlinkController = CriticalBlinkController(mainHandler) { visible ->
             criticalBlinkWarning.visibility = if (visible) View.VISIBLE else View.GONE
@@ -628,6 +632,7 @@ class MainActivity : AppCompatActivity() {
         maxPreviewDimensions = getMaxPreviewDimensions()
         thermalProtectionEnabled = previewResPrefs.getBoolean(PREF_THERMAL_PROTECTION_ENABLED, true)
         saveDngWithCapture = previewResPrefs.getBoolean(PREF_SAVE_DNG, false)
+        outputDither = previewResPrefs.getBoolean(PREF_OUTPUT_DITHER, false)
         CrashLogger.log(TAG, "saveDngWithCapture=$saveDngWithCapture")
         limitedAutoWb = previewResPrefs.getBoolean(PREF_LIMITED_WB, true)
         weightedEstimation = previewResPrefs.getBoolean(PREF_WEIGHTED_ESTIMATION, true)
@@ -775,6 +780,11 @@ class MainActivity : AppCompatActivity() {
         saveDngSwitch.setOnClickListener {
             saveDngWithCapture = saveDngSwitch.isChecked
             previewResPrefs.edit().putBoolean(PREF_SAVE_DNG, saveDngWithCapture).apply()
+        }
+        outputDitherCheckbox.isChecked = outputDither
+        outputDitherCheckbox.setOnClickListener {
+            outputDither = outputDitherCheckbox.isChecked
+            previewResPrefs.edit().putBoolean(PREF_OUTPUT_DITHER, outputDither).apply()
         }
         // Cold start with protection already off and the battery already warm:
         // derive the tier + render the corner strip immediately instead of
@@ -5031,6 +5041,7 @@ override fun onResume() {
             agxToe = previewRenderer.agxToe,
             agxShoulder = previewRenderer.agxShoulder,
             agxVibrance = previewRenderer.agxVibrance,
+            agxDither = if (outputDither) 1f / 255f else 0f,
             isFrontCamera = previewRenderer.isFrontCamera
         )
     }
@@ -5512,6 +5523,10 @@ override fun onResume() {
                             o.put("s5_luma", outNrStrength.toDouble())
                             o.put("s5_chroma", outNrChromaStrength.toDouble())
                             o.put("clip_atten", clipAttenFactor.toDouble())
+                            // The step the 8-bit write was dithered by (0 =
+                            // bypass), so a file reproduction knows whether the
+                            // JPEG carries it.
+                            o.put("dither", if (outputDither) 1.0 / 255.0 else 0.0)
                             // The EV the render applied: AgX exposure and the
                             // S5-W noise target both ride it, so it is part
                             // of the reproduction state, not just the tag.
@@ -5615,6 +5630,8 @@ override fun onResume() {
         val agxToe: Float,
         val agxShoulder: Float,
         val agxVibrance: Float,
+        // Output dither for the still write: one 8-bit step, 0 = bypass.
+        val agxDither: Float,
         val isFrontCamera: Boolean = false
     ) {
         override fun equals(other: Any?) = this === other
@@ -6085,6 +6102,8 @@ override fun onResume() {
         private const val PREF_STARTUP_PRESET = "startup_preset"
         private const val PREF_THERMAL_PROTECTION_ENABLED = "thermal_protection_enabled"
         private const val PREF_SAVE_DNG = "save_dng_with_capture"
+        // Output dither, persisted like the other capture switches.
+        private const val PREF_OUTPUT_DITHER = "output_dither"
 
     /**
      * Captured-frame attachments kept in Downloads. Three is enough to hold the

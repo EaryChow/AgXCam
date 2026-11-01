@@ -904,6 +904,22 @@
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Photo Output" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
 
             <TextView android:id="@+id/jpeg_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="JPEG Quality  85" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <CheckBox
+                android:id="@+id/output_dither_checkbox"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Output Dither"
+                android:textColor="#FFFFFFFF"
+                android:textSize="12sp"
+                android:layout_marginBottom="2dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Triangular dither of one 8-bit step before quantization (stills only)"
+                android:textColor="#FF888888"
+                android:textSize="10sp"
+                android:layout_marginBottom="6dp" />
             <SeekBar android:id="@+id/jpeg_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="1" android:max="100" android:progress="85" android:layout_marginBottom="4dp" />
 
             <Spinner

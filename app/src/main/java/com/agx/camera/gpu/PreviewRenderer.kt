@@ -903,6 +903,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val agxLogMidgray: Float, val agxDisplayMidgray: Float,
         val agxContrast: Float, val agxToe: Float, val agxShoulder: Float,
         val agxVibrance: Float,
+        // Output dither for the still write: one 8-bit step, 0 = bypass.
+        val agxDither: Float,
         val resultRef: AtomicReference<Bitmap?>,
         val latch: CountDownLatch
     )
@@ -923,7 +925,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             session.agxLogMin, session.agxLogMax,
             session.agxLogMidgray, session.agxDisplayMidgray,
             session.agxContrast, session.agxToe, session.agxShoulder,
-            session.agxVibrance,
+            session.agxVibrance, session.agxDither,
             resultRef, latch
         )
         hasNewFrame = true
@@ -3108,7 +3110,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         rawCaptureReq.agxLogMidgray, rawCaptureReq.agxDisplayMidgray,
                         rawCaptureReq.agxContrast, rawCaptureReq.agxToe, rawCaptureReq.agxShoulder,
                         rawCaptureReq.agxVibrance,
-                        clipAttenFactor
+                        clipAttenFactor,
+                        dither = rawCaptureReq.agxDither
                     )
                     logGlError("raw after nrShader.draw", bayerRenderCount)
 
