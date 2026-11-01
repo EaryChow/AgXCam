@@ -114,7 +114,7 @@ class Camera2Manager(private val context: Context) {
     // rate in case the HAL updates it with focus distance. The callback carries
     // RGBA16F half-float pixels already permuted per CFA and Y-flipped, ready
     // for a single glTexImage2D upload.
-    var onLensShadingMapAvailable: ((ShortArray, Int, Int) -> Unit)? = null
+    var onLensShadingMapAvailable: ((ShortArray, Int, Int, LensShadingData) -> Unit)? = null
     private var lsmParser: RawMetadataParser? = null
     private var lsmMapAvailable = false
     private var lsmFrameCount = 0
@@ -1709,7 +1709,7 @@ CaptureRequest.CONTROL_AWB_MODE_SHADE -> "SHADE"
                     if (data != null && data.available) {
                         onLensShadingMapAvailable?.invoke(
                             data.toRgba16fFlipped(parser.bayerPattern),
-                            data.width, data.height
+                            data.width, data.height, data
                         )
                         if (!lsmMapAvailable) {
                             lsmMapAvailable = true

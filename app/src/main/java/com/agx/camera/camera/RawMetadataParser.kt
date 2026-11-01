@@ -260,6 +260,15 @@ data class LensShadingData(
     val height: Int,
     val available: Boolean
 ) {
+    /** The four CFA-phase grids in sensor row order, index
+     *  (row and 1) * 2 + (col and 1): the form a GainMap opcode addresses
+     *  with RowPitch/ColPitch 2, and the form the DNG writer serialises. */
+    fun phaseGains(bayerPattern: BayerPattern): Array<Array<FloatArray>> {
+        val perm = channelPermutation(bayerPattern)
+        val byPhase = arrayOf(rGains, grGains, gbGains, bGains)
+        return Array(4) { p -> byPhase[perm[p]] }
+    }
+
     fun toRgba16fFlipped(bayerPattern: BayerPattern): ShortArray {
         val perm = channelPermutation(bayerPattern)
         val pixels = ShortArray(width * height * 4)

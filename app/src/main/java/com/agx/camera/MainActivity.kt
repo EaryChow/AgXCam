@@ -192,6 +192,9 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var halMapStatus = HalMapStatus.UNKNOWN
     @Volatile private var lensShadingStrength = 1f
     @Volatile private var lastHalMapPixels: ShortArray? = null
+    // The same map before the GL upload transform (unflipped, per CFA
+    // phase), which is the form the DNG writer serialises.
+    @Volatile private var lastHalShadingData: LensShadingData? = null
     @Volatile private var lastHalMapWidth = 0
     @Volatile private var lastHalMapHeight = 0
     private var lastEstimatorMap: LensShadingData? = null
@@ -1254,7 +1257,7 @@ class MainActivity : AppCompatActivity() {
                     "pattern=${rawBayerPattern.label} white=$rawWhiteLevel"
             )
             lensShadingEstimator.start(w, h, rawBayerPattern, rawWhiteLevel, rawBlackLevel)
-            if (!useStockMap) previewRenderer.resetLensShading()
+            if (!useStockMap) resetAppliedShading()
             updateLensShadingUI()
         }
 
@@ -1275,7 +1278,7 @@ class MainActivity : AppCompatActivity() {
             lensShadingMapPersisted = false
             lensShadingEstimator.reset()
             if (lens != null) deleteLensShadingPersistence(lens.cameraId)
-            if (!useStockMap) previewRenderer.resetLensShading()
+            if (!useStockMap) resetAppliedShading()
             CrashLogger.log(TAG, "lensShading: reset")
             updateLensShadingUI()
         }
@@ -3216,7 +3219,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        camera2Manager.onLensShadingMapAvailable = { pixels, w, h ->
+        camera2Manager.onLensShadingMapAvailable = { pixels, w, h, data ->
             // A usable (non-identity) HAL map exists on this device: record it,
             // cancel the "no map" grace timer, and in AUTO mode let the stock
             // map take over. If the user has explicitly chosen the sampled map,
@@ -3227,9 +3230,11 @@ class MainActivity : AppCompatActivity() {
             lastHalMapPixels = pixels
             lastHalMapWidth = w
             lastHalMapHeight = h
+            lastHalShadingData = data
             if (useStockMap) {
                 if (::lensShadingEstimator.isInitialized) lensShadingEstimator.pause()
                 previewRenderer.submitLensShadingMap(pixels, w, h)
+                lastAppliedShadingMap = data
             }
             mainHandler.post { updateLensShadingUI() }
         }
@@ -3340,7 +3345,14 @@ class MainActivity : AppCompatActivity() {
             estimatorReady = false
             // A new lens on the same renderer: start from the identity no-op
             // until its own shading map arrives with the first CaptureResults.
-            previewRenderer.resetLensShading()
+            // The cached HAL map belongs to the lens that supplied it, so it
+            // goes too - otherwise choosing stock before this lens's first
+            // map lands re-applies the previous lens's correction.
+            resetAppliedShading()
+            lastHalMapPixels = null
+            lastHalShadingData = null
+            lastHalMapWidth = 0
+            lastHalMapHeight = 0
 
             // Lens shading: fresh estimator per lens; restore a previously learned
             // map from disk. In AUTO/STOCK on a device that emits a usable HAL
@@ -3691,6 +3703,15 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    /** Drop the renderer's shading correction to the identity no-op. The
+     *  recorded map - what the DNG pair writer claims the file needs - must
+     *  go with it, or a capture taken before the next map arrives ships
+     *  another lens's (or another source's) correction. */
+    private fun resetAppliedShading() {
+        previewRenderer.resetLensShading()
+        lastAppliedShadingMap = null
+    }
+
     private fun applyLensShadingStrengthLive() {
         if (useStockMap) return
         lastEstimatorMap?.let { submitSampledMap(it) }
@@ -3866,14 +3887,15 @@ class MainActivity : AppCompatActivity() {
             val pixels = lastHalMapPixels
             if (pixels != null) {
                 previewRenderer.submitLensShadingMap(pixels, lastHalMapWidth, lastHalMapHeight)
+                lastAppliedShadingMap = lastHalShadingData
             } else {
-                previewRenderer.resetLensShading()
+                resetAppliedShading()
             }
         } else {
             lensShadingEstimator.resume()
             autoStartSamplingIfNeeded()
             val m = lastEstimatorMap
-            if (m != null) submitSampledMap(m) else previewRenderer.resetLensShading()
+            if (m != null) submitSampledMap(m) else resetAppliedShading()
         }
         updateLensShadingUI()
     }
@@ -3915,7 +3937,7 @@ class MainActivity : AppCompatActivity() {
         lensShadingUiFrameCount = 0
         lastEstimatorMap = null
         lensShadingMapPersisted = false
-        if (!useStockMap) previewRenderer.resetLensShading()
+        if (!useStockMap) resetAppliedShading()
         CrashLogger.log(
             TAG, "lensShading: auto-start sampling ${rawSensorWidth}x${rawSensorHeight} " +
                 "pattern=${rawBayerPattern.label} strength=${lensShadingStrength}"
@@ -5490,6 +5512,19 @@ override fun onResume() {
                             o.put("s5_luma", outNrStrength.toDouble())
                             o.put("s5_chroma", outNrChromaStrength.toDouble())
                             o.put("clip_atten", clipAttenFactor.toDouble())
+                            // The EV the render applied: AgX exposure and the
+                            // S5-W noise target both ride it, so it is part
+                            // of the reproduction state, not just the tag.
+                            o.put("exposure_ev", previewRenderer.exposureEv.toDouble())
+                            // Which shading map the file carries, and the
+                            // strength it was scaled by before upload.
+                            lastAppliedShadingMap?.let {
+                                o.put("shading_strength", (if (useStockMap) 1f else
+                                    lensShadingStrength).toDouble())
+                                o.put("shading_source", if (useStockMap) "stock" else "sampled")
+                                o.put("shading_w", it.width)
+                                o.put("shading_h", it.height)
+                            }
                             // The exact capture-time color transform: the
                             // folded white alone pins the white point, but
                             // the full transform is not inferable from it
@@ -5532,7 +5567,8 @@ override fun onResume() {
                             bv, frame.width, frame.height,
                             templateRaw, chars, dngResult, metadata.exifOrientation,
                             previewRenderer.exposureEv, jpegData, dngNeutral,
-                            correctedCm, forwardMatrices, recipeJson, lastAppliedShadingMap
+                            correctedCm, forwardMatrices, recipeJson, lastAppliedShadingMap,
+                            rawBayerPattern
                         )
                         if (dngBytes != null) {
                             val dngUri = mediaStoreSaver.saveDng(dngBytes, metadata)
