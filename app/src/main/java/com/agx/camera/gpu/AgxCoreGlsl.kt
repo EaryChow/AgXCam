@@ -90,7 +90,13 @@ vec3 vibrance(vec3 rgb, float strength) {
     const vec3 coeffs = vec3(0.2126, 0.7152, 0.0722);
     float luminance = dot(rgb, coeffs);
     float chrominance = max(rgb.r, max(rgb.g, rgb.b)) - luminance;
-    float mask = (1.0 - pow(max(chrominance, 0.0), 0.5)) * 1.0 - pow(1.0 - pow(luminance, 1.5), 100.0);
+    // Both terms fade out at the top of the range by construction. pow() is
+    // undefined on a negative base, and luminance passes 1.0 at the top of the
+    // sigmoid - more often as contrast or exposure rises - so an unguarded
+    // base yields a NaN that the following clamp renders as zero.
+    float lumClamped = clamp(luminance, 0.0, 1.0);
+    float topEndFade = pow(max(1.0 - pow(lumClamped, 1.5), 0.0), 100.0);
+    float mask = (1.0 - pow(max(chrominance, 0.0), 0.5)) * 1.0 - topEndFade;
     float t = 1.0 + strength * mask;
     return luminance + (rgb - luminance) * t;
 }
