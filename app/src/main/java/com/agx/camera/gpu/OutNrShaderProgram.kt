@@ -9,7 +9,7 @@ import java.nio.FloatBuffer
 /**
  * Stage 5-L - post-demosaic luma denoise: weighted YC1C2 + SWGF
  * self-guided filter (I=p, 8 side windows, min-variance window chosen) with a
- * Fast-GF style separable box-statistic prefilter. The pass runs twice with a
+ * separable box-statistic prefilter. The pass runs twice with a
  * beta=0.3 noise return; round 2 raises the epsilon multiplier to 1.96 = (kappa x 1.4)^2 -
  * "kappa x 1.4 on round 2" scales sigma, and epsilon proportional to sigma_hat^2 so the variance-domain
  * multiplier is the square.  Host side (PreviewRenderer.runStage5) runs both
@@ -21,25 +21,39 @@ import java.nio.FloatBuffer
  * (beta-composed) input and this filtered result:
  * `mix(rgbIn, outRgb, u_strength)`, so 0..100 maps to 0%..100% of the filter.
  *
- * Passes (all one texel per output pixel, same resolution as the demosaic FBO):
- *  statsH : horizontal 5-tap box of Y (and Y^2) of the (possibly beta-blended)
- *           iteration input.
- *  statsV : vertical 5-tap box of the statsH output -> full 5x5 box stats.
- *  main   : YC1C2 -> per-pixel epsilon = scale*(sigma_hat^2 + sigma_dm^2), pick the min-variance side
- *           window (sampling statsV at 8 window centres), filter Y, keep chroma,
- *           and invert back to RGB.
+ * Passes (statsH/statsV/main run one texel per output pixel, same resolution as
+ * the demosaic FBO; the two guided passes run on a grid whose step tracks the
+ * window radius, see GUIDED_STEP_MAX):
+ *  statsH  : horizontal 5-tap box of Y (and Y^2) of the (possibly beta-blended)
+ *            iteration input.
+ *  statsV  : vertical 5-tap box of the statsH output -> full 5x5 box stats.
+ *  guidedH : horizontal box over the statsV output, sampling every
+ *            u_guided_step full-res texels, writing the mean variance share a
+ *            and the mean offset b of the self-guided filter for the grid texel.
+ *  guidedV : vertical box over guidedH on the same grid, one grid cell per
+ *            tap -> the final (a, b) plane the main pass upsamples.
+ *  main    : YC1C2 -> per-pixel epsilon = scale*(sigma_hat^2 + sigma_dm^2), pick the min-variance side
+ *            window (sampling statsV at 8 window centres), filter Y, keep chroma,
+ *            and invert back to RGB. The support-shrinkage gate falls back to the
+ *            pixel's own luma wherever the centre window is cut by structure.
+ *            With u_guided set, the luma estimate is the bilinearly upsampled
+ *            (a, b) plane instead of the per-pixel window blend; the gate then
+ *            runs on the same statsV centre window underneath it.
  */
 class OutNrShaderProgram {
 
     private var statsHProgramId = 0
     private var statsVProgramId = 0
+    private var guidedHProgramId = 0
+    private var guidedVProgramId = 0
     private var mainProgramId = 0
     private var ready = false
 
     /**
-     * The main filter program only. The two stats programs are captured once per
-     * frame into a 1D reduction rather than run per pixel, and the budget counts
-     * per-texel work, so charging their size against this pass would overstate it.
+     * The main filter program only. The statistics programs are captured once
+     * per frame into a 1D reduction rather than run per pixel, and the budget
+     * counts per-texel work, so charging their size against this pass would
+     * overstate it.
      */
     fun budgetProgramId(): Int = mainProgramId
 
@@ -55,9 +69,30 @@ class OutNrShaderProgram {
     private var vWinScaleLoc = 0
     private var vFlagAvailLoc = 0
 
+    private var gHStatsTexLoc = 0
+    private var gHSigmaTexLoc = 0
+    private var gHSigmaSizeLoc = 0
+    private var gHOutSizeLoc = 0
+    private var gHLumaEpsScaleLoc = 0
+    private var gHSigmaDm2Loc = 0
+    private var gHInverseRange2Loc = 0
+    private var gHEpsScaleLoc = 0
+    private var gHUseIsoSigmaLoc = 0
+    private var gHIsoModelALoc = 0
+    private var gHIsoModelBLoc = 0
+    private var gHEpsBoostLoc = 0
+    private var gHWinScaleLoc = 0
+    private var gHGuidedStepLoc = 0
+
+    private var gVStatsTexLoc = 0
+    private var gVWinScaleLoc = 0
+    private var gVGuidedStepLoc = 0
+
     private var mInTexLoc = 0
     private var mBaseTexLoc = 0
     private var mStatsTexLoc = 0
+    private var mGuidedTexLoc = 0
+    private var mGuidedLoc = 0
     private var mSigmaTexLoc = 0
     private var mSigmaSizeLoc = 0
     private var mOutSizeLoc = 0
@@ -72,6 +107,10 @@ class OutNrShaderProgram {
     private var mWinScaleLoc = 0
     private var mEpsBoostLoc = 0
     private var mStrengthLoc = 0
+    private var mShrinkLoc = 0
+    private var mShrinkRefLoc = 0
+    private var mShrinkTauLoc = 0
+    private var mShrinkCapLoc = 0
     private var mFlagTexLoc = 0
     private var mFlagAvailLoc = 0
 
@@ -83,8 +122,12 @@ class OutNrShaderProgram {
     fun create() {
         statsHProgramId = createProgram(VERTEX_SHADER, STATS_H_FRAGMENT)
         statsVProgramId = createProgram(VERTEX_SHADER, STATS_V_FRAGMENT)
+        guidedHProgramId = createProgram(VERTEX_SHADER, GUIDED_H_FRAGMENT)
+        guidedVProgramId = createProgram(VERTEX_SHADER, GUIDED_V_FRAGMENT)
         mainProgramId = createProgram(VERTEX_SHADER, MAIN_FRAGMENT)
-        if (statsHProgramId == 0 || statsVProgramId == 0 || mainProgramId == 0) {
+        if (statsHProgramId == 0 || statsVProgramId == 0 || guidedHProgramId == 0 ||
+            guidedVProgramId == 0 || mainProgramId == 0
+        ) {
             Log.e(TAG, "Failed to create Stage-5 denoise programs")
             com.agx.camera.CrashLogger.log(TAG, "Failed to create Stage-5 denoise programs")
             return
@@ -102,9 +145,30 @@ class OutNrShaderProgram {
         vWinScaleLoc = GLES20.glGetUniformLocation(statsVProgramId, "u_win_scale")
         vFlagAvailLoc = GLES20.glGetUniformLocation(statsVProgramId, "u_flag_available")
 
+        gHStatsTexLoc = GLES20.glGetUniformLocation(guidedHProgramId, "u_statsTex")
+        gHSigmaTexLoc = GLES20.glGetUniformLocation(guidedHProgramId, "u_sigmaTex")
+        gHSigmaSizeLoc = GLES20.glGetUniformLocation(guidedHProgramId, "u_sigmaSize")
+        gHOutSizeLoc = GLES20.glGetUniformLocation(guidedHProgramId, "u_outSize")
+        gHLumaEpsScaleLoc = GLES20.glGetUniformLocation(guidedHProgramId, "u_lumaEpsScale")
+        gHSigmaDm2Loc = GLES20.glGetUniformLocation(guidedHProgramId, "u_sigma_dm2")
+        gHInverseRange2Loc = GLES20.glGetUniformLocation(guidedHProgramId, "u_inverse_range2")
+        gHEpsScaleLoc = GLES20.glGetUniformLocation(guidedHProgramId, "u_epsScale")
+        gHUseIsoSigmaLoc = GLES20.glGetUniformLocation(guidedHProgramId, "u_use_iso_sigma")
+        gHIsoModelALoc = GLES20.glGetUniformLocation(guidedHProgramId, "u_iso_model_a")
+        gHIsoModelBLoc = GLES20.glGetUniformLocation(guidedHProgramId, "u_iso_model_b")
+        gHEpsBoostLoc = GLES20.glGetUniformLocation(guidedHProgramId, "u_eps_boost")
+        gHWinScaleLoc = GLES20.glGetUniformLocation(guidedHProgramId, "u_win_scale")
+        gHGuidedStepLoc = GLES20.glGetUniformLocation(guidedHProgramId, "u_guided_step")
+
+        gVStatsTexLoc = GLES20.glGetUniformLocation(guidedVProgramId, "u_statsTex")
+        gVWinScaleLoc = GLES20.glGetUniformLocation(guidedVProgramId, "u_win_scale")
+        gVGuidedStepLoc = GLES20.glGetUniformLocation(guidedVProgramId, "u_guided_step")
+
         mInTexLoc = GLES20.glGetUniformLocation(mainProgramId, "u_inTex")
         mBaseTexLoc = GLES20.glGetUniformLocation(mainProgramId, "u_baseTex")
         mStatsTexLoc = GLES20.glGetUniformLocation(mainProgramId, "u_statsTex")
+        mGuidedTexLoc = GLES20.glGetUniformLocation(mainProgramId, "u_guidedTex")
+        mGuidedLoc = GLES20.glGetUniformLocation(mainProgramId, "u_guided")
         mSigmaTexLoc = GLES20.glGetUniformLocation(mainProgramId, "u_sigmaTex")
         mSigmaSizeLoc = GLES20.glGetUniformLocation(mainProgramId, "u_sigmaSize")
         mOutSizeLoc = GLES20.glGetUniformLocation(mainProgramId, "u_outSize")
@@ -119,12 +183,21 @@ class OutNrShaderProgram {
         mWinScaleLoc = GLES20.glGetUniformLocation(mainProgramId, "u_win_scale")
         mEpsBoostLoc = GLES20.glGetUniformLocation(mainProgramId, "u_eps_boost")
         mStrengthLoc = GLES20.glGetUniformLocation(mainProgramId, "u_strength")
+        mShrinkLoc = GLES20.glGetUniformLocation(mainProgramId, "u_shrink")
+        mShrinkRefLoc = GLES20.glGetUniformLocation(mainProgramId, "u_shrink_ref")
+        mShrinkTauLoc = GLES20.glGetUniformLocation(mainProgramId, "u_shrink_tau")
+        mShrinkCapLoc = GLES20.glGetUniformLocation(mainProgramId, "u_shrink_cap")
         mFlagTexLoc = GLES20.glGetUniformLocation(mainProgramId, "u_flagTex")
         mFlagAvailLoc = GLES20.glGetUniformLocation(mainProgramId, "u_flag_available")
 
         ready = true
-        Log.d(TAG, "Stage-5 denoise programs created: h=$statsHProgramId v=$statsVProgramId m=$mainProgramId")
-        com.agx.camera.CrashLogger.log(TAG, "Program created: outNr=($statsHProgramId,$statsVProgramId,$mainProgramId)")
+        Log.d(TAG, "Stage-5 denoise programs created: h=$statsHProgramId v=$statsVProgramId " +
+            "gh=$guidedHProgramId gv=$guidedVProgramId m=$mainProgramId")
+        com.agx.camera.CrashLogger.log(
+            TAG,
+            "Program created: outNr=($statsHProgramId,$statsVProgramId,$guidedHProgramId," +
+                "$guidedVProgramId,$mainProgramId)"
+        )
     }
 
     private fun drawQuad(programId: Int) {
@@ -181,6 +254,55 @@ class OutNrShaderProgram {
         drawQuad(statsVProgramId)
     }
 
+    /** Horizontal pass of the guided coefficient pair, one texel per guided
+     *  grid cell. [guidedStep] is the grid step in full-resolution output
+     *  pixels (see [guidedStepFor]). */
+    fun drawGuidedH(
+        statsTex: Int, sigmaTex: Int,
+        sigmaW: Float, sigmaH: Float, outW: Float, outH: Float,
+        lumaEpsScale: Float, sigmaDm2: Float, inverseRange2: Float, epsScale: Float,
+        useIsoSigma: Boolean = false,
+        isoModelA: Float = 0f, isoModelB: Float = 0f,
+        epsBoost: Float = 1f, winScale: Float = 1f, guidedStep: Float
+    ) {
+        if (guidedHProgramId == 0) return
+        GLES20.glUseProgram(guidedHProgramId)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, statsTex)
+        GLES20.glUniform1i(gHStatsTexLoc, 0)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, sigmaTex)
+        GLES20.glUniform1i(gHSigmaTexLoc, 1)
+        GLES20.glUniform2f(gHSigmaSizeLoc, sigmaW, sigmaH)
+        GLES20.glUniform2f(gHOutSizeLoc, outW, outH)
+        GLES20.glUniform1f(gHLumaEpsScaleLoc, lumaEpsScale)
+        GLES20.glUniform1f(gHSigmaDm2Loc, sigmaDm2)
+        GLES20.glUniform1f(gHInverseRange2Loc, inverseRange2)
+        GLES20.glUniform1f(gHEpsScaleLoc, epsScale)
+        GLES20.glUniform1f(gHUseIsoSigmaLoc, if (useIsoSigma) 1f else 0f)
+        GLES20.glUniform1f(gHIsoModelALoc, isoModelA)
+        GLES20.glUniform1f(gHIsoModelBLoc, isoModelB)
+        GLES20.glUniform1f(gHEpsBoostLoc, epsBoost)
+        GLES20.glUniform1f(gHWinScaleLoc, winScale)
+        GLES20.glUniform1f(gHGuidedStepLoc, guidedStep)
+        drawQuad(guidedHProgramId)
+    }
+
+    /** Vertical pass of the guided coefficient pair: boxes the guidedH output
+     *  into the final (a, b) plane, one texel per guided grid cell. */
+    fun drawGuidedV(
+        guidedHTex: Int, winScale: Float = 1f, guidedStep: Float
+    ) {
+        if (guidedVProgramId == 0) return
+        GLES20.glUseProgram(guidedVProgramId)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, guidedHTex)
+        GLES20.glUniform1i(gVStatsTexLoc, 0)
+        GLES20.glUniform1f(gVWinScaleLoc, winScale)
+        GLES20.glUniform1f(gVGuidedStepLoc, guidedStep)
+        drawQuad(guidedVProgramId)
+    }
+
     fun drawMain(
         inTex: Int, baseTex: Int, statsTex: Int, sigmaTex: Int,
         sigmaW: Float, sigmaH: Float, outW: Float, outH: Float,
@@ -190,7 +312,10 @@ class OutNrShaderProgram {
         isoModelA: Float = 0f, isoModelB: Float = 0f,
         winScale: Float = 1f, epsBoost: Float = 1f,
         strength: Float = 1f,
-        flagTex: Int = 0, flagAvailable: Boolean = false
+        shrink: Boolean = true, shrinkRef: Float = SHRINK_REF, shrinkTau: Float = SHRINK_TAU,
+        shrinkCap: Float = SHRINK_CAP,
+        flagTex: Int = 0, flagAvailable: Boolean = false,
+        guidedTex: Int = 0
     ) {
         if (mainProgramId == 0) return
         GLES20.glUseProgram(mainProgramId)
@@ -219,24 +344,50 @@ class OutNrShaderProgram {
         GLES20.glUniform1f(mWinScaleLoc, winScale)
         GLES20.glUniform1f(mEpsBoostLoc, epsBoost)
         GLES20.glUniform1f(mStrengthLoc, strength)
+        GLES20.glUniform1f(mShrinkLoc, if (shrink) 1f else 0f)
+        GLES20.glUniform1f(mShrinkRefLoc, shrinkRef)
+        GLES20.glUniform1f(mShrinkTauLoc, shrinkTau)
+        GLES20.glUniform1f(mShrinkCapLoc, shrinkCap)
         val ft = if (flagTex != 0) flagTex else inTex
         GLES20.glActiveTexture(GLES20.GL_TEXTURE4)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ft)
         GLES20.glUniform1i(mFlagTexLoc, 4)
         GLES20.glUniform1f(mFlagAvailLoc, if (flagAvailable && flagTex != 0) 1f else 0f)
+        // Guided coefficient plane, one texel per guided grid cell: bilinear +
+        // clamp so the main pass upsamples it smoothly. When the caller has
+        // none, bind the input as a placeholder (never sampled, u_guided stays
+        // 0) so the sampler never points at an incomplete unit and the shader
+        // takes the per-pixel window blend exactly as before.
+        val gt = if (guidedTex != 0) guidedTex else inTex
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE5)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, gt)
+        if (guidedTex != 0) {
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        }
+        GLES20.glUniform1i(mGuidedTexLoc, 5)
+        GLES20.glUniform1f(mGuidedLoc, if (guidedTex != 0) 1f else 0f)
         drawQuad(mainProgramId)
     }
 
-    fun isReady(): Boolean = ready && statsHProgramId != 0 && statsVProgramId != 0 && mainProgramId != 0
+    fun guidedReady(): Boolean = guidedHProgramId != 0 && guidedVProgramId != 0
+
+    fun isReady(): Boolean = ready && statsHProgramId != 0 && statsVProgramId != 0 &&
+        mainProgramId != 0
 
     fun destroy() {
-        val ids = intArrayOf(statsHProgramId, statsVProgramId, mainProgramId)
         GLES20.glDeleteProgram(statsHProgramId)
         GLES20.glDeleteProgram(statsVProgramId)
+        GLES20.glDeleteProgram(guidedHProgramId)
+        GLES20.glDeleteProgram(guidedVProgramId)
         GLES20.glDeleteProgram(mainProgramId)
         ready = false
         statsHProgramId = 0
         statsVProgramId = 0
+        guidedHProgramId = 0
+        guidedVProgramId = 0
         mainProgramId = 0
     }
 
@@ -245,6 +396,40 @@ class OutNrShaderProgram {
 
         private val QUAD_COORDS = floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
         private val QUAD_TEX_COORDS = floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
+
+        /**
+         * Support-shrinkage calibration. The flat-patch window variance sits
+         * near 0.105 epsilon on the reference chain (measured against the
+         * mirror in pysim, ISO 1600 and 3200 frames agreeing to 10%), and the
+         * gate opens fully once the excess reaches one tau.
+         */
+        private const val SHRINK_REF = 0.105f
+        private const val SHRINK_TAU = 2.0f
+        private const val SHRINK_CAP = 0.5f
+
+        /**
+         * Ceiling on the guided grid step, in full-resolution output pixels.
+         * The (a, b) pair is boxed on a grid whose step tracks the S5 window
+         * radius R = max(2, round(2 * winScale)), winScale = width / 640: the
+         * coefficients only have to resolve the neighbourhood the window spans,
+         * so the grid follows it instead of sitting at a fixed 8. Preview
+         * (~1040 px wide, R = 3) runs a 3-pixel grid; the capture path
+         * (4096 px and up, R >= 13) runs the full 8. The main pass upsamples
+         * the result bilinearly either way.
+         */
+        const val GUIDED_STEP_MAX = 8
+
+        /**
+         * Guided grid step for a pass that is [width] output pixels wide: the
+         * window radius clamped to [2, GUIDED_STEP_MAX] (the radius law itself
+         * never goes below 2). Host and FBO allocation must derive the step the
+         * same way, so both go through here.
+         */
+        fun guidedStepFor(width: Int): Int {
+            val winScale = width / 640f
+            val radius = maxOf(2, Math.round(2.0f * winScale))
+            return radius.coerceIn(1, GUIDED_STEP_MAX)
+        }
 
         /** 8 SWGF side-window centres (in output pixels), r = 2. */
         val WINDOW_CENTERS = arrayOf(
@@ -301,7 +486,7 @@ float flagOf(ivec2 t) {
 
 void main() {
     ivec2 base = ivec2(gl_FragCoord.xy);
-    int R = max(2, int(round(2.0 * u_win_scale)));
+    int R = max(1, int(round(2.0 * u_win_scale)));
     float sum = 0.0;
     float sumSq = 0.0;
     if (u_flag_available > 0.5) {
@@ -352,7 +537,7 @@ uniform float u_flag_available;
 
 void main() {
     ivec2 base = ivec2(gl_FragCoord.xy);
-    int R = max(2, int(round(2.0 * u_win_scale)));
+    int R = max(1, int(round(2.0 * u_win_scale)));
     float sum = 0.0;
     float sumSq = 0.0;
     if (u_flag_available > 0.5) {
@@ -380,6 +565,117 @@ void main() {
 }
 """
 
+        /**
+         * First guided coefficient pass. One texel per grid cell: boxes the
+         * full-resolution statsV plane horizontally at a stride of
+         * u_guided_step output pixels and writes the mean a (variance share)
+         * and b (offset) of the self-guided filter for that cell.
+         */
+        private const val GUIDED_H_FRAGMENT = """
+#version 300 es
+precision highp float;
+precision highp int;
+
+in vec2 v_texCoord;
+out vec4 outColor;
+
+uniform sampler2D u_statsTex;
+uniform sampler2D u_sigmaTex;
+uniform vec2 u_sigmaSize;
+uniform vec2 u_outSize;
+uniform float u_lumaEpsScale;
+uniform float u_sigma_dm2;
+uniform float u_inverse_range2;
+uniform float u_epsScale;
+uniform float u_use_iso_sigma;
+uniform float u_iso_model_a;
+uniform float u_iso_model_b;
+uniform float u_eps_boost;
+uniform float u_win_scale;
+// Grid step in full-resolution output pixels (see guidedStepFor): the stats
+// plane is read every u_guided_step columns, so this pass runs one texel per
+// grid cell instead of one per output pixel. Rc then covers the same support
+// as the S5 window radius R at whatever resolution the pass runs at.
+uniform float u_guided_step;
+
+void main() {
+    ivec2 gbase = ivec2(gl_FragCoord.xy);
+    // A LINEAR fetch at (base + 0.5) / outSize maps cell g to
+    // (g + 0.5) * step - 0.5 in output pixels, so the box has to be centred
+    // there too. Centring it on g * step would put the coefficients half a
+    // grid step behind the pixels they are applied to.
+    ivec2 sbase = ivec2(round((vec2(gbase) + 0.5) * u_guided_step - 0.5));
+    int R = max(1, int(round(2.0 * u_win_scale)));
+    int Rc = max(1, int(round(float(R) / u_guided_step)));
+    // The stats plane is the full-resolution output size; clamp the tap so the
+    // last grid column cannot read outside it (texelFetch is undefined there).
+    ivec2 lim = ivec2(u_outSize) - ivec2(1);
+    float sumA = 0.0;
+    float sumB = 0.0;
+    for (int dx = -Rc; dx <= Rc; dx++) {
+        ivec2 t = sbase + ivec2(int(float(dx) * u_guided_step), 0);
+        t = clamp(t, ivec2(0), lim);
+        vec3 st = texelFetch(u_statsTex, t, 0).rgb;
+        // Epsilon is formed exactly as the main pass forms it. The ISO branch
+        // uses the tap's own box mean as the signal: this pass does not read the
+        // input textures, which is a known approximation on the preview path.
+        float sigma2 = 0.0;
+        if (u_use_iso_sigma > 0.5) {
+            float whiteRangeI = 1.0 / sqrt(max(u_inverse_range2, 1e-6));
+            float signalDN = max(st.r * whiteRangeI, 0.0);
+            sigma2 = max(u_iso_model_a * signalDN + u_iso_model_b, 0.0);
+        } else {
+            ivec2 sb = ivec2(floor((vec2(t) + 0.5) * u_sigmaSize / u_outSize));
+            sb = clamp(sb, ivec2(0), ivec2(u_sigmaSize) - ivec2(1));
+            sigma2 = max(texelFetch(u_sigmaTex, sb, 0).r, 0.0);
+        }
+        float epsY = u_lumaEpsScale * (sigma2 + u_sigma_dm2) * u_inverse_range2 * u_epsScale * u_eps_boost;
+        float varB = max(st.g - st.r * st.r, 0.0);
+        float a = varB / (varB + epsY);
+        float b = st.r - a * st.r;
+        sumA += a;
+        sumB += b;
+    }
+    outColor = vec4(sumA / float(2 * Rc + 1), sumB / float(2 * Rc + 1), 0.0, 1.0);
+}
+"""
+
+        /**
+         * Second guided coefficient pass. Boxes the GUIDED_H output vertically.
+         * The input is already on the coarse grid, so taps move one grid cell at
+         * a time; u_guided_step enters through the radius (Rc grid cells on each
+         * side cover the same full-resolution span the horizontal pass spans).
+         */
+        private const val GUIDED_V_FRAGMENT = """
+#version 300 es
+precision highp float;
+precision highp int;
+
+in vec2 v_texCoord;
+out vec4 outColor;
+
+uniform sampler2D u_statsTex;
+uniform float u_win_scale;
+uniform float u_guided_step;
+
+void main() {
+    ivec2 gbase = ivec2(gl_FragCoord.xy);
+    int R = max(1, int(round(2.0 * u_win_scale)));
+    int Rc = max(1, int(round(float(R) / u_guided_step)));
+    // Clamp the row tap to the H plane so the bottom grid row stays in bounds.
+    ivec2 lim = textureSize(u_statsTex, 0) - ivec2(1);
+    float sumA = 0.0;
+    float sumB = 0.0;
+    for (int dy = -Rc; dy <= Rc; dy++) {
+        ivec2 t = clamp(gbase + ivec2(0, dy), ivec2(0), lim);
+        vec2 s = texelFetch(u_statsTex, t, 0).rg;
+        sumA += s.r;
+        sumB += s.g;
+    }
+    outColor = vec4(sumA / float(2 * Rc + 1), sumB / float(2 * Rc + 1), 0.0, 1.0);
+}
+"""
+
         private const val MAIN_FRAGMENT = """
 precision highp float;
 precision highp int;
@@ -392,6 +688,13 @@ uniform sampler2D u_baseTex;
 uniform sampler2D u_statsTex;
 uniform sampler2D u_sigmaTex;
 uniform sampler2D u_flagTex;
+// Guided coefficient plane, one texel per u_guided_step^2 output pixels:
+// .r = mean a, .g = mean b of the self-guided filter. Sampled bilinearly, so
+// the coarse estimate is upsampled smoothly. u_guided = 0 falls back to the
+// per-pixel side-window blend below, bit-identically to before this plane
+// existed.
+uniform sampler2D u_guidedTex;
+uniform float u_guided;
 uniform float u_flag_available;
 uniform vec2 u_sigmaSize;
 uniform vec2 u_outSize;
@@ -412,6 +715,21 @@ uniform float u_epsScale;
 uniform float u_win_scale;
 uniform float u_eps_boost;
 uniform float u_strength;
+// Support shrinkage (0 = off). The box mean is unbiased only while the window
+// holds a single surface; where an edge, a flap or a clipped plateau cuts it,
+// the mean is pulled across the boundary, and that bias is what shows as a
+// halo beside a high-contrast edge and as a ragged fringe along a clipped
+// region. u_shrink_ref is the flat-patch window variance in units of epsilon,
+// a chain constant (the same kind of calibration as u_epsScale, not a device
+// statistic); u_shrink_tau is how much excess opens the gate fully.
+uniform float u_shrink;
+uniform float u_shrink_ref;
+uniform float u_shrink_tau;
+// A ceiling on the coherence. Without it a faint marking survives only where
+// the window variance rises, and a low-contrast label sits below that, so the
+// wide window averages it away. Holding half of the small-window mean in every
+// pixel keeps that kind of detail without giving up the boundary behaviour.
+uniform float u_shrink_cap;
 uniform float u_use_iso_sigma;
 uniform float u_iso_model_a;
 uniform float u_iso_model_b;
@@ -494,7 +812,7 @@ void main() {
     vec2 sndStat = vec2(0.0);
     float bestVar = 0.0;
     float sndVar = 0.0;
-    int Rwin = max(2, int(round(2.0 * u_win_scale)));
+    int Rwin = max(1, int(round(2.0 * u_win_scale)));
     float fullCount = float((2 * Rwin + 1) * (2 * Rwin + 1));
     bool anyEligible = false;
     for (int k = 0; k < 8; k++) {
@@ -553,6 +871,54 @@ void main() {
 
     float aY = varY / (varY + epsY);
     float outY = aY * yccIn.x + (1.0 - aY) * meanY;
+    // Guided variant: the (a, b) pair was boxed over the stats plane on the
+    // coarse grid, so the estimate here is the same self-guided filter
+    // evaluated at the interpolated coefficients. The support-shrinkage gate
+    // below still reads the full-resolution centre window and composes on top.
+    if (u_guided > 0.5) {
+        vec4 gm = texture(u_guidedTex, (vec2(base) + 0.5) / u_outSize);
+        outY = gm.r * yccIn.x + gm.g;
+    }
+
+    // Support shrinkage. The centre window's variance carries whatever
+    // structure the box holds on top of the noise, so its excess over the
+    // flat-patch level measures how much of the window is a boundary rather
+    // than a surface. Where it is cut by one, the wide estimate is biased
+    // across the boundary - the halo beside a high-contrast edge, the fringe
+    // along a clipped region - so the pass falls back to a 5x5 mean: it gives
+    // up the wide window's smoothing there instead of moving the boundary.
+    if (u_shrink > 0.5 && Rwin > 2) {
+        vec3 stc = statsAt(base, ivec2(0));
+        float varC = max(stc.g - stc.r * stc.r, 0.0);
+        float ref2 = max(u_shrink_ref * epsY, 1e-30);
+        float coh = clamp(1.0 - (varC - ref2) / (u_shrink_tau * ref2), 0.0, 1.0);
+        coh = min(coh, u_shrink_cap);
+        // Fallback mean over the same support as the wide window's small
+        // counterpart, from nine taps instead of twenty-five: the centre (in
+        // hand), the four edge midpoints and the four diagonals at half the
+        // fallback radius. The support sets what the estimate can cross, the
+        // tap count only sets the cost.
+        int r2 = clamp(int(round(float(Rwin) * 0.15)), 1, 2);
+        int h2 = max(1, r2 / 2);
+        float smallY = yccIn.x;
+        smallY += yccOf(mix(texelFetch(u_inTex, base + ivec2( r2,   0), 0).rgb,
+                            texelFetch(u_baseTex, base + ivec2( r2,   0), 0).rgb, u_beta)).x;
+        smallY += yccOf(mix(texelFetch(u_inTex, base + ivec2(-r2,   0), 0).rgb,
+                            texelFetch(u_baseTex, base + ivec2(-r2,   0), 0).rgb, u_beta)).x;
+        smallY += yccOf(mix(texelFetch(u_inTex, base + ivec2(  0,  r2), 0).rgb,
+                            texelFetch(u_baseTex, base + ivec2(  0,  r2), 0).rgb, u_beta)).x;
+        smallY += yccOf(mix(texelFetch(u_inTex, base + ivec2(  0, -r2), 0).rgb,
+                            texelFetch(u_baseTex, base + ivec2(  0, -r2), 0).rgb, u_beta)).x;
+        smallY += yccOf(mix(texelFetch(u_inTex, base + ivec2( h2,  h2), 0).rgb,
+                            texelFetch(u_baseTex, base + ivec2( h2,  h2), 0).rgb, u_beta)).x;
+        smallY += yccOf(mix(texelFetch(u_inTex, base + ivec2(-h2,  h2), 0).rgb,
+                            texelFetch(u_baseTex, base + ivec2(-h2,  h2), 0).rgb, u_beta)).x;
+        smallY += yccOf(mix(texelFetch(u_inTex, base + ivec2( h2, -h2), 0).rgb,
+                            texelFetch(u_baseTex, base + ivec2( h2, -h2), 0).rgb, u_beta)).x;
+        smallY += yccOf(mix(texelFetch(u_inTex, base + ivec2(-h2, -h2), 0).rgb,
+                            texelFetch(u_baseTex, base + ivec2(-h2, -h2), 0).rgb, u_beta)).x;
+        outY = mix(smallY / 9.0, outY, coh);
+    }
 
     // Chroma is bit-exact passthrough: S5-L filters luma only. The chroma
     // branch lives in S5-C (S5CShaderProgram) and reads this pass's luma as
