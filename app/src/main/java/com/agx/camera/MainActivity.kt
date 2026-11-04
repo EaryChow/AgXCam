@@ -331,7 +331,7 @@ class MainActivity : AppCompatActivity() {
     // green-guided GF, S5 post-demosaic SWGF. Persisted in agxcam_settings.
     private var dpcStrength = 0f
     private var rawNrStrength = 0f
-    private var outNrStrength = 0f
+    private var outNrStrength = 1f
     // S5-C chroma strength, independent of the S5 luma slider.
     private var outNrChromaStrength = 1f
     private var lastIsoTapTime = 0L
@@ -639,7 +639,18 @@ class MainActivity : AppCompatActivity() {
         clipAttenFactor = previewResPrefs.getFloat(PREF_CLIP_ATTEN, 0.1f).coerceIn(0f, 1f)
         dpcStrength = previewResPrefs.getFloat(PREF_S1_DPC, 0f).coerceIn(0f, 1f)
         rawNrStrength = previewResPrefs.getFloat(PREF_S3_RAW, 0f).coerceIn(0f, 1f)
-        outNrStrength = previewResPrefs.getFloat(PREF_S5_OUT, 0f).coerceIn(0f, 1f)
+        // S5-L's default moved from 0 to 1, which needed a new key: the old one
+        // cannot tell "never touched" from "chose 0". While the new key is absent,
+        // carry a deliberate choice across; a profile that never made one takes
+        // the new default. Nothing is written on load, so the read repeats until
+        // the slider is first moved.
+        val storedS5 = previewResPrefs.getFloat(PREF_S5_OUT, Float.NaN)
+        val legacyS5 = previewResPrefs.getFloat(PREF_S5_OUT_LEGACY, 0f)
+        outNrStrength = (
+            if (!storedS5.isNaN()) storedS5
+            else if (legacyS5 > 0f) legacyS5
+            else 1f
+        ).coerceIn(0f, 1f)
         outNrChromaStrength = previewResPrefs.getFloat(PREF_S5C_OUT, 1f).coerceIn(0f, 1f)
 
         developerSwitch = DeveloperSwitch(this) { useRaw ->
@@ -1573,11 +1584,11 @@ class MainActivity : AppCompatActivity() {
             previewRenderer.outNrStrength = outNrStrength
             previewResPrefs.edit().putFloat(PREF_S5_OUT, outNrStrength).apply()
         })
-        setupSliderDoubleClickReset(s5Slider, 0) {
-            outNrStrength = 0f
-            s5Label.text = "S5 LUMA  0"
-            previewRenderer.outNrStrength = 0f
-            previewResPrefs.edit().putFloat(PREF_S5_OUT, 0f).apply()
+        setupSliderDoubleClickReset(s5Slider, 100) {
+            outNrStrength = 1f
+            s5Label.text = "S5 LUMA  100"
+            previewRenderer.outNrStrength = 1f
+            previewResPrefs.edit().putFloat(PREF_S5_OUT, 1f).apply()
         }
 
         s5cSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
@@ -6136,7 +6147,11 @@ override fun onResume() {
         // Multi-stage denoise strengths, 0..1 each.
         private const val PREF_S1_DPC = "stage1_dpc_strength"
         private const val PREF_S3_RAW = "stage3_raw_strength"
-        private const val PREF_S5_OUT = "stage5_out_strength"
+        // Renamed when the default moved from 0 to 1; PREF_S5_OUT_LEGACY is read
+        // while the new key is absent, to carry a deliberate non-zero choice
+        // across (see the migration).
+        private const val PREF_S5_OUT = "stage5_out_strength2"
+        private const val PREF_S5_OUT_LEGACY = "stage5_out_strength"
         private const val PREF_S5C_OUT = "stage5c_chroma_strength"
 private const val PREF_MEASUREMENT = "measurement_timing"
         // Lens shading correction strength (0.0..1.0) of the estimated map.
