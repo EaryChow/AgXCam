@@ -327,8 +327,9 @@ class MainActivity : AppCompatActivity() {
     private var isManualMode = false
     private var lastAutoIso = 200
     private var lastAutoShutterNs = 33_333_333L
-    // Multi-stage denoise strengths (0..1, 0 = bypass): S1 DPC, S3 RAW
-    // green-guided GF, S5 post-demosaic SWGF. Persisted in agxcam_settings.
+    // Multi-stage denoise strengths (0..1, 0 = bypass): S1 DPC and S5
+    // post-demosaic SWGF. S3 RAW green-guided GF is retired and pinned at 0;
+    // the field stays because the renderer and the capture metadata carry it.
     private var dpcStrength = 0f
     private var rawNrStrength = 0f
     private var outNrStrength = 1f
@@ -434,9 +435,8 @@ class MainActivity : AppCompatActivity() {
     // NR
     private lateinit var nrLabel: TextView; private lateinit var nrSlider: SeekBar
 
-    // Multi-stage denoise: independent S1/S3/S5 sliders.
+    // Multi-stage denoise: independent S1/S5 sliders (S3 is retired).
     private lateinit var s1Label: TextView; private lateinit var s1Slider: SeekBar
-    private lateinit var s3Label: TextView; private lateinit var s3Slider: SeekBar
     private lateinit var s5Label: TextView; private lateinit var s5Slider: SeekBar
     private lateinit var s5cLabel: TextView; private lateinit var s5cSlider: SeekBar
 
@@ -550,7 +550,6 @@ class MainActivity : AppCompatActivity() {
         nrLabel = findViewById(R.id.nr_label); nrSlider = findViewById(R.id.nr_slider)
 
         s1Label = findViewById(R.id.s1_label); s1Slider = findViewById(R.id.s1_slider)
-        s3Label = findViewById(R.id.s3_label); s3Slider = findViewById(R.id.s3_slider)
         s5Label = findViewById(R.id.s5_label); s5Slider = findViewById(R.id.s5_slider)
         s5cLabel = findViewById(R.id.s5c_label); s5cSlider = findViewById(R.id.s5c_slider)
 
@@ -638,7 +637,10 @@ class MainActivity : AppCompatActivity() {
         weightedEstimation = previewResPrefs.getBoolean(PREF_WEIGHTED_ESTIMATION, true)
         clipAttenFactor = previewResPrefs.getFloat(PREF_CLIP_ATTEN, 0.1f).coerceIn(0f, 1f)
         dpcStrength = previewResPrefs.getFloat(PREF_S1_DPC, 0f).coerceIn(0f, 1f)
-        rawNrStrength = previewResPrefs.getFloat(PREF_S3_RAW, 0f).coerceIn(0f, 1f)
+        // Stage 3 is retired: the strength is pinned to 0, which the filter treats
+        // as a bit-exact bypass. The stored preference is ignored rather than
+        // migrated, because the stage no longer exists.
+        rawNrStrength = 0f
         // S5-L's default moved from 0 to 1, which needed a new key: the old one
         // cannot tell "never touched" from "chose 0". While the new key is absent,
         // carry a deliberate choice across; a profile that never made one takes
@@ -1565,19 +1567,6 @@ class MainActivity : AppCompatActivity() {
             previewResPrefs.edit().putFloat(PREF_S1_DPC, 0f).apply()
         }
 
-        s3Slider.setOnSeekBarChangeListener(simpleSeekBar { v ->
-            rawNrStrength = v / 100f
-            s3Label.text = "S3 RAW  $v"
-            previewRenderer.rawNrStrength = rawNrStrength
-            previewResPrefs.edit().putFloat(PREF_S3_RAW, rawNrStrength).apply()
-        })
-        setupSliderDoubleClickReset(s3Slider, 0) {
-            rawNrStrength = 0f
-            s3Label.text = "S3 RAW  0"
-            previewRenderer.rawNrStrength = 0f
-            previewResPrefs.edit().putFloat(PREF_S3_RAW, 0f).apply()
-        }
-
         s5Slider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             outNrStrength = v / 100f
             s5Label.text = "S5 LUMA  $v"
@@ -1850,8 +1839,6 @@ class MainActivity : AppCompatActivity() {
 
         s1Slider.progress = (dpcStrength * 100).toInt().coerceIn(0, 100)
         s1Label.text = "S1 DPC  ${s1Slider.progress}"
-        s3Slider.progress = (rawNrStrength * 100).toInt().coerceIn(0, 100)
-        s3Label.text = "S3 RAW  ${s3Slider.progress}"
         s5Slider.progress = (outNrStrength * 100).toInt().coerceIn(0, 100)
         s5Label.text = "S5 LUMA  ${s5Slider.progress}"
         s5cSlider.progress = (outNrChromaStrength * 100).toInt().coerceIn(0, 100)
@@ -6146,7 +6133,6 @@ override fun onResume() {
         private const val ESTIMATOR_NEUTRAL_SMOOTHING = 0.4f
         // Multi-stage denoise strengths, 0..1 each.
         private const val PREF_S1_DPC = "stage1_dpc_strength"
-        private const val PREF_S3_RAW = "stage3_raw_strength"
         // Renamed when the default moved from 0 to 1; PREF_S5_OUT_LEGACY is read
         // while the new key is absent, to carry a deliberate non-zero choice
         // across (see the migration).

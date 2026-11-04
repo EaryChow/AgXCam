@@ -260,8 +260,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         }
         set(value) { /* no-op, computed from agxWhiteLevel */ }
     var bayerNrStrength = 0f
-    // Stage sliders (independent, 0 = bypass): S1 DPC, S3 RAW green-guided
-    // GF, S5 post-demosaic SWGF.
+    // Stage strengths (independent, 0 = bypass): S1 DPC, S5 post-demosaic SWGF.
+    // S3 RAW green-guided GF is retired: the activity pins rawNrStrength at 0,
+    // which the filter treats as a bit-exact bypass, and the code below is kept
+    // in the tree.
     @Volatile var dpcStrength = 0f
     @Volatile var rawNrStrength = 0f
     @Volatile var outNrStrength = 0f
