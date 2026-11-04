@@ -39,12 +39,16 @@ import java.nio.FloatBuffer
  *            With u_guided set, the luma estimate is the bilinearly upsampled
  *            (a, b) plane instead of the per-pixel window blend; the gate then
  *            runs on the same statsV centre window underneath it.
- *  grainDc / grainStat / grainSmooth / grainApply
+ *  grainDcH / grainDc / grainStat / grainSmooth / grainApply
  *          : the film-grain return, run once after the last main pass and added
- *            to its output: the residual's DC and a strided gradient sample on
- *            an 8-pixel grid, the frame gradient percentile from that plane, the
+ *            to its output: the residual's DC as a horizontal pixel sum followed
+ *            by a vertical cell sum, a strided gradient sample per cell, the
+ *            frame gradient percentile from that plane in one 1x1 fragment, the
  *            smoothed residual, then the notch, the partition gains, the edge
- *            term and the dose (see the GRAIN_* sources below).
+ *            term and the dose. Sigma and the DC box are keyed to the frame
+ *            height (grainLawFor), so the operator's units follow the render
+ *            size; the box turns over at small heights and the kernel underflows
+ *            to the identity there, both as grainLawFor describes.
  */
 class OutNrShaderProgram {
 
