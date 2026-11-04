@@ -230,7 +230,9 @@ class GlslScopeTest {
             "StructureMapShaderProgram" to listOf("VERTEX_SHADER", "FRAGMENT_SHADER"),
             "OutNrShaderProgram" to listOf(
                 "VERTEX_SHADER", "STATS_H_FRAGMENT", "STATS_V_FRAGMENT",
-                "GUIDED_H_FRAGMENT", "GUIDED_V_FRAGMENT", "MAIN_FRAGMENT"
+                "GUIDED_H_FRAGMENT", "GUIDED_V_FRAGMENT", "MAIN_FRAGMENT",
+                "GRAIN_DCH_FRAGMENT", "GRAIN_DC_FRAGMENT", "GRAIN_STAT_FRAGMENT", "GRAIN_SMOOTH_FRAGMENT",
+                "GRAIN_APPLY_FRAGMENT"
             ),
             "S5WShaderProgram" to listOf("VERTEX_SHADER", "LEVEL_FRAGMENT", "GAIN_FRAGMENT", "BLEND_FRAGMENT")
         )
@@ -352,4 +354,82 @@ class GlslScopeTest {
             )
         }
     }
-}
+
+    /**
+     * Every fragment source carries its own `#version 300 es`.
+     *
+     * `createProgram` prepends the directive for OutNrShaderProgram's
+     * MAIN_FRAGMENT only (that one needs the window array injected above it);
+     * every other source has to open with it. Without the directive the driver
+     * compiles the source as ES 1.00, where `in`/`out` are syntax errors, the
+     * program comes back 0, and the pass it belongs to is skipped at runtime -
+     * so a shader that never compiled and a pass that chose to do nothing look
+     * identical on the device. That is how the S5-L grain gate shipped inactive.
+     */
+    @Test
+    fun everyFragmentSourceCarriesItsVersionDirective() {
+        val injected = setOf("OutNrShaderProgram" to "MAIN_FRAGMENT")
+        val dir = File("src/main/java/com/agx/camera/gpu")
+        val files = dir.listFiles { f -> f.name.endsWith("ShaderProgram.kt") } ?: emptyArray()
+        assertTrue("no shader programs found under ${dir.absolutePath}", files.isNotEmpty())
+        val declared = Regex("""const val (\w+) = """ + "\"\"\"")
+        val failures = ArrayList<String>()
+        for (f in files) {
+            val kotlin = f.readText()
+            val program = f.name.removeSuffix(".kt")
+            for (m in declared.findAll(kotlin)) {
+                val block = m.groupValues[1]
+                if (Pair(program, block) in injected) continue
+                val body = rawString(kotlin, block)
+                // Only the ES 3.00 sources: the blit, focus-peak and YUV
+                // programs are legitimately ES 1.00 (attribute/varying).
+                if (!body.contains("in vec") && !body.contains("out vec4")) continue
+                if (!body.trimStart().startsWith("#version 300 es")) {
+                    failures.add("$program.$block")
+                }
+            }
+        }
+        assertEquals(
+            "these shader sources open without a version directive, so they compile " +
+                "as ES 1.00 and the pass is skipped on the device. Offenders: " +
+                failures.joinToString(", "),
+            0, failures.size
+        )
+    }
+
+    /**
+     * A shader that reads `v_texCoord` has to be fed one.
+     *
+     * The vertex stage feeds the varying either from the attribute or through a
+     * host-uploaded matrix. OutNrShaderProgram's vertex stage takes the second
+     * route and nothing uploads `u_transformMatrix`, so the varying interpolates
+     * to a constant there and a pass that samples through it reads one texel for
+     * the whole frame - a silent no-op instead of a compile error. That is why
+     * every pass in that program reads with texelFetch or gl_FragCoord.
+     */
+    @Test
+    fun shadersThatReadTheVaryingAreFedByTheirVertexStage() {
+        val dir = File("src/main/java/com/agx/camera/gpu")
+        val files = dir.listFiles { f -> f.name.endsWith("ShaderProgram.kt") } ?: emptyArray()
+        val blocks = Regex("const val ([A-Z0-9_]+) = " + "\"\"\"")
+        val failures = ArrayList<String>()
+        for (f in files) {
+            val kotlin = f.readText()
+            val program = f.name.removeSuffix(".kt")
+            if (!kotlin.contains("const val VERTEX_SHADER = ")) continue
+            val vertex = rawString(kotlin, "VERTEX_SHADER")
+            if (vertex.contains("v_texCoord = a_texCoord")) continue
+            if (vertex.contains("u_transformMatrix") && kotlin.contains("glUniformMatrix4fv(")) continue
+            for (m in blocks.findAll(kotlin)) {
+                val body = rawString(kotlin, m.groupValues[1])
+                val reads = body.split("v_texCoord").size - 1 > 1 && !body.contains("v_texCoord =")
+                if (reads) failures.add("$program.${m.groupValues[1]}")
+            }
+        }
+        assertEquals(
+            "these shaders read v_texCoord while their vertex stage feeds it through " +
+                "u_transformMatrix, which the host never uploads: " + failures.joinToString(", "),
+            0, failures.size
+        )
+    }
+}

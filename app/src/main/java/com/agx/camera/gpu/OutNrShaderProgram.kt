@@ -39,6 +39,12 @@ import java.nio.FloatBuffer
  *            With u_guided set, the luma estimate is the bilinearly upsampled
  *            (a, b) plane instead of the per-pixel window blend; the gate then
  *            runs on the same statsV centre window underneath it.
+ *  grainDc / grainStat / grainSmooth / grainApply
+ *          : the film-grain return, run once after the last main pass and added
+ *            to its output: the residual's DC and a strided gradient sample on
+ *            an 8-pixel grid, the frame gradient percentile from that plane, the
+ *            smoothed residual, then the notch, the partition gains, the edge
+ *            term and the dose (see the GRAIN_* sources below).
  */
 class OutNrShaderProgram {
 
@@ -47,6 +53,11 @@ class OutNrShaderProgram {
     private var guidedHProgramId = 0
     private var guidedVProgramId = 0
     private var mainProgramId = 0
+    private var grainDchProgramId = 0
+    private var grainDcProgramId = 0
+    private var grainStatProgramId = 0
+    private var grainSmoothProgramId = 0
+    private var grainApplyProgramId = 0
     private var ready = false
 
     /**
@@ -114,6 +125,35 @@ class OutNrShaderProgram {
     private var mFlagTexLoc = 0
     private var mFlagAvailLoc = 0
 
+    private var gsInTexLoc = 0
+    private var gsK0Loc = 0
+    private var gsK1Loc = 0
+    private var gsHatTexLoc = 0
+    private var gsDcTexLoc = 0
+    private var gsDcSizeLoc = 0
+    private var gsOutSizeLoc = 0
+
+    private var ghInTexLoc = 0
+    private var ghHatTexLoc = 0
+    private var ghInSizeLoc = 0
+    private var ghHalfLoc = 0
+
+    private var gdHTexLoc = 0
+    private var gdInTexLoc = 0
+    private var gdHSizeLoc = 0
+    private var gdInSizeLoc = 0
+    private var gdHalfLoc = 0
+    private var gdVHalfLoc = 0
+
+    private var gtGradTexLoc = 0
+    private var gtPlaneSizeLoc = 0
+
+    private var gaHatTexLoc = 0
+    private var gaSTexLoc = 0
+    private var gaGradRefTexLoc = 0
+    private var gaOutSizeLoc = 0
+    private var gaDoseLoc = 0
+
     private val quadVertices: FloatBuffer = ByteBuffer.allocateDirect(QUAD_COORDS.size * 4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer().put(QUAD_COORDS).also { it.position(0) }
     private val quadTexCoords: FloatBuffer = ByteBuffer.allocateDirect(QUAD_TEX_COORDS.size * 4)
@@ -125,6 +165,11 @@ class OutNrShaderProgram {
         guidedHProgramId = createProgram(VERTEX_SHADER, GUIDED_H_FRAGMENT)
         guidedVProgramId = createProgram(VERTEX_SHADER, GUIDED_V_FRAGMENT)
         mainProgramId = createProgram(VERTEX_SHADER, MAIN_FRAGMENT)
+        grainDchProgramId = createProgram(VERTEX_SHADER, GRAIN_DCH_FRAGMENT)
+        grainDcProgramId = createProgram(VERTEX_SHADER, GRAIN_DC_FRAGMENT)
+        grainStatProgramId = createProgram(VERTEX_SHADER, GRAIN_STAT_FRAGMENT)
+        grainSmoothProgramId = createProgram(VERTEX_SHADER, GRAIN_SMOOTH_FRAGMENT)
+        grainApplyProgramId = createProgram(VERTEX_SHADER, GRAIN_APPLY_FRAGMENT)
         if (statsHProgramId == 0 || statsVProgramId == 0 || guidedHProgramId == 0 ||
             guidedVProgramId == 0 || mainProgramId == 0
         ) {
@@ -163,6 +208,35 @@ class OutNrShaderProgram {
         gVStatsTexLoc = GLES20.glGetUniformLocation(guidedVProgramId, "u_statsTex")
         gVWinScaleLoc = GLES20.glGetUniformLocation(guidedVProgramId, "u_win_scale")
         gVGuidedStepLoc = GLES20.glGetUniformLocation(guidedVProgramId, "u_guided_step")
+
+        gsInTexLoc = GLES20.glGetUniformLocation(grainSmoothProgramId, "u_inTex")
+        gsHatTexLoc = GLES20.glGetUniformLocation(grainSmoothProgramId, "u_hatTex")
+        gsDcTexLoc = GLES20.glGetUniformLocation(grainSmoothProgramId, "u_dcTex")
+        gsK0Loc = GLES20.glGetUniformLocation(grainSmoothProgramId, "u_k0")
+        gsK1Loc = GLES20.glGetUniformLocation(grainSmoothProgramId, "u_k1")
+        gsDcSizeLoc = GLES20.glGetUniformLocation(grainSmoothProgramId, "u_dcSize")
+        gsOutSizeLoc = GLES20.glGetUniformLocation(grainSmoothProgramId, "u_outSize")
+
+        ghInTexLoc = GLES20.glGetUniformLocation(grainDchProgramId, "u_inTex")
+        ghHatTexLoc = GLES20.glGetUniformLocation(grainDchProgramId, "u_hatTex")
+        ghInSizeLoc = GLES20.glGetUniformLocation(grainDchProgramId, "u_inSize")
+        ghHalfLoc = GLES20.glGetUniformLocation(grainDchProgramId, "u_half")
+
+        gdHTexLoc = GLES20.glGetUniformLocation(grainDcProgramId, "u_hTex")
+        gdInTexLoc = GLES20.glGetUniformLocation(grainDcProgramId, "u_inTex")
+        gdHSizeLoc = GLES20.glGetUniformLocation(grainDcProgramId, "u_hSize")
+        gdInSizeLoc = GLES20.glGetUniformLocation(grainDcProgramId, "u_inSize")
+        gdHalfLoc = GLES20.glGetUniformLocation(grainDcProgramId, "u_half")
+        gdVHalfLoc = GLES20.glGetUniformLocation(grainDcProgramId, "u_vhalf")
+
+        gtGradTexLoc = GLES20.glGetUniformLocation(grainStatProgramId, "u_gradTex")
+        gtPlaneSizeLoc = GLES20.glGetUniformLocation(grainStatProgramId, "u_planeSize")
+
+        gaHatTexLoc = GLES20.glGetUniformLocation(grainApplyProgramId, "u_hatTex")
+        gaSTexLoc = GLES20.glGetUniformLocation(grainApplyProgramId, "u_sTex")
+        gaGradRefTexLoc = GLES20.glGetUniformLocation(grainApplyProgramId, "u_gradRefTex")
+        gaOutSizeLoc = GLES20.glGetUniformLocation(grainApplyProgramId, "u_outSize")
+        gaDoseLoc = GLES20.glGetUniformLocation(grainApplyProgramId, "u_dose")
 
         mInTexLoc = GLES20.glGetUniformLocation(mainProgramId, "u_inTex")
         mBaseTexLoc = GLES20.glGetUniformLocation(mainProgramId, "u_baseTex")
@@ -372,7 +446,158 @@ class OutNrShaderProgram {
         drawQuad(mainProgramId)
     }
 
+
+    /**
+     * S5-L grain gate, pass 0: the residual's DC on the 8-pixel grid, written at
+     * 1/8 resolution. One texel per 8x8 block, each a plain mean of the block.
+     *
+     * The gate needs r minus its local mean so only fine content is returned;
+     * the prototype takes a 31-px box, which no per-pixel pass can afford (it is
+     * ~a quarter of S5-L's fetches on its own). Averaging on a coarse grid
+     * carries the same window at 1/64 of the pixels - about two fetches per
+     * output pixel.
+     */
+    fun drawGrainDcH(inTex: Int, hatTex: Int, outW: Int, outH: Int, half: Float) {
+        if (grainDchProgramId == 0) return
+        GLES20.glUseProgram(grainDchProgramId)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inTex)
+        GLES20.glUniform1i(ghInTexLoc, 0)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, hatTex)
+        GLES20.glUniform1i(ghHatTexLoc, 1)
+        GLES20.glUniform2i(ghInSizeLoc, outW, outH)
+        GLES20.glUniform1f(ghHalfLoc, half)
+        drawQuad(grainDchProgramId)
+    }
+
+    /** Second half of the DC box: the vertical 31-tap sum, plus the gradient
+     *  sample the frame percentile is taken over. Writes .r = DC, .g = |grad|. */
+    fun drawGrainDc(
+        hTex: Int, inTex: Int, hW: Float, hH: Float, outW: Int, outH: Int,
+        half: Float, vhalf: Float
+    ) {
+        if (grainDcProgramId == 0) return
+        GLES20.glUseProgram(grainDcProgramId)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, hTex)
+        GLES20.glUniform1i(gdHTexLoc, 0)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inTex)
+        GLES20.glUniform1i(gdInTexLoc, 1)
+        GLES20.glUniform2f(gdHSizeLoc, hW, hH)
+        GLES20.glUniform2i(gdInSizeLoc, outW, outH)
+        GLES20.glUniform1f(gdHalfLoc, half)
+        GLES20.glUniform1f(gdVHalfLoc, vhalf)
+        drawQuad(grainDcProgramId)
+    }
+
+    /**
+     * S5-L grain gate, pass 1: the frame gradient percentile, one fragment.
+     * Reads the 1/8-resolution plane pass 0 wrote and returns the 90th
+     * percentile of its .g in a 1x1 texture, which the apply pass reads.
+     */
+    fun drawGrainStat(gradTex: Int, planeW: Float, planeH: Float) {
+        if (grainStatProgramId == 0) return
+        GLES20.glUseProgram(grainStatProgramId)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, gradTex)
+        GLES20.glUniform1i(gtGradTexLoc, 0)
+        GLES20.glUniform2f(gtPlaneSizeLoc, planeW, planeH)
+        drawQuad(grainStatProgramId)
+    }
+
+    /**
+     * S5-L grain gate, pass 2: the smoothed, DC-free residual and the gate
+     * input's gradient, at full resolution.
+     */
+    fun drawGrainSmooth(
+        inTex: Int, hatTex: Int, dcTex: Int, dcW: Float, dcH: Float,
+        outW: Float, outH: Float, k0: Float, k1: Float
+    ) {
+        if (grainSmoothProgramId == 0) return
+        GLES20.glUseProgram(grainSmoothProgramId)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inTex)
+        GLES20.glUniform1i(gsInTexLoc, 0)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, hatTex)
+        GLES20.glUniform1i(gsHatTexLoc, 1)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, dcTex)
+        GLES20.glUniform1i(gsDcTexLoc, 2)
+        GLES20.glUniform2f(gsDcSizeLoc, dcW, dcH)
+        GLES20.glUniform2f(gsOutSizeLoc, outW, outH)
+        GLES20.glUniform1f(gsK0Loc, k0)
+        GLES20.glUniform1f(gsK1Loc, k1)
+        drawQuad(grainSmoothProgramId)
+    }
+
+    /**
+     * S5-L grain gate, pass 3: the lattice notch on the smoothed plane, the D4
+     * band gains, the frame-p90 edge term and the dose; added to the S5-L
+     * output.
+     *
+     * The likeness is 1 in this form: its reference is a frame median of the
+     * local in-band share, which is a second reduction, and substituting 1 into
+     * the prototype moves its reference rows by ~4%.
+     */
+    fun drawGrainApply(
+        hatTex: Int, sTex: Int, gradRefTex: Int, outW: Float, outH: Float, dose: Float
+    ) {
+        if (grainApplyProgramId == 0) return
+        GLES20.glUseProgram(grainApplyProgramId)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, hatTex)
+        GLES20.glUniform1i(gaHatTexLoc, 0)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, sTex)
+        GLES20.glUniform1i(gaSTexLoc, 1)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, gradRefTex)
+        GLES20.glUniform1i(gaGradRefTexLoc, 2)
+        GLES20.glUniform2f(gaOutSizeLoc, outW, outH)
+        GLES20.glUniform1f(gaDoseLoc, dose)
+        drawQuad(grainApplyProgramId)
+    }
+
+    /**
+     * The gate's two resolution-dependent numbers, from the frame height.
+     *
+     * The prototype defines the grain sigma as a fraction of the frame (6.5 um on
+     * a 24 mm negative, 0.378 px at 3072 px of height), so the sigma scales with
+     * the height the stage runs at. Its zero-DC box follows the same intent by
+     * extrapolation - LOCAL_WIN 15 is a fixed pixel count in the prototype, so the
+     * prototype's own renders cannot check the scaling. At 3072 this returns
+     * exactly the calibrated pair; as the height falls the two side taps of the
+     * kernel underflow and it becomes the identity, which is the right answer for
+     * grain under a pixel wide.
+     */
+    fun grainLawFor(outH: Int): FloatArray {
+        val h = outH.coerceAtLeast(1).toFloat()
+        // 0.454 x (6.5 um / 24 mm) x height: the prototype's dye-cloud sigma as a
+        // fraction of the frame, 0.37779 px at 3072.
+        val sigma = 1.22979e-4f * h
+        // No cutoff: as sigma falls the two weights underflow smoothly to zero and
+        // the kernel becomes the identity, which is the right answer for grain
+        // under a pixel wide.
+        val k1 = Math.exp(-0.5 / (sigma * sigma).toDouble()).toFloat()
+        val k2 = Math.exp(-2.0 / (sigma * sigma).toDouble()).toFloat()
+        // The prototype's normalisation: five sampled taps, of which the outer
+        // pair is dropped after normalising (8e-7 at this sigma).
+        val norm = 1f / (1f + 2f * k1 + 2f * k2)
+        val k0 = norm
+        val half = Math.round(15f * h / 3072f).toFloat().coerceIn(1f, 15f)
+        return floatArrayOf(k0, k1 * norm, half)
+    }
+
     fun guidedReady(): Boolean = guidedHProgramId != 0 && guidedVProgramId != 0
+
+    /** The grain gate is part of S5-L; when it fails to compile the stage still
+     *  runs, just without it. */
+    fun grainReady(): Boolean = grainDchProgramId != 0 && grainDcProgramId != 0 &&
+        grainStatProgramId != 0 &&
+        grainSmoothProgramId != 0 && grainApplyProgramId != 0
 
     fun isReady(): Boolean = ready && statsHProgramId != 0 && statsVProgramId != 0 &&
         mainProgramId != 0
@@ -383,7 +608,17 @@ class OutNrShaderProgram {
         GLES20.glDeleteProgram(guidedHProgramId)
         GLES20.glDeleteProgram(guidedVProgramId)
         GLES20.glDeleteProgram(mainProgramId)
+        GLES20.glDeleteProgram(grainDchProgramId)
+        GLES20.glDeleteProgram(grainDcProgramId)
+        GLES20.glDeleteProgram(grainStatProgramId)
+        GLES20.glDeleteProgram(grainSmoothProgramId)
+        GLES20.glDeleteProgram(grainApplyProgramId)
         ready = false
+        grainDchProgramId = 0
+        grainDcProgramId = 0
+        grainStatProgramId = 0
+        grainSmoothProgramId = 0
+        grainApplyProgramId = 0
         statsHProgramId = 0
         statsVProgramId = 0
         guidedHProgramId = 0
@@ -673,6 +908,293 @@ void main() {
         sumB += s.g;
     }
     outColor = vec4(sumA / float(2 * Rc + 1), sumB / float(2 * Rc + 1), 0.0, 1.0);
+}
+"""
+
+        /**
+         * S5-L grain gate, pass 0: the horizontal 31-tap sum of the residual, on
+         * the 8-pixel grid.
+         *
+         * The window is the prototype's (LOCAL_WIN 15 -> a 31-px box), not a
+         * block mean: a mean over the notch's own 2x2 cell cancels the very
+         * block means the projection keeps, and an 8-pixel block mean did
+         * exactly that, returning 70% of the prototype's band energy. Split into
+         * two axes at 1/8 resolution the box costs about one fetch per output
+         * pixel.
+         */
+        private const val GRAIN_DCH_FRAGMENT = """
+#version 300 es
+precision highp float;
+precision highp int;
+
+out vec4 outColor;
+
+uniform sampler2D u_inTex;
+uniform sampler2D u_hatTex;
+uniform ivec2 u_inSize;
+uniform float u_half;
+
+const vec3 YW = vec3(0.25, 0.5, 0.25);
+
+void main() {
+    ivec2 c = ivec2(gl_FragCoord.xy) * 8 + ivec2(4);
+    ivec2 hi = u_inSize - ivec2(1);
+    float acc = 0.0;
+    for (int i = -15; i <= 15; i++) {
+        if (abs(float(i)) <= u_half) {
+            ivec2 p = clamp(c + ivec2(i, 0), ivec2(0), hi);
+            acc += dot(texelFetch(u_inTex, p, 0).rgb, YW)
+                 - dot(texelFetch(u_hatTex, p, 0).rgb, YW);
+        }
+    }
+    outColor = vec4(acc, 0.0, 0.0, 1.0);
+}
+"""
+
+        /**
+         * S5-L grain gate, pass 1: the vertical sum that completes the DC box -
+         * counted in cells, since the horizontal plane is at 1/8 resolution - plus
+         * one strided gradient sample of the gate input at the cell's centre (the
+         * plane the frame percentile is taken over).
+         */
+        private const val GRAIN_DC_FRAGMENT = """
+#version 300 es
+precision highp float;
+precision highp int;
+
+out vec4 outColor;
+
+uniform sampler2D u_hTex;
+uniform sampler2D u_inTex;
+uniform vec2 u_hSize;
+uniform ivec2 u_inSize;
+uniform float u_half;
+uniform float u_vhalf;
+
+const vec3 YW = vec3(0.25, 0.5, 0.25);
+
+float lumaIn(ivec2 p) {
+    return dot(texelFetch(u_inTex, clamp(p, ivec2(0), u_inSize - ivec2(1)), 0).rgb, YW);
+}
+
+void main() {
+    ivec2 cell = ivec2(gl_FragCoord.xy);
+    ivec2 lim = ivec2(u_hSize) - ivec2(1);
+    // This plane is one texel per 8x8 cell, so the vertical window is counted in
+    // cells, not pixels: u_vhalf = round(u_half / 8), which makes the box 31 px
+    // across and 5 cells (40 px) down at 3072 - the closest square the cell grid
+    // allows, and the reason the divisor is not 31x31.
+    float acc = 0.0;
+    for (int j = -15; j <= 15; j++) {
+        if (abs(float(j)) <= u_vhalf) {
+            acc += texelFetch(u_hTex, clamp(cell + ivec2(0, j), ivec2(0), lim), 0).r;
+        }
+    }
+    float taps = (2.0 * u_half + 1.0) * (2.0 * u_vhalf + 1.0);
+    ivec2 c = cell * 8 + ivec2(4);
+    float gl = lumaIn(c - ivec2(1, 0));
+    float gr = lumaIn(c + ivec2(1, 0));
+    float gd = lumaIn(c - ivec2(0, 1));
+    float gu = lumaIn(c + ivec2(0, 1));
+    float gmag = 0.5 * sqrt((gr - gl) * (gr - gl) + (gu - gd) * (gu - gd));
+    outColor = vec4(acc / taps, gmag, 0.0, 1.0);
+}
+"""
+
+        /**
+         * S5-L grain gate, pass 2: the smoothed, DC-free residual, plus the
+         * gate input's own gradient in .g.
+         *
+         * The prototype smooths before it notches, and so does this: the notch
+         * is a block difference of this plane, taken in the apply pass. The DC
+         * is subtracted after the blur rather than before it - the DC is a
+         * 31-px by 5-cell mean, so blurring it changes it by well under a percent,
+         * and subtracting it once here costs four taps instead of thirty-six.
+         */
+        private const val GRAIN_SMOOTH_FRAGMENT = """
+#version 300 es
+precision highp float;
+precision highp int;
+
+out vec4 outColor;
+
+uniform sampler2D u_inTex;
+uniform sampler2D u_hatTex;
+uniform sampler2D u_dcTex;
+uniform vec2 u_dcSize;
+uniform vec2 u_outSize;
+uniform float u_k0;
+uniform float u_k1;
+
+const vec3 YW = vec3(0.25, 0.5, 0.25);
+
+float resid(vec2 uv) {
+    return dot(texture(u_inTex, uv).rgb, YW) - dot(texture(u_hatTex, uv).rgb, YW);
+}
+
+float lumaIn(vec2 uv) { return dot(texture(u_inTex, uv).rgb, YW); }
+
+float dcAt(vec2 px) {
+    vec2 g = (px + vec2(0.5)) * (u_dcSize / u_outSize) - vec2(0.5);
+    vec2 g0 = floor(g);
+    vec2 f = g - g0;
+    ivec2 hi = ivec2(u_dcSize) - ivec2(1);
+    ivec2 i0 = ivec2(g0);
+    float c00 = texelFetch(u_dcTex, clamp(i0, ivec2(0), hi), 0).r;
+    float c10 = texelFetch(u_dcTex, clamp(i0 + ivec2(1, 0), ivec2(0), hi), 0).r;
+    float c01 = texelFetch(u_dcTex, clamp(i0 + ivec2(0, 1), ivec2(0), hi), 0).r;
+    float c11 = texelFetch(u_dcTex, clamp(i0 + ivec2(1, 1), ivec2(0), hi), 0).r;
+    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+
+// The Gaussian at the film-grain sigma, on three taps of the sampled kernel.
+// The weights come from the host, computed from the frame height (0.943335 /
+// 0.028328 at 3072 px); the grain's sigma is a fraction of the frame, so at
+// small heights the two side taps underflow and the kernel is the identity.
+float smooth3(vec2 uv, vec2 px) {
+    float k0 = u_k0;
+    float k1 = u_k1;
+    float cx = k0 * resid(uv) + k1 * (resid(uv + vec2(px.x, 0.0)) + resid(uv - vec2(px.x, 0.0)));
+    float up = k0 * resid(uv + vec2(0.0, px.y)) + k1 * (resid(uv + px) + resid(uv + vec2(px.x, -px.y)));
+    float dn = k0 * resid(uv - vec2(0.0, px.y)) + k1 * (resid(uv + vec2(-px.x, px.y)) + resid(uv - px));
+    return k0 * cx + k1 * (up + dn);
+}
+
+void main() {
+    vec2 px = 1.0 / u_outSize;
+    vec2 uv = gl_FragCoord.xy * px;
+    float s = smooth3(uv, px) - dcAt(floor(gl_FragCoord.xy));
+    float yl = lumaIn(uv - vec2(px.x, 0.0));
+    float yr = lumaIn(uv + vec2(px.x, 0.0));
+    float yd = lumaIn(uv - vec2(0.0, px.y));
+    float yu = lumaIn(uv + vec2(0.0, px.y));
+    float grad = 0.5 * sqrt((yr - yl) * (yr - yl) + (yu - yd) * (yu - yd));
+    outColor = vec4(s, grad, 0.0, 1.0);
+}
+"""
+
+        /**
+         * S5-L grain gate, pass 3: the frame gradient percentile, one fragment.
+         *
+         * The apply pass needs the input gradient's 90th percentile for the whole
+         * frame, which is a reduction: this samples the 1/8-resolution plane on a
+         * 64x64 grid (4096 strided samples, the count the prototype's own
+         * stride-8 sample reaches on a full frame), takes the mean to set the
+         * threshold span, then counts the samples above 16 levels of it and
+         * interpolates the crossing. One fragment per frame, ~8k texel fetches,
+         * no readback.
+         */
+        private const val GRAIN_STAT_FRAGMENT = """
+#version 300 es
+precision highp float;
+precision highp int;
+
+out vec4 outColor;
+
+uniform sampler2D u_gradTex;
+uniform vec2 u_planeSize;
+
+const int N = 64;
+const int NB = 16;
+
+float sample_at(ivec2 ij) {
+    vec2 step = u_planeSize / float(N);
+    ivec2 p = ivec2((vec2(ij) + vec2(0.5)) * step);
+    return texelFetch(u_gradTex, clamp(p, ivec2(0), ivec2(u_planeSize) - ivec2(1)), 0).g;
+}
+
+void main() {
+    float sum = 0.0;
+    for (int j = 0; j < N; j++) {
+        for (int i = 0; i < N; i++) {
+            sum += sample_at(ivec2(i, j));
+        }
+    }
+    float n = float(N * N);
+    float mu = sum / n;
+    float lo = max(0.2 * mu, 1e-9);
+    float hi = max(4.0 * mu, 2.0 * lo);
+    float cnt[NB];
+    for (int b = 0; b < NB; b++) cnt[b] = 0.0;
+    for (int j = 0; j < N; j++) {
+        for (int i = 0; i < N; i++) {
+            float v = sample_at(ivec2(i, j));
+            for (int b = 0; b < NB; b++) {
+                float t = lo + (hi - lo) * float(b) / float(NB - 1);
+                cnt[b] += (v > t) ? 1.0 : 0.0;
+            }
+        }
+    }
+    float want = 0.9 * n;
+    float ref = hi;
+    for (int b = 0; b < NB - 1; b++) {
+        if (cnt[b] >= want && cnt[b + 1] < want) {
+            float t0 = lo + (hi - lo) * float(b) / float(NB - 1);
+            float t1 = lo + (hi - lo) * float(b + 1) / float(NB - 1);
+            ref = mix(t0, t1, clamp((cnt[b] - want) / max(cnt[b] - cnt[b + 1], 1e-6), 0.0, 1.0));
+        }
+    }
+    outColor = vec4(ref, 0.0, 0.0, 1.0);
+}
+"""
+
+        /**
+         * S5-L grain gate, pass 4: the lattice notch on the smoothed residual,
+         * the D4 partition gains, the frame-p90 edge term and the dose; the
+         * return is added to the S5-L output.
+         *
+         * The notch is the prototype's projection: per 2x2 block the three
+         * Nyquist-mode amplitudes are (a-b-c+d)/4, (a-b+c-d)/4 and
+         * (a+b-c-d)/4, and each pixel subtracts its own combination. It runs
+         * here, on the smoothed plane, which is the prototype's order. The
+         * likeness term is 1: its reference is a frame median of the local
+         * in-band share, and substituting 1 into the prototype moves its
+         * reference rows by ~4%.
+         */
+        private const val GRAIN_APPLY_FRAGMENT = """
+#version 300 es
+precision highp float;
+precision highp int;
+
+out vec4 outColor;
+
+uniform sampler2D u_hatTex;
+uniform sampler2D u_sTex;
+uniform sampler2D u_gradRefTex;
+uniform vec2 u_outSize;
+uniform float u_dose;
+
+const vec3 YW = vec3(0.25, 0.5, 0.25);
+
+void main() {
+    vec2 uv = gl_FragCoord.xy / u_outSize;
+    ivec2 ipo = ivec2(floor(gl_FragCoord.xy));
+    ivec2 lim = ivec2(u_outSize) - ivec2(1);
+
+    vec4 hat = texture(u_hatTex, uv);
+    float yh = dot(hat.rgb, YW);
+    vec4 c = texture(u_sTex, uv);
+    float sC = c.r;
+
+    // The projection is a difference of the block's four samples, so it is
+    // invariant to what is common to them.
+    ivec2 blk = (ipo / 2) * 2;
+    float aa = texelFetch(u_sTex, clamp(blk, ivec2(0), lim), 0).r;
+    float bb = texelFetch(u_sTex, clamp(blk + ivec2(1, 0), ivec2(0), lim), 0).r;
+    float cc = texelFetch(u_sTex, clamp(blk + ivec2(0, 1), ivec2(0), lim), 0).r;
+    float dd = texelFetch(u_sTex, clamp(blk + ivec2(1, 1), ivec2(0), lim), 0).r;
+    float mxy = 0.25 * (aa - bb - cc + dd);
+    float mx = 0.25 * (aa - bb + cc - dd);
+    float my = 0.25 * (aa + bb - cc - dd);
+    float sx = 1.0 - 2.0 * mod(float(ipo.x), 2.0);
+    float sy = 1.0 - 2.0 * mod(float(ipo.y), 2.0);
+    float band = sC - (sx * sy * mxy + sx * mx + sy * my);
+
+    float bg = (yh < 0.0) ? 0.2 : ((yh < 0.08) ? 1.0 : 0.5);
+    float ref = max(texelFetch(u_gradRefTex, ivec2(0), 0).r, 1e-12);
+    float edgeW = clamp(1.0 - c.g / ref, 0.0, 1.0);
+    float ret = u_dose * bg * edgeW * band;
+    outColor = vec4(hat.rgb + vec3(ret), 1.0);
 }
 """
 

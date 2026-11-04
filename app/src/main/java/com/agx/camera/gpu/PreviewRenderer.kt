@@ -150,6 +150,20 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var outNr1TexId = 0
     private var outNr2FboId = 0
     private var outNr2TexId = 0
+    // Grain gate of the same stage (the S5-L grain return): its DC plane on an
+    // 8-pixel grid, the notched residual plane, and the stage output once the
+    // return is added. The last is its own buffer because the grab's s5.round1
+    // plane is round 1's output, not this one.
+    private var grainDcHFboId = 0
+    private var grainDcHTexId = 0
+    private var grainDcFboId = 0
+    private var grainDcTexId = 0
+    private var grainStatFboId = 0
+    private var grainStatTexId = 0
+    private var grainFboId = 0
+    private var grainTexId = 0
+    private var grainOutFboId = 0
+    private var grainOutTexId = 0
     private var outNrBufferWidth = 0
     private var outNrBufferHeight = 0
 
@@ -1710,7 +1724,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         w: Int, h: Int, inputTex: Int, sigmaTex: Int, whiteRange: Float, gridW: Int, gridH: Int,
         useIsoSigma: Boolean = false, isoModelA: Float = 0f, isoModelB: Float = 0f,
         winScale: Float = 1f, epsBoost: Float = 1f,
-        flagTex: Int = 0, flagAvailable: Boolean = false
+        flagTex: Int = 0, flagAvailable: Boolean = false,
+        probeForced: Boolean = false
     ): Int {
         if (!outNrShader.isReady()) return inputTex
         ensureOutNrBuffers(w, h)
@@ -1844,7 +1859,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // measurement mode and rate-limited to one line per interval instead of
         // running per frame on the image path.
         val probeNow = System.nanoTime()
-        if (measurementActive && probeNow - lastS5ProbeNanos >= S5_PROBE_INTERVAL_NANOS) {
+        // The capture asks for its line explicitly: preview frames run the probe
+        // often enough to hold the rate limit, so a capture taken inside that
+        // window would otherwise record nothing about the still that was kept.
+        if (probeForced ||
+            (measurementActive && probeNow - lastS5ProbeNanos >= S5_PROBE_INTERVAL_NANOS)
+        ) {
             lastS5ProbeNanos = probeNow
             // Save the target and viewport the probe has to hand back: the next
             // pass binds its own target, but the readback must not leave the
@@ -1883,7 +1903,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             // which blends every pixel to the window mean.
             val epsOverVar = epsY / maxOf(varY, 1e-12f)
             CrashLogger.log(
-                "Stage5Probe", String.format(
+                if (probeForced) "Stage5ProbeCapture" else "Stage5Probe", String.format(
                     "view=%dx%d winScale=%.2f epsBoost=%.2f epsScale=%.4f lumaEps=%.2f " +
                         "sigmaDm2=%.1f invRange2=%.3e evGain2=%.2f isoA=%.3f isoB=%.3f " +
                         "useIsoSigma=%b strength=%.2f | sigma2=%.3e mean=%.4f varY=%.3e " +
@@ -1962,6 +1982,80 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         )
         logGlError("stage5 main2", bayerRenderCount)
         gpuTimers.end("S5.main2")
+
+        // Grain gate: the film-grain part of the residual, returned on top of
+        // the filtered luma. It is part of S5-L rather than a switch of its own,
+        // so it runs whenever the luma stage runs; strength 0 has already
+        // returned the input untouched above. G is D*S*B on the zero-DC
+        // residual - S the film-grain spectrum at its own sigma, B the D4
+        // partition gains times the edge term. The likeness term of the
+        // prototype form is 1 here (its reference is a frame median).
+        // Falling back to the ungated output is a compile-failure path only.
+        if (outNrShader.grainReady() && grainFboId != 0 && grainDcFboId != 0 &&
+            grainOutFboId != 0 && grainStatFboId != 0
+        ) {
+            // One line on the first frames: a pass that compiled but does
+            // nothing, and a pass that never compiled, look the same on screen.
+            if (bayerRenderCount <= 2) {
+                CrashLogger.log(
+                    TAG, "S5-L grain gate on: dose=$S5_GRAIN_DOSE " +
+                        "dc=${(w + 7) / 8}x${(h + 7) / 8} view=${w}x$h " +
+                        "grainSigmaPx=${"%.3f".format(1.22979e-4f * h)} dcHalf=${
+                            Math.round(15f * h / 3072f)
+                        }"
+                )
+            }
+            val dcTex = grainDcTexId
+            val dcHW = (w + 7) / 8
+            val dcHH = (h + 7) / 8
+            // The sigma is frame-relative in the prototype; the box follows the
+            // same intent by extrapolation (see grainLawFor). At 3072 of height
+            // this is the calibrated pair, unchanged.
+            val law = outNrShader.grainLawFor(h)
+            gpuTimers.begin("S5.grainDcH")
+            bindTarget(grainDcHFboId, dcHW, dcHH)
+            outNrShader.drawGrainDcH(inputTex, outNr2TexId, w, h, law[2])
+            logGlError("stage5 grainDcH", bayerRenderCount)
+            gpuTimers.end("S5.grainDcH")
+            gpuTimers.begin("S5.grainDc")
+            bindTarget(grainDcFboId, dcHW, dcHH)
+            outNrShader.drawGrainDc(
+                grainDcHTexId, inputTex, dcHW.toFloat(), dcHH.toFloat(), w, h,
+                law[2], maxOf(1f, Math.round(law[2] / 8f).toFloat())
+            )
+            logGlError("stage5 grainDc", bayerRenderCount)
+            gpuTimers.end("S5.grainDc")
+            val dcW = ((w + 7) / 8).toFloat()
+            val dcH = ((h + 7) / 8).toFloat()
+            gpuTimers.begin("S5.grainStat")
+            bindTarget(grainStatFboId, 1, 1)
+            outNrShader.drawGrainStat(dcTex, dcW, dcH)
+            logGlError("stage5 grainStat", bayerRenderCount)
+            gpuTimers.end("S5.grainStat")
+            gpuTimers.begin("S5.grainSmooth")
+            bindTarget(grainFboId, w, h)
+            outNrShader.drawGrainSmooth(
+                inputTex, outNr2TexId, dcTex, dcW, dcH, w.toFloat(), h.toFloat(),
+                law[0], law[1]
+            )
+            logGlError("stage5 grainSmooth", bayerRenderCount)
+            gpuTimers.end("S5.grainSmooth")
+            gpuTimers.begin("S5.grainApply")
+            bindTarget(grainOutFboId, w, h)
+            outNrShader.drawGrainApply(
+                outNr2TexId, grainTexId, grainStatTexId, w.toFloat(), h.toFloat(),
+                S5_GRAIN_DOSE
+            )
+            logGlError("stage5 grainApply", bayerRenderCount)
+            gpuTimers.end("S5.grainApply")
+            return grainOutTexId
+        }
+        if (bayerRenderCount <= 2) {
+            CrashLogger.log(
+                TAG, "S5-L grain gate unavailable: programs=${outNrShader.grainReady()} " +
+                    "dc=$grainDcFboId res=$grainFboId out=$grainOutFboId"
+            )
+        }
 
         return outNr2TexId
     }
@@ -3272,7 +3366,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                             isoModelA = captureIsoModelA, isoModelB = captureIsoModelB,
                             winScale = capWinScale, epsBoost = capEpsBoost,
                             flagTex = if (captureFlagWanted) captureFlagTexId else 0,
-                            flagAvailable = captureFlagWanted
+                            flagAvailable = captureFlagWanted,
+                            probeForced = true
                         )
                         logGlError("raw after Stage-5 outDenoise", bayerRenderCount)
                     }
@@ -4342,12 +4437,22 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         deleteFboTex(guidedVFboId, guidedVTexId)
         deleteFboTex(outNr1FboId, outNr1TexId)
         deleteFboTex(outNr2FboId, outNr2TexId)
+        deleteFboTex(grainDcHFboId, grainDcHTexId)
+        deleteFboTex(grainDcFboId, grainDcTexId)
+        deleteFboTex(grainStatFboId, grainStatTexId)
+        deleteFboTex(grainFboId, grainTexId)
+        deleteFboTex(grainOutFboId, grainOutTexId)
         statsHFboId = 0; statsHTexId = 0
         statsVFboId = 0; statsVTexId = 0
         guidedHFboId = 0; guidedHTexId = 0
         guidedVFboId = 0; guidedVTexId = 0
         outNr1FboId = 0; outNr1TexId = 0
         outNr2FboId = 0; outNr2TexId = 0
+        grainDcHFboId = 0; grainDcHTexId = 0
+        grainDcFboId = 0; grainDcTexId = 0
+        grainStatFboId = 0; grainStatTexId = 0
+        grainFboId = 0; grainTexId = 0
+        grainOutFboId = 0; grainOutTexId = 0
         outNrBufferWidth = width
         outNrBufferHeight = height
         val gridW = (width + step - 1) / step
@@ -4368,13 +4473,28 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             val (o1, o1f) = allocRgba32fFbo(width, height); outNr1TexId = o1; outNr1FboId = o1f
             if (outNr1FboId == 0) break
             val (o2, o2f) = allocRgba32fFbo(width, height); outNr2TexId = o2; outNr2FboId = o2f
+            if (outNr2FboId == 0) break
+            val (gdh, gdhf) = allocRgba32fFbo((width + 7) / 8, (height + 7) / 8)
+            grainDcHTexId = gdh; grainDcHFboId = gdhf
+            if (grainDcHFboId == 0) break
+            val (gd, gdf) = allocRgba32fFbo((width + 7) / 8, (height + 7) / 8)
+            grainDcTexId = gd; grainDcFboId = gdf
+            if (grainDcFboId == 0) break
+            val (gs, gsf) = allocRgba32fFbo(1, 1)
+            grainStatTexId = gs; grainStatFboId = gsf
+            if (grainStatFboId == 0) break
+            val (gt, gtf) = allocRgba32fFbo(width, height); grainTexId = gt; grainFboId = gtf
+            if (grainFboId == 0) break
+            val (go, gof) = allocRgba32fFbo(width, height)
+            grainOutTexId = go; grainOutFboId = gof
             break
         }
         CrashLogger.log(
             TAG,
             "Stage-5 buffers: ${width}x${height} statsH=$statsHTexId statsV=$statsVTexId " +
                 "guidedH=$guidedHTexId guidedV=$guidedVTexId (${gridW}x$gridH step=$step) " +
-                "out1=$outNr1TexId out2=$outNr2TexId"
+                "out1=$outNr1TexId out2=$outNr2TexId grain=${grainTexId}/${grainOutTexId} " +
+                "dc=${grainDcTexId} stat=$grainStatTexId"
         )
     }
 
@@ -4636,6 +4756,16 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         private const val S5_LUMA_EPS_SCALE = 1.4f
         private const val S5_SIGMA_DM2 = 10f
         private const val S5_CALIB_TO_RESIDUAL_SCALE = 1f / 32f
+
+        /**
+         * S5-L grain gate. D is the dose on the zero-DC residual, the same
+         * multiplier the prototype ships (1.24) less the one term this port
+         * leaves at 1 (the likeness, ~4%). The edge term's denominator is the
+         * frame gradient percentile, computed on the GPU by grainStat, so this
+         * form matches the prototype's operator rather than approximating it;
+         * the calibration and its measured spread are in the stage record.
+         */
+        private const val S5_GRAIN_DOSE = 1.19f
 
         // Minimum spacing between S5-L operating-point probe lines. The probe
         // reads three texels, and each readback stalls the GL queue until every
