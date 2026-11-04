@@ -332,7 +332,7 @@ class MainActivity : AppCompatActivity() {
     // the field stays because the renderer and the capture metadata carry it.
     private var dpcStrength = 0f
     private var rawNrStrength = 0f
-    private var outNrStrength = 1f
+    private var outNrStrength = 0.5f
     // S5-C chroma strength, independent of the S5 luma slider.
     private var outNrChromaStrength = 1f
     private var lastIsoTapTime = 0L
@@ -641,17 +641,21 @@ class MainActivity : AppCompatActivity() {
         // as a bit-exact bypass. The stored preference is ignored rather than
         // migrated, because the stage no longer exists.
         rawNrStrength = 0f
-        // S5-L's default moved from 0 to 1, which needed a new key: the old one
-        // cannot tell "never touched" from "chose 0". While the new key is absent,
-        // carry a deliberate choice across; a profile that never made one takes
-        // the new default. Nothing is written on load, so the read repeats until
-        // the slider is first moved.
+        // S5-L's default moved from 1 to 0.5, which needed a new key again. The
+        // stage5_out_strength2 key's own default was 1, so a value stored there
+        // is deliberate even when it is 0 (S5-L switched off) and is used as-is.
+        // The oldest key's default was 0, so only a non-zero value there is a
+        // choice. A profile that made neither takes 0.5. Nothing is written on
+        // load, so the read repeats until the slider is first moved.
         val storedS5 = previewResPrefs.getFloat(PREF_S5_OUT, Float.NaN)
-        val legacyS5 = previewResPrefs.getFloat(PREF_S5_OUT_LEGACY, 0f)
+        val hasMidS5 = previewResPrefs.contains(PREF_S5_OUT_LEGACY)
+        val midS5 = previewResPrefs.getFloat(PREF_S5_OUT_LEGACY, 0f)
+        val oldestS5 = previewResPrefs.getFloat(PREF_S5_OUT_LEGACY2, 0f)
         outNrStrength = (
             if (!storedS5.isNaN()) storedS5
-            else if (legacyS5 > 0f) legacyS5
-            else 1f
+            else if (hasMidS5) midS5
+            else if (oldestS5 > 0f) oldestS5
+            else 0.5f
         ).coerceIn(0f, 1f)
         outNrChromaStrength = previewResPrefs.getFloat(PREF_S5C_OUT, 1f).coerceIn(0f, 1f)
 
@@ -1573,11 +1577,11 @@ class MainActivity : AppCompatActivity() {
             previewRenderer.outNrStrength = outNrStrength
             previewResPrefs.edit().putFloat(PREF_S5_OUT, outNrStrength).apply()
         })
-        setupSliderDoubleClickReset(s5Slider, 100) {
-            outNrStrength = 1f
-            s5Label.text = "S5 LUMA  100"
-            previewRenderer.outNrStrength = 1f
-            previewResPrefs.edit().putFloat(PREF_S5_OUT, 1f).apply()
+        setupSliderDoubleClickReset(s5Slider, 50) {
+            outNrStrength = 0.5f
+            s5Label.text = "S5 LUMA  50"
+            previewRenderer.outNrStrength = 0.5f
+            previewResPrefs.edit().putFloat(PREF_S5_OUT, 0.5f).apply()
         }
 
         s5cSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
@@ -6133,11 +6137,12 @@ override fun onResume() {
         private const val ESTIMATOR_NEUTRAL_SMOOTHING = 0.4f
         // Multi-stage denoise strengths, 0..1 each.
         private const val PREF_S1_DPC = "stage1_dpc_strength"
-        // Renamed when the default moved from 0 to 1; PREF_S5_OUT_LEGACY is read
-        // while the new key is absent, to carry a deliberate non-zero choice
-        // across (see the migration).
-        private const val PREF_S5_OUT = "stage5_out_strength2"
-        private const val PREF_S5_OUT_LEGACY = "stage5_out_strength"
+        // Renamed each time the default moved (0 -> 1, then 1 -> 0.5); the two
+        // older keys are read while the new one is absent, to carry a deliberate
+        // choice across (see the migration).
+        private const val PREF_S5_OUT = "stage5_out_strength3"
+        private const val PREF_S5_OUT_LEGACY = "stage5_out_strength2"
+        private const val PREF_S5_OUT_LEGACY2 = "stage5_out_strength"
         private const val PREF_S5C_OUT = "stage5c_chroma_strength"
 private const val PREF_MEASUREMENT = "measurement_timing"
         // Lens shading correction strength (0.0..1.0) of the estimated map.

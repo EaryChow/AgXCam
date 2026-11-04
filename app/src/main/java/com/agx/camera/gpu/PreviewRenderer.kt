@@ -4766,6 +4766,15 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
          * frame gradient percentile, computed on the GPU by grainStat, so this
          * form matches the prototype's operator rather than approximating it;
          * the calibration and its measured spread are in the stage record.
+         *
+         * The dose is calibrated at S5-L strength 1, where it returns 4.78e-4
+         * mean, 78% of the 6.10e-4 grain ceiling on the port's office crop. It
+         * is a multiplier on a residual that scales with the strength, so the
+         * shipped default of 0.5 returns 46%. Pinning the return instead (the
+         * dose that reproduces 4.78e-4 at 0.5 is 2.02) was measured and
+         * rejected: grain 0.494 against 0.483 and stroke 1.844 against 1.373,
+         * because the lighter pass leaves more structure in the residual for
+         * the return to ride on.
          */
         private const val S5_GRAIN_DOSE = 1.19f
 
