@@ -167,18 +167,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var outNrBufferWidth = 0
     private var outNrBufferHeight = 0
 
-    // Guided coefficient pair of the same stage: (a, b) boxed on a grid whose
-    // step tracks the S5 window radius (see OutNrShaderProgram.guidedStepFor),
-    // so (ceil(w/step), ceil(h/step)) RGBA16F (filterable, unlike 32F, because
-    // the main pass upsamples it bilinearly).
-    private var guidedHFboId = 0
-    private var guidedHTexId = 0
-    private var guidedVFboId = 0
-    private var guidedVTexId = 0
-    private var guidedGridW = 0
-    private var guidedGridH = 0
-    private var guidedGridStep = 0
-
     // Stage 5-C (post-demosaic chroma) buffers: the propagated sigma texture,
     // the stage-1 chroma-filtered image, and the per-8x8-cell mottle plane.
     // RGBA32F at the demosaic resolution except the cell plane (ceil/8).
@@ -1710,13 +1698,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
      *  Two iterations with a beta=0.3 noise return and kappa x 1.4 on round 2. "kappa x 1.4"
      *  is the round-2 sigma multiplier; because epsilon proportional to sigma_hat^2 here, the round-2 epsilon
      *  multiplier is (kappa x 1.4)^2 = 1.96 (see the round-2 comment below).
-     *  Each round runs five passes (statsH, statsV, guidedH, guidedV, main);
-     *  the two guided passes box the self-guided (a, b) coefficients on a grid
-     *  whose step follows the window radius (OutNrShaderProgram.guidedStepFor),
-     *  and main's luma estimate is the bilinearly upsampled pair, with the
-     *  support-shrinkage gate falling back to
-     *  the pixel's own luma where the centre window is cut by structure. The
-     *  returned texture id feeds the ISP (nrShader/draw) instead of the raw
+     *  Each round runs three passes (statsH, statsV, main); main's luma
+     *  estimate is the certified two-window per-pixel blend, with the
+     *  support-shrinkage gate falling back to a 3x3 mean where the centre
+     *  window is cut by structure. The guided coefficient grid is not used:
+     *  its 8-px upsample drew directional streaks along a curved bright edge.
+     *  The returned texture id feeds the ISP (nrShader/draw) instead of the raw
      *  demosaic output.  The S5 geometry lives in output-pixel space, so the
      *  capture path passes winScale = captureRes/previewRes > 1 to widen the
      *  window centres to the same relative image
@@ -1731,22 +1718,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     ): Int {
         if (!outNrShader.isReady()) return inputTex
         ensureOutNrBuffers(w, h)
-        // Guided coefficient passes: the (a, b) pair is boxed on a grid whose
-        // step follows the window radius (ensureOutNrBuffers allocates the
-        // matching target), and the main pass upsamples it bilinearly. Without
-        // the pair the main pass takes its own per-pixel window blend
-        // (guidedTex = 0).
-        val guidedStep = OutNrShaderProgram.guidedStepFor(w).toFloat()
-        // Only where the window is wider than the smallest one. The guided
-        // estimate replaces the variance blend with box(box(mean)), so on the
-        // 5x5 window it smooths twice as far as the blend it replaces. The
-        // capture footprint wants that; the smallest capped previews do not,
-        // and they are the only place the gate closes.
-        val windowRadius = maxOf(2, Math.round(2f * winScale))
-        val guidedOk = windowRadius > 2 && outNrShader.guidedReady() &&
-            guidedHFboId != 0 && guidedVFboId != 0 &&
-            guidedGridW > 0 && guidedGridH > 0
-        val guidedTex = if (guidedOk) guidedVTexId else 0
         // sigmaTex holds sigma_hat on the 2x2-cell grid (cellGridW/H), which can differ
         // from this pass's output res; drawMain scales the fetch accordingly.
         val sigmaW = gridW.toFloat()
@@ -1821,25 +1792,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         outNrShader.drawStatsV(statsHTexId, winScale, flagAvailable)
         logGlError("stage5 statsV1", bayerRenderCount)
         gpuTimers.end("S5.statsV1")
-        if (guidedOk) {
-            gpuTimers.begin("S5.guidedH1")
-            bindTarget(guidedHFboId, guidedGridW, guidedGridH)
-            outNrShader.drawGuidedH(
-                statsVTexId, sigmaTex,
-                sigmaW, sigmaH, w.toFloat(), h.toFloat(),
-                lumaEpsScale, sigmaDm2,
-                inverseRange2, calibToResidualScale,
-                useIsoSigma, s5IsoA, s5IsoB,
-                epsBoost, winScale, guidedStep
-            )
-            logGlError("stage5 guidedH1", bayerRenderCount)
-            gpuTimers.end("S5.guidedH1")
-            gpuTimers.begin("S5.guidedV1")
-            bindTarget(guidedVFboId, guidedGridW, guidedGridH)
-            outNrShader.drawGuidedV(guidedHTexId, winScale, guidedStep)
-            logGlError("stage5 guidedV1", bayerRenderCount)
-            gpuTimers.end("S5.guidedV1")
-        }
         gpuTimers.begin("S5.main1")
         bindTarget(outNr1FboId, w, h)
         outNrShader.drawMain(
@@ -1849,14 +1801,13 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             inverseRange2, calibToResidualScale,
             useIsoSigma, s5IsoA, s5IsoB,
             winScale, epsBoost, strength = s,
-            flagTex = flagTex, flagAvailable = flagAvailable,
-            guidedTex = guidedTex
+            flagTex = flagTex, flagAvailable = flagAvailable
         )
         logGlError("stage5 main1", bayerRenderCount)
         gpuTimers.end("S5.main1")
 
-        // Operating-point probe. Round 1 has just written its stats, guided and
-        // main planes, so the numbers below describe the same draw the frame
+        // Operating-point probe. Round 1 has just written its stats and main
+        // planes, so the numbers below describe the same draw the frame
         // used. Every glReadPixels is a pipeline sync, so this is gated on
         // measurement mode and rate-limited to one line per interval instead of
         // running per frame on the image path.
@@ -1878,11 +1829,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             val nan4 = floatArrayOf(Float.NaN, Float.NaN, Float.NaN, Float.NaN)
             val statsCentre = if (statsVFboId != 0) readTexelF(statsVFboId, w / 2, h / 2) else nan4
             val sigmaCentre = readTexelOfTexture(sigmaTex, gridW / 2, gridH / 2)
-            val guideCentre = if (guidedOk && guidedVFboId != 0) {
-                readTexelF(guidedVFboId, guidedGridW / 2, guidedGridH / 2)
-            } else {
-                nan4
-            }
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, savedFbo[0])
             GLES20.glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3])
 
@@ -1909,16 +1855,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     "view=%dx%d winScale=%.2f epsBoost=%.2f epsScale=%.4f lumaEps=%.2f " +
                         "sigmaDm2=%.1f invRange2=%.3e evGain2=%.2f isoA=%.3f isoB=%.3f " +
                         "useIsoSigma=%b strength=%.2f | sigma2=%.3e mean=%.4f varY=%.3e " +
-                        "epsY=%.3e aY=%.3f eps/var=%.1f | guided step=%.1f target=%dx%d " +
-                        "a=%.3f b=%.4f",
+                        "epsY=%.3e aY=%.3f eps/var=%.1f",
                     w, h, winScale, epsBoost, calibToResidualScale, lumaEpsScale,
                     sigmaDm2, inverseRange2, evGain2, s5IsoA, s5IsoB,
                     useIsoSigma, s,
-                    sigma2, mean, varY, epsY, aY, epsOverVar,
-                    guidedStep,
-                    if (guidedOk) guidedGridW else 0,
-                    if (guidedOk) guidedGridH else 0,
-                    guideCentre[0], guideCentre[1]
+                    sigma2, mean, varY, epsY, aY, epsOverVar
                 )
             )
         }
@@ -1944,25 +1885,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         outNrShader.drawStatsV(statsHTexId, winScale, flagAvailable)
         logGlError("stage5 statsV2", bayerRenderCount)
         gpuTimers.end("S5.statsV2")
-        if (guidedOk) {
-            gpuTimers.begin("S5.guidedH2")
-            bindTarget(guidedHFboId, guidedGridW, guidedGridH)
-            outNrShader.drawGuidedH(
-                statsVTexId, sigmaTex,
-                sigmaW, sigmaH, w.toFloat(), h.toFloat(),
-                round2EpsMult * lumaEpsScale, sigmaDm2,
-                inverseRange2, calibToResidualScale,
-                useIsoSigma, s5IsoA, s5IsoB,
-                epsBoost, winScale, guidedStep
-            )
-            logGlError("stage5 guidedH2", bayerRenderCount)
-            gpuTimers.end("S5.guidedH2")
-            gpuTimers.begin("S5.guidedV2")
-            bindTarget(guidedVFboId, guidedGridW, guidedGridH)
-            outNrShader.drawGuidedV(guidedHTexId, winScale, guidedStep)
-            logGlError("stage5 guidedV2", bayerRenderCount)
-            gpuTimers.end("S5.guidedV2")
-        }
         if (flagAvailable && (bayerRenderCount <= 8 || bayerRenderCount % 120 == 0)) {
             CrashLogger.log(
                 TAG, "S5 flag consume (stats h/v x2): " +
@@ -1979,8 +1901,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             inverseRange2, calibToResidualScale,
             useIsoSigma, s5IsoA, s5IsoB,
             winScale, epsBoost, strength = s,
-            flagTex = flagTex, flagAvailable = flagAvailable,
-            guidedTex = guidedTex
+            flagTex = flagTex, flagAvailable = flagAvailable
         )
         logGlError("stage5 main2", bayerRenderCount)
         gpuTimers.end("S5.main2")
@@ -1990,8 +1911,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // so it runs whenever the luma stage runs; strength 0 has already
         // returned the input untouched above. G is D*S*B on the zero-DC
         // residual - S the film-grain spectrum at its own sigma, B the D4
-        // partition gains times the edge term. The likeness term of the
-        // prototype form is 1 here (its reference is a frame median).
+        // partition gains times the edge term - multiplied by the
+        // support-shrinkage coherence the main pass leaves in its alpha (the
+        // return is not added where the estimate was cut by a boundary). The
+        // likeness term of the prototype form is 1 here (its reference is a
+        // frame median).
         // Falling back to the ungated output is a compile-failure path only.
         if (outNrShader.grainReady() && grainFboId != 0 && grainDcFboId != 0 &&
             grainOutFboId != 0 && grainStatFboId != 0
@@ -1999,36 +1923,42 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             // One line on the first frames: a pass that compiled but does
             // nothing, and a pass that never compiled, look the same on screen.
             if (bayerRenderCount <= 2) {
+                val logCell = outNrShader.grainCellFor(h)
                 CrashLogger.log(
-                    TAG, "S5-L grain gate on: dose=$S5_GRAIN_DOSE " +
-                        "dc=${(w + 7) / 8}x${(h + 7) / 8} view=${w}x$h " +
+                    TAG, "S5-L grain gate on: dose=$S5_GRAIN_DOSE weight=coh " +
+                        "dc=${(w + logCell - 1) / logCell}x${(h + logCell - 1) / logCell} " +
+                        "cell=$logCell view=${w}x$h " +
                         "grainSigmaPx=${"%.3f".format(1.22979e-4f * h)} dcHalf=${
                             Math.round(15f * h / 3072f)
                         }"
                 )
             }
             val dcTex = grainDcTexId
-            val dcHW = (w + 7) / 8
-            val dcHH = (h + 7) / 8
+            // The DC plane follows the law's cell: 8 px at the calibrated height,
+            // full resolution below it, where an 8-px cell cannot hold the box.
+            val cell = outNrShader.grainCellFor(h)
+            val dcHW = (w + cell - 1) / cell
+            val dcHH = (h + cell - 1) / cell
             // The sigma is frame-relative in the prototype; the box follows the
             // same intent by extrapolation (see grainLawFor). At 3072 of height
             // this is the calibrated pair, unchanged.
             val law = outNrShader.grainLawFor(h)
+            val cellF = cell.toFloat()
             gpuTimers.begin("S5.grainDcH")
             bindTarget(grainDcHFboId, dcHW, dcHH)
-            outNrShader.drawGrainDcH(inputTex, outNr2TexId, w, h, law[2])
+            outNrShader.drawGrainDcH(inputTex, outNr2TexId, w, h, law[2], cellF)
             logGlError("stage5 grainDcH", bayerRenderCount)
             gpuTimers.end("S5.grainDcH")
             gpuTimers.begin("S5.grainDc")
             bindTarget(grainDcFboId, dcHW, dcHH)
             outNrShader.drawGrainDc(
                 grainDcHTexId, inputTex, dcHW.toFloat(), dcHH.toFloat(), w, h,
-                law[2], maxOf(1f, Math.round(law[2] / 8f).toFloat())
+                law[2], maxOf(1f, Math.round(law[2] / cellF).toFloat()), cellF
             )
             logGlError("stage5 grainDc", bayerRenderCount)
             gpuTimers.end("S5.grainDc")
-            val dcW = ((w + 7) / 8).toFloat()
-            val dcH = ((h + 7) / 8).toFloat()
+            val dcW = dcHW.toFloat()
+            val dcH = dcHH.toFloat()
             gpuTimers.begin("S5.grainStat")
             bindTarget(grainStatFboId, 1, 1)
             outNrShader.drawGrainStat(dcTex, dcW, dcH)
@@ -2037,8 +1967,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             gpuTimers.begin("S5.grainSmooth")
             bindTarget(grainFboId, w, h)
             outNrShader.drawGrainSmooth(
-                inputTex, outNr2TexId, dcTex, dcW, dcH, w.toFloat(), h.toFloat(),
-                law[0], law[1]
+                inputTex, outNr2TexId, dcTex, grainStatTexId, dcW, dcH,
+                w.toFloat(), h.toFloat(), law[0], law[1]
             )
             logGlError("stage5 grainSmooth", bayerRenderCount)
             gpuTimers.end("S5.grainSmooth")
@@ -2046,16 +1976,16 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             bindTarget(grainOutFboId, w, h)
             outNrShader.drawGrainApply(
                 outNr2TexId, grainTexId, grainStatTexId, w.toFloat(), h.toFloat(),
-                S5_GRAIN_DOSE
+                S5_GRAIN_DOSE, S5_GRAIN_FIELD_DOSE
             )
             logGlError("stage5 grainApply", bayerRenderCount)
             gpuTimers.end("S5.grainApply")
             return grainOutTexId
         }
-        if (bayerRenderCount <= 2) {
+        if (bayerRenderCount <= 2 && outNrShader.grainReady()) {
             CrashLogger.log(
-                TAG, "S5-L grain gate unavailable: programs=${outNrShader.grainReady()} " +
-                    "dc=$grainDcFboId res=$grainFboId out=$grainOutFboId"
+                TAG, "S5-L grain gate unavailable: dc=$grainDcFboId res=$grainFboId " +
+                    "out=$grainOutFboId"
             )
         }
 
@@ -4137,35 +4067,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         return Pair(tex, fbo)
     }
 
-    // Returns (textureId, fboId) for a bilinearly filterable plane. RGBA16F
-    // rather than RGBA32F: the S5 guided coefficients are upsampled with
-    // GL_LINEAR in the main pass, and ES 3.0 only guarantees linear filtering
-    // for half-float (32F needs OES_texture_float_linear). The coefficient
-    // values sit in 0..1, well inside the half-float range.
-    private fun allocGuidedFbo(width: Int, height: Int): Pair<Int, Int> {
-        val tex = allocRgba16fTexture(width, height)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-        val fboBuf = IntArray(1)
-        GLES20.glGenFramebuffers(1, fboBuf, 0)
-        val fbo = fboBuf[0]
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo)
-        GLES20.glFramebufferTexture2D(
-            GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
-            GLES20.GL_TEXTURE_2D, tex, 0
-        )
-        val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
-        if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
-            val msg = "RGBA16F guided FBO incomplete: $status"
-            Log.e(TAG, msg)
-            CrashLogger.log(TAG, msg)
-        }
-        return Pair(tex, fbo)
-    }
-
     // Builds the S5-W level target: one FBO with two same-format float
     // attachments, both drawn (MRT). RGBA16F halves the full-res pair's
     // footprint; when a 16F framebuffer is not renderable the pair is retried
@@ -4426,17 +4327,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     }
 
     private fun ensureOutNrBuffers(width: Int, height: Int) {
-        // The guided grid step follows the window radius, so a resolution change
-        // that moves the step (e.g. the preview thermal cap) has to rebuild the
-        // grid pair even when width/height alone would still match.
-        val step = OutNrShaderProgram.guidedStepFor(width)
         if (outNrBufferWidth == width && outNrBufferHeight == height &&
-            guidedGridStep == step && outNr2FboId != 0
+            outNr2FboId != 0
         ) return
         deleteFboTex(statsHFboId, statsHTexId)
         deleteFboTex(statsVFboId, statsVTexId)
-        deleteFboTex(guidedHFboId, guidedHTexId)
-        deleteFboTex(guidedVFboId, guidedVTexId)
         deleteFboTex(outNr1FboId, outNr1TexId)
         deleteFboTex(outNr2FboId, outNr2TexId)
         deleteFboTex(grainDcHFboId, grainDcHTexId)
@@ -4446,8 +4341,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         deleteFboTex(grainOutFboId, grainOutTexId)
         statsHFboId = 0; statsHTexId = 0
         statsVFboId = 0; statsVTexId = 0
-        guidedHFboId = 0; guidedHTexId = 0
-        guidedVFboId = 0; guidedVTexId = 0
         outNr1FboId = 0; outNr1TexId = 0
         outNr2FboId = 0; outNr2TexId = 0
         grainDcHFboId = 0; grainDcHTexId = 0
@@ -4457,29 +4350,23 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         grainOutFboId = 0; grainOutTexId = 0
         outNrBufferWidth = width
         outNrBufferHeight = height
-        val gridW = (width + step - 1) / step
-        val gridH = (height + step - 1) / step
-        guidedGridW = gridW
-        guidedGridH = gridH
-        guidedGridStep = step
 
         while (true) {
             val (h, hf) = allocRgba32fFbo(width, height); statsHTexId = h; statsHFboId = hf
             if (statsHFboId == 0) break
             val (v, vf) = allocRgba32fFbo(width, height); statsVTexId = v; statsVFboId = vf
             if (statsVFboId == 0) break
-            val (gh, ghf) = allocGuidedFbo(gridW, gridH); guidedHTexId = gh; guidedHFboId = ghf
-            if (guidedHFboId == 0) break
-            val (gv, gvf) = allocGuidedFbo(gridW, gridH); guidedVTexId = gv; guidedVFboId = gvf
-            if (guidedVFboId == 0) break
             val (o1, o1f) = allocRgba32fFbo(width, height); outNr1TexId = o1; outNr1FboId = o1f
             if (outNr1FboId == 0) break
             val (o2, o2f) = allocRgba32fFbo(width, height); outNr2TexId = o2; outNr2FboId = o2f
             if (outNr2FboId == 0) break
-            val (gdh, gdhf) = allocRgba32fFbo((width + 7) / 8, (height + 7) / 8)
+            val gCell = outNrShader.grainCellFor(height)
+            val (gdh, gdhf) = allocRgba32fFbo((width + gCell - 1) / gCell,
+                                              (height + gCell - 1) / gCell)
             grainDcHTexId = gdh; grainDcHFboId = gdhf
             if (grainDcHFboId == 0) break
-            val (gd, gdf) = allocRgba32fFbo((width + 7) / 8, (height + 7) / 8)
+            val (gd, gdf) = allocRgba32fFbo((width + gCell - 1) / gCell,
+                                            (height + gCell - 1) / gCell)
             grainDcTexId = gd; grainDcFboId = gdf
             if (grainDcFboId == 0) break
             val (gs, gsf) = allocRgba32fFbo(1, 1)
@@ -4494,7 +4381,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         CrashLogger.log(
             TAG,
             "Stage-5 buffers: ${width}x${height} statsH=$statsHTexId statsV=$statsVTexId " +
-                "guidedH=$guidedHTexId guidedV=$guidedVTexId (${gridW}x$gridH step=$step) " +
                 "out1=$outNr1TexId out2=$outNr2TexId grain=${grainTexId}/${grainOutTexId} " +
                 "dc=${grainDcTexId} stat=$grainStatTexId"
         )
@@ -4667,15 +4553,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             captureSigmaFboId = 0; captureSigmaTexId = 0
             deleteFboTex(statsHFboId, statsHTexId)
             deleteFboTex(statsVFboId, statsVTexId)
-            deleteFboTex(guidedHFboId, guidedHTexId)
-            deleteFboTex(guidedVFboId, guidedVTexId)
             deleteFboTex(outNr1FboId, outNr1TexId)
             deleteFboTex(outNr2FboId, outNr2TexId)
             statsHFboId = 0; statsHTexId = 0
             statsVFboId = 0; statsVTexId = 0
-            guidedHFboId = 0; guidedHTexId = 0
-            guidedVFboId = 0; guidedVTexId = 0
-            guidedGridW = 0; guidedGridH = 0; guidedGridStep = 0
             outNr1FboId = 0; outNr1TexId = 0
             outNr2FboId = 0; outNr2TexId = 0
             releaseS5CBuffers()
@@ -4777,6 +4658,15 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
          * the return to ride on.
          */
         private const val S5_GRAIN_DOSE = 1.19f
+
+    // The paper-shaped field's dose. The field is NOT unit variance: the
+    // shader's measured std is 0.80 and mean |x| is 0.686, with the 3x3 half
+    // carrying 1/12 of the white half's power. The dose is measured against
+    // that field, in image units: 2.77e-4 puts mean |x| at 1.9e-4
+    // (PINNED_DOSE 5.4e-4 times the 0.35 branch share). The earlier 1.7e-4
+    // was compensating for the shortfall (1.7e-4 * 0.686 = 1.17e-4); that is
+    // why the same-shot read only 0.84 of the sim, not a JPEG tolerance.
+    private const val S5_GRAIN_FIELD_DOSE = 2.77e-4f
 
         // Minimum spacing between S5-L operating-point probe lines. The probe
         // reads three texels, and each readback stalls the GL queue until every

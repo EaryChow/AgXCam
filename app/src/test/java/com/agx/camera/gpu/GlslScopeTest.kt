@@ -230,7 +230,7 @@ class GlslScopeTest {
             "StructureMapShaderProgram" to listOf("VERTEX_SHADER", "FRAGMENT_SHADER"),
             "OutNrShaderProgram" to listOf(
                 "VERTEX_SHADER", "STATS_H_FRAGMENT", "STATS_V_FRAGMENT",
-                "GUIDED_H_FRAGMENT", "GUIDED_V_FRAGMENT", "MAIN_FRAGMENT",
+                "MAIN_FRAGMENT",
                 "GRAIN_DCH_FRAGMENT", "GRAIN_DC_FRAGMENT", "GRAIN_STAT_FRAGMENT", "GRAIN_SMOOTH_FRAGMENT",
                 "GRAIN_APPLY_FRAGMENT"
             ),
