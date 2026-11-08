@@ -12,7 +12,6 @@ data class AgxParams(
     val tintingScale: Float = 0f,
     val tintingHue: Float = 0f,
     val vibrance: Float = 0.6f,
-    val nrStrength: Float = 0f,
     val useRotationForReverse: Boolean = true,
     val useAttenuationForBoost: Boolean = false
 ) {
@@ -28,7 +27,7 @@ data class AgxParams(
     )
 
     companion object {
-        fun fromInsetParams(p: AgxPrecomputer.InsetParams, contrast: Float = 2.4f, toe: Float = 1.5f, shoulder: Float = 1.5f, middleGray: Float = 18f, vibrance: Float = 0.6f, nrStrength: Float = 0f) = AgxParams(
+        fun fromInsetParams(p: AgxPrecomputer.InsetParams, contrast: Float = 2.4f, toe: Float = 1.5f, shoulder: Float = 1.5f, middleGray: Float = 18f, vibrance: Float = 0.6f) = AgxParams(
             contrast = contrast,
             toe = toe,
             shoulder = shoulder,
@@ -40,7 +39,6 @@ data class AgxParams(
             purityBoost = p.purityBoost.copyOf(),
             tintingScale = p.tintingScale,
             tintingHue = p.tintingHue,
-            nrStrength = nrStrength,
             useRotationForReverse = p.useRotationForReverse,
             useAttenuationForBoost = p.useAttenuationForBoost
         )

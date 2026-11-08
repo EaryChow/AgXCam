@@ -338,7 +338,6 @@ class ShaderBudgetTest {
         budget.record("bayer", 1000, "test")
         budget.record("demosaic", 1000, "test")
         budget.record("nr", 1000, "test")
-        budget.record("spatialNr", 1000, "test")
         budget.record("dpc", 1000, "test")
         budget.record("outNr", 1000, "test")
         budget.record("sigmaHat", 250, "test")
@@ -346,14 +345,14 @@ class ShaderBudgetTest {
         budget.record("sigmaBucket", 250, "test")
         budget.record("structureMap", 250, "test")
 
-        assertEquals(6000, budget.baselineBytes())
+        assertEquals(5000, budget.baselineBytes())
         assertEquals(1000, budget.phase1Bytes())
         val text = budget.report(measurementForcedChain = false)
         // Both sets must be named with their membership, so the ratio between
         // them is auditable rather than a bare percentage of an unnamed total.
-        assertTrue(text, text.contains("baseline set (6 programs) = 6000 bytes"))
+        assertTrue(text, text.contains("baseline set (5 programs) = 5000 bytes"))
         assertTrue(text, text.contains("Phase-1 additions (4 programs) = 1000 bytes"))
-        assertTrue(text, text.contains("+16.7% of the baseline set"))
+        assertTrue(text, text.contains("+20.0% of the baseline set"))
         // And the caliber has to be stated, because this table is compared by
         // eye against a source-size budget that it is not measured in.
         assertTrue(text, text.contains("GL_PROGRAM_BINARY_LENGTH"))

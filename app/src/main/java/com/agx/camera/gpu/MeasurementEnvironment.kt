@@ -288,9 +288,9 @@ class ShaderBudget {
             "sigmaHat", "rawDenoise", "sigmaBucket", "structureMap"
         )
 
-        /** The shader set that existed before Phase 1. */
+        /** The pre-Phase-1 shader set that still ships. */
         val BASELINE_PROGRAMS = listOf(
-            "bayer", "demosaic", "nr", "spatialNr", "dpc", "outNr"
+            "bayer", "demosaic", "nr", "dpc", "outNr"
         )
 
         /** The chroma programs added on top of the S5 luma/chroma split: the

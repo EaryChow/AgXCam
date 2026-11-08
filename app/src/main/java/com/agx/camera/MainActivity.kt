@@ -432,10 +432,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tintingScaleLabel: TextView; private lateinit var tintingScaleSlider: SeekBar
     private lateinit var tintingHueLabel: TextView; private lateinit var tintingHueSlider: SeekBar
 
-    // NR
-    private lateinit var nrLabel: TextView; private lateinit var nrSlider: SeekBar
-
-    // Multi-stage denoise: independent S1/S5 sliders (S3 is retired).
+    // Denoising: independent hot-pixel/luma/chroma sliders (S3 is retired).
     private lateinit var s1Label: TextView; private lateinit var s1Slider: SeekBar
     private lateinit var s5Label: TextView; private lateinit var s5Slider: SeekBar
     private lateinit var s5cLabel: TextView; private lateinit var s5cSlider: SeekBar
@@ -550,7 +547,6 @@ class MainActivity : AppCompatActivity() {
         tintingScaleLabel = findViewById(R.id.tinting_scale_label); tintingScaleSlider = findViewById(R.id.tinting_scale_slider)
         tintingHueLabel = findViewById(R.id.tinting_hue_label); tintingHueSlider = findViewById(R.id.tinting_hue_slider)
 
-        nrLabel = findViewById(R.id.nr_label); nrSlider = findViewById(R.id.nr_slider)
 
         s1Label = findViewById(R.id.s1_label); s1Slider = findViewById(R.id.s1_slider)
         s5Label = findViewById(R.id.s5_label); s5Slider = findViewById(R.id.s5_slider)
@@ -1561,52 +1557,41 @@ class MainActivity : AppCompatActivity() {
             uploadAgxUniforms()
         }
 
-        nrSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
-            agxParams = agxParams.copy(nrStrength = v / 100f)
-            nrLabel.text = String.format("NR Strength  %.1f", agxParams.nrStrength)
-            uploadAgxUniforms()
-        })
-        setupSliderDoubleClickReset(nrSlider, 0) {
-            agxParams = agxParams.copy(nrStrength = 0f)
-            nrLabel.text = "NR Strength  0.0"
-            uploadAgxUniforms()
-        }
-
         s1Slider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             dpcStrength = v / 100f
-            s1Label.text = "S1 DPC  $v"
+            s1Label.text = "Hot Pixel Removal  $v"
             previewRenderer.dpcStrength = dpcStrength
             previewResPrefs.edit().putFloat(PREF_S1_DPC, dpcStrength).apply()
         })
         setupSliderDoubleClickReset(s1Slider, 100) {
             dpcStrength = 1f
-            s1Label.text = "S1 DPC  100"
+            s1Label.text = "Hot Pixel Removal  100"
             previewRenderer.dpcStrength = 1f
             previewResPrefs.edit().putFloat(PREF_S1_DPC, 1f).apply()
         }
 
         s5Slider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             outNrStrength = v / 100f
-            s5Label.text = "S5 LUMA  $v"
+            s5Label.text = "Luma Denoising  $v"
             previewRenderer.outNrStrength = outNrStrength
             previewResPrefs.edit().putFloat(PREF_S5_OUT, outNrStrength).apply()
         })
         setupSliderDoubleClickReset(s5Slider, 50) {
             outNrStrength = 0.5f
-            s5Label.text = "S5 LUMA  50"
+            s5Label.text = "Luma Denoising  50"
             previewRenderer.outNrStrength = 0.5f
             previewResPrefs.edit().putFloat(PREF_S5_OUT, 0.5f).apply()
         }
 
         s5cSlider.setOnSeekBarChangeListener(simpleSeekBar { v ->
             outNrChromaStrength = v / 100f
-            s5cLabel.text = "S5 CHROMA  $v"
+            s5cLabel.text = "Chroma Denoising  $v"
             previewRenderer.outNrChromaStrength = outNrChromaStrength
             previewResPrefs.edit().putFloat(PREF_S5C_OUT, outNrChromaStrength).apply()
         })
         setupSliderDoubleClickReset(s5cSlider, 100) {
             outNrChromaStrength = 1f
-            s5cLabel.text = "S5 CHROMA  100"
+            s5cLabel.text = "Chroma Denoising  100"
             previewRenderer.outNrChromaStrength = 1f
             previewResPrefs.edit().putFloat(PREF_S5C_OUT, 1f).apply()
         }
@@ -1823,7 +1808,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadPreset(name: String) {
         val preset = presetManager.load(name) ?: return
-        agxParams = preset.agxParams.copy(nrStrength = agxParams.nrStrength)
+        agxParams = preset.agxParams
         syncAllSliders()
         uploadAgxUniforms()
     }
@@ -1852,15 +1837,12 @@ class MainActivity : AppCompatActivity() {
         tintingHueSlider.progress = (agxParams.tintingHue / 0.01f + 314).toInt().coerceIn(0, 628)
         tintingHueLabel.text = String.format("Hue  %.2f", agxParams.tintingHue)
 
-        nrSlider.progress = (agxParams.nrStrength * 100).toInt().coerceIn(0, 100)
-        nrLabel.text = String.format("NR Strength  %.1f", agxParams.nrStrength)
-
         s1Slider.progress = (dpcStrength * 100).toInt().coerceIn(0, 100)
-        s1Label.text = "S1 DPC  ${s1Slider.progress}"
+        s1Label.text = "Hot Pixel Removal  ${s1Slider.progress}"
         s5Slider.progress = (outNrStrength * 100).toInt().coerceIn(0, 100)
-        s5Label.text = "S5 LUMA  ${s5Slider.progress}"
+        s5Label.text = "Luma Denoising  ${s5Slider.progress}"
         s5cSlider.progress = (outNrChromaStrength * 100).toInt().coerceIn(0, 100)
-        s5cLabel.text = "S5 CHROMA  ${s5cSlider.progress}"
+        s5cLabel.text = "Chroma Denoising  ${s5cSlider.progress}"
 
         clipAttenSlider.progress = (clipAttenFactor * 100).toInt().coerceIn(0, 100)
         clipAttenLabel.text = String.format("Neutralize  %.2f", clipAttenFactor)
@@ -4652,7 +4634,6 @@ class MainActivity : AppCompatActivity() {
         previewRenderer.agxToe = agxParams.toe
         previewRenderer.agxShoulder = agxParams.shoulder
         previewRenderer.agxVibrance = agxParams.vibrance
-        previewRenderer.bayerNrStrength = agxParams.nrStrength
     }
 
     private fun extractPlane(plane: android.media.Image.Plane, width: Int, height: Int): java.nio.ByteBuffer {
