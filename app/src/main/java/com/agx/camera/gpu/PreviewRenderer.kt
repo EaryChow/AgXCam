@@ -1758,7 +1758,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         probeForced: Boolean = false, timerPrefix: String = ""
     ): Int {
         if (!outNrShader.isReady()) return inputTex
-        ensureOutNrBuffers(w, h)
+        PerfTimers.measure("${timerPrefix}S5.buffers") { ensureOutNrBuffers(w, h) }
         // sigmaTex holds sigma_hat on the 2x2-cell grid (cellGridW/H), which can differ
         // from this pass's output res; drawMain scales the fetch accordingly.
         val sigmaW = gridW.toFloat()
@@ -2063,7 +2063,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val winScale = w / 640f
         val rSupport = maxOf(1, (4.0 / 1.5 * winScale + 0.5).toInt()).toFloat()
         val rGuide = maxOf(1, (2.0 / 1.5 * winScale + 0.5).toInt()).toFloat()
-        ensureS5CBuffers(w, h)
+        PerfTimers.measure("${timerPrefix}S5C.buffers") { ensureS5CBuffers(w, h) }
         val useGuideLuma = s5cLumaFboId != 0 && s5cLumaTexId != 0 &&
             s5cShader.lumaReady()
         val useGuideChroma = useGuideLuma && s5cChromaFboId != 0 &&
@@ -2148,7 +2148,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val r1 = maxOf(1, (S5W_BASE_RADII[1] * sc + 0.5f).toInt()).toFloat()
         val r2 = maxOf(1, (S5W_BASE_RADII[2] * sc + 0.5f).toInt()).toFloat()
         val r3 = maxOf(1, (S5W_BASE_RADII[3] * sc + 0.5f).toInt()).toFloat()
-        if (!ensureS5WBuffers(w, h)) return inputTex
+        val s5wBuffers = PerfTimers.measure("${timerPrefix}S5W.buffers") {
+            ensureS5WBuffers(w, h)
+        }
+        if (!s5wBuffers) return inputTex
         // EV PP multiplies the linear scene by 2^EV after Stage 5, so the
         // noise target this stage writes against must carry the squared gain
         // to stay effective at high EV - the same fold, anchored at the +1.5
@@ -3049,8 +3052,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 val captureStartNs = System.nanoTime()
                 val outW = rawCaptureReq.targetW.takeIf { it in 1..rawCaptureReq.rawW } ?: rawCaptureReq.rawW
                 val outH = rawCaptureReq.targetH.takeIf { it in 1..rawCaptureReq.rawH } ?: rawCaptureReq.rawH
-                ensureRawDemosaicFbo(outW, outH)
-                ensureDownscaleFbo(outW, outH)
+                PerfTimers.measure("capture.raw_fbo") { ensureRawDemosaicFbo(outW, outH) }
+                PerfTimers.measure("capture.downscale_fbo") { ensureDownscaleFbo(outW, outH) }
                 if (rawDemosaicFboId != 0 && downscaleFboId != 0) {
                     applyBayerCrop()
 
@@ -3267,7 +3270,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     // that Stage 6's AgX development relies on (previously dead
                     // on the real capture path).  If buffer/shader are missing,
                     // useIsoSigma falls back to the ISO model formula.
-                    ensureCaptureSigmaBuffer(rawDemosaicFboWidth, rawDemosaicFboHeight)
+                    PerfTimers.measure("capture.s2_buffers") {
+                        ensureCaptureSigmaBuffer(rawDemosaicFboWidth, rawDemosaicFboHeight)
+                    }
                     var captureSigmaTex = 0
                     if (outNrStrength > 0f && outNrShader.isReady() && sigmaHatShader.isReady() && captureSigmaFboId != 0) {
                         val capSigmaNs0 = System.nanoTime()

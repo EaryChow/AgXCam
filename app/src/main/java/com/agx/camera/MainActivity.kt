@@ -5442,7 +5442,11 @@ override fun onResume() {
                     }
                 } else null
 
-                saveCaptureJpeg(jpegData, thumbnailJpeg, session, metadata)
+                val jpegSaveThread = Thread({
+                    PerfTimers.measure("capture.save_jpeg") {
+                        saveCaptureJpeg(jpegData, thumbnailJpeg, session, metadata)
+                    }
+                }, "CaptureJpegSave").apply { start() }
                 if (wantDng) {
                     var templateRaw: android.media.Image? = null
                     try {
@@ -5594,6 +5598,7 @@ override fun onResume() {
                         templateRaw?.close()
                     }
                 }
+                jpegSaveThread.join()
             } catch (e: Exception) {
                 Log.e(TAG, "RAW capture processing failed", e)
                 mainHandler.post {
