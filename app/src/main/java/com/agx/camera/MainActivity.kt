@@ -330,7 +330,7 @@ class MainActivity : AppCompatActivity() {
     // Multi-stage denoise strengths (0..1, 0 = bypass): S1 DPC and S5
     // post-demosaic SWGF. S3 RAW green-guided GF is retired and pinned at 0;
     // the field stays because the renderer and the capture metadata carry it.
-    private var dpcStrength = 0f
+    private var dpcStrength = 1f
     private var rawNrStrength = 0f
     private var outNrStrength = 0.5f
     // S5-C chroma strength, independent of the S5 luma slider.
@@ -454,6 +454,9 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         CrashLogger.log(TAG, "onCreate: begin")
+        if (LOG_SLIDER_CHANGES) {
+            CrashLogger.log(TAG, "slider logging active: release + 900ms settle fallback")
+        }
         enableEdgeToEdge()
         window.addFlags(
             android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
@@ -636,7 +639,18 @@ class MainActivity : AppCompatActivity() {
         limitedAutoWb = previewResPrefs.getBoolean(PREF_LIMITED_WB, true)
         weightedEstimation = previewResPrefs.getBoolean(PREF_WEIGHTED_ESTIMATION, true)
         clipAttenFactor = previewResPrefs.getFloat(PREF_CLIP_ATTEN, 0.1f).coerceIn(0f, 1f)
-        dpcStrength = previewResPrefs.getFloat(PREF_S1_DPC, 0f).coerceIn(0f, 1f)
+        // S1's default moved from 0 to 1, which needs a new key: the old one
+        // cannot tell "never touched" from "chose 0". While the new key is
+        // absent, carry a deliberate non-zero choice across; a profile that
+        // never made one takes the new default. Nothing is written on load, so
+        // the read repeats until the slider is first moved.
+        val storedS1 = previewResPrefs.getFloat(PREF_S1_DPC, Float.NaN)
+        val legacyS1 = previewResPrefs.getFloat(PREF_S1_DPC_LEGACY, 0f)
+        dpcStrength = (
+            if (!storedS1.isNaN()) storedS1
+            else if (legacyS1 > 0f) legacyS1
+            else 1f
+        ).coerceIn(0f, 1f)
         // Stage 3 is retired: the strength is pinned to 0, which the filter treats
         // as a bit-exact bypass. The stored preference is ignored rather than
         // migrated, because the stage no longer exists.
@@ -1564,11 +1578,11 @@ class MainActivity : AppCompatActivity() {
             previewRenderer.dpcStrength = dpcStrength
             previewResPrefs.edit().putFloat(PREF_S1_DPC, dpcStrength).apply()
         })
-        setupSliderDoubleClickReset(s1Slider, 0) {
-            dpcStrength = 0f
-            s1Label.text = "S1 DPC  0"
-            previewRenderer.dpcStrength = 0f
-            previewResPrefs.edit().putFloat(PREF_S1_DPC, 0f).apply()
+        setupSliderDoubleClickReset(s1Slider, 100) {
+            dpcStrength = 1f
+            s1Label.text = "S1 DPC  100"
+            previewRenderer.dpcStrength = 1f
+            previewResPrefs.edit().putFloat(PREF_S1_DPC, 1f).apply()
         }
 
         s5Slider.setOnSeekBarChangeListener(simpleSeekBar { v ->
@@ -1922,11 +1936,55 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun simpleSeekBar(onProgress: (Int) -> Unit) = object : SeekBar.OnSeekBarChangeListener {
-        override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
-            if (fromUser) onProgress(progress)
+        private var startProgress = -1
+        private var lastProgress = -1
+        private var settleBar: SeekBar? = null
+        private val settleLog = Runnable {
+            val bar = settleBar ?: return@Runnable
+            logSliderChange(bar, startProgress, lastProgress, settled = true)
+            startProgress = lastProgress
         }
-        override fun onStartTrackingTouch(seekBar: SeekBar) {}
-        override fun onStopTrackingTouch(seekBar: SeekBar) {}
+
+        override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+            if (!fromUser) return
+            if (startProgress < 0) {
+                startProgress = if (lastProgress >= 0) lastProgress else progress
+            }
+            lastProgress = progress
+            settleBar = seekBar
+            onProgress(progress)
+            // The release callback normally fires first. This is a fallback for
+            // the rare case where the touch-up is consumed before the SeekBar
+            // sees it; it still emits one line per settled value, not per step.
+            mainHandler.removeCallbacks(settleLog)
+            mainHandler.postDelayed(settleLog, 900)
+        }
+
+        override fun onStartTrackingTouch(seekBar: SeekBar) {
+            mainHandler.removeCallbacks(settleLog)
+            startProgress = seekBar.progress
+            lastProgress = seekBar.progress
+            settleBar = seekBar
+        }
+
+        override fun onStopTrackingTouch(seekBar: SeekBar) {
+            mainHandler.removeCallbacks(settleLog)
+            logSliderChange(seekBar, startProgress, seekBar.progress, settled = false)
+            startProgress = seekBar.progress
+            lastProgress = seekBar.progress
+        }
+    }
+
+    private fun logSliderChange(seekBar: SeekBar, from: Int, to: Int, settled: Boolean) {
+        if (!LOG_SLIDER_CHANGES) return
+        if (from < 0 || from == to) return
+        val name = if (seekBar.id != View.NO_ID) {
+            runCatching { resources.getResourceEntryName(seekBar.id) }.getOrDefault("slider")
+        } else {
+            "slider"
+        }
+        val kind = if (settled) "slider settle" else "slider release"
+        CrashLogger.log(TAG, "$kind: $name $from -> $to")
     }
 
     private fun updateFlashUI() {
@@ -6135,8 +6193,16 @@ override fun onResume() {
         // from the color gains. Deliberately independent of the illuminant
         // stage's dual-rate alpha.
         private const val ESTIMATOR_NEUTRAL_SMOOTHING = 0.4f
+        // Diagnostic only: slider releases/settles are unrelated to the image
+        // pipeline. Set false for a production build that does not need the
+        // performance-segmentation markers.
+        private const val LOG_SLIDER_CHANGES = false
         // Multi-stage denoise strengths, 0..1 each.
-        private const val PREF_S1_DPC = "stage1_dpc_strength"
+        // Renamed when S1's default moved from 0 to 1; PREF_S1_DPC_LEGACY is
+        // read while the new key is absent, to carry a deliberate non-zero
+        // choice across (see the migration).
+        private const val PREF_S1_DPC = "stage1_dpc_strength2"
+        private const val PREF_S1_DPC_LEGACY = "stage1_dpc_strength"
         // Renamed each time the default moved (0 -> 1, then 1 -> 0.5); the two
         // older keys are read while the new one is absent, to carry a deliberate
         // choice across (see the migration).

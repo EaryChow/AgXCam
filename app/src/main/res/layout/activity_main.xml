@@ -867,8 +867,8 @@
 
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Multi-Stage Denoise" android:textColor="#FFAAAAAA" android:textSize="11sp" android:layout_marginBottom="4dp" />
 
-            <TextView android:id="@+id/s1_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="S1 DPC  0" android:textColor="#FFFFFFFF" android:textSize="11sp" />
-            <SeekBar android:id="@+id/s1_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="100" android:progress="0" android:layout_marginBottom="8dp" />
+            <TextView android:id="@+id/s1_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="S1 DPC  100" android:textColor="#FFFFFFFF" android:textSize="11sp" />
+            <SeekBar android:id="@+id/s1_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="100" android:progress="100" android:layout_marginBottom="8dp" />
 
             <TextView android:id="@+id/s5_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="S5 LUMA  50" android:textColor="#FFFFFFFF" android:textSize="11sp" />
             <SeekBar android:id="@+id/s5_slider" android:layout_width="match_parent" android:layout_height="wrap_content" android:min="0" android:max="100" android:progress="50" android:layout_marginBottom="8dp" />

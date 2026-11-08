@@ -140,6 +140,25 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     // written by the demosaic's MRT flag output.  Zero when DPC/S5 are off.
     private var captureFlagTexId = 0
 
+    // One-time S1 candidate masks. R8 at raw resolution: 12.5 MB for a 12 MP
+    // frame, not the RGBA32F capture flag attachment.
+    private var s1MaskFboId = 0
+    private var s1MaskTexId = 0
+    private var s1MaskWidth = 0
+    private var s1MaskHeight = 0
+
+    // Shared S1 candidate list. Preview and capture both validate and repair
+    // from this one list; capture no longer runs the inline gate once the list
+    // matches. The device showed the all-inline preview at 12 fps, so the list
+    // is required for the preview performance budget.
+    @Volatile private var defectList: IntArray? = null
+    @Volatile private var defectListBuilding = false
+    @Volatile private var defectListGen = 0
+    @Volatile private var defectListIso = 0
+    @Volatile private var defectListW = 0
+    @Volatile private var defectListH = 0
+    private val bayerBufferLock = Any()
+
     // Stage 5 (post-demosaic SWGF) buffers: separable box-stats pair and two
     // iteration outputs. RGBA32F at the demosaic resolution.
     private var statsHFboId = 0
@@ -871,16 +890,55 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
     data class RawFrameCopy(val buffer: ByteBuffer, val width: Int, val height: Int)
 
-    fun pullBayerCopy(): RawFrameCopy? {
-        val src = bayerBuffer ?: return null
-        if (bayerWidth <= 0 || bayerHeight <= 0) return null
+    private data class PointBackup(val list: IntArray, val values: ShortArray)
+
+    private fun snapshotAndRepair(
+        buffer: ByteBuffer,
+        width: Int,
+        height: Int,
+        stridePixels: Int,
+        iso: Int,
+        list: IntArray? = defectList
+    ): PointBackup? {
+        if (list == null || list.isEmpty()) return null
+        if (dpcStrength <= 0f || rawNrStrength > 0f) return null
+        if (width != defectListW || height != defectListH) return null
+        val values = ShortArray(list.size)
+        val src = buffer.duplicate()
+        for (i in list.indices) {
+            val idx = list[i]
+            val y = idx / width
+            val x = idx - y * width
+            values[i] = src.getShort((y * stridePixels + x) * 2)
+        }
+        DefectMap.repairInPlace(
+            buffer, width, height, stridePixels, iso, bayerBlackLevelPattern, list
+        )
+        return PointBackup(list, values)
+    }
+
+    private fun restorePoints(
+        buffer: ByteBuffer, width: Int, stridePixels: Int, backup: PointBackup
+    ) {
+        val dst = buffer.duplicate()
+        for (i in backup.list.indices) {
+            val idx = backup.list[i]
+            val y = idx / width
+            val x = idx - y * width
+            dst.putShort((y * stridePixels + x) * 2, backup.values[i])
+        }
+    }
+
+    fun pullBayerCopy(): RawFrameCopy? = synchronized(bayerBufferLock) {
+        val src = bayerBuffer ?: return@synchronized null
+        if (bayerWidth <= 0 || bayerHeight <= 0) return@synchronized null
         val copy = ByteBuffer.allocateDirect(bayerWidth * bayerHeight * 2)
         val view = src.asReadOnlyBuffer()
         view.position(0)
         view.limit(src.capacity())
         copy.put(view)
         copy.position(0)
-        return RawFrameCopy(copy, bayerWidth, bayerHeight)
+        RawFrameCopy(copy, bayerWidth, bayerHeight)
     }
 
     internal fun submitCaptureFrame(
@@ -974,11 +1032,24 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     }
 
     fun setBayerFrame(buffer: ByteBuffer, width: Int, height: Int, stridePixels: Int) {
-        bayerBuffer = buffer
-        bayerWidth = width
-        bayerHeight = height
-        bayerStridePixels = stridePixels
-        hasNewFrame = true
+        if (width != bayerWidth || height != bayerHeight) {
+            defectList = null
+            defectListW = 0
+            defectListH = 0
+            defectListIso = 0
+            defectListGen++
+        }
+        // The list is applied to the upload transiently, then the raw buffer is
+        // restored so the DNG snapshot remains untouched. Start a list build
+        // from the untouched frame.
+        maybeStartDefectList(buffer, width, height, stridePixels, isoForDenoise)
+        synchronized(bayerBufferLock) {
+            bayerBuffer = buffer
+            bayerWidth = width
+            bayerHeight = height
+            bayerStridePixels = stridePixels
+            hasNewFrame = true
+        }
         renderLock.withLock {
             frameCondition.signal()
         }
@@ -1007,7 +1078,68 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         bayerLensShadingWidth = 1
         bayerLensShadingHeight = 1
         lensShadingUploadPending = true
+        // Rebuild on a lens change; the user does not want to assume the
+        // defect set survives session/lens transitions. The sensor geometry
+        // reset in setBayerFrame handles a raw-size change separately.
+        defectList = null
+        defectListW = 0
+        defectListH = 0
+        defectListIso = 0
+        defectListGen++
         requestRender()
+    }
+
+    private fun maybeStartDefectList(
+        buffer: ByteBuffer, width: Int, height: Int, stridePixels: Int, iso: Int
+    ) {
+        if (dpcStrength <= 0f || rawNrStrength > 0f) return
+        if (defectListBuilding) return
+        val existing = defectList
+        // Build from the first frame, then only when exposure/ISO rises
+        // materially. The old list stays active while the higher-exposure
+        // build runs; candidates are appended, never discarded.
+        if (existing != null && iso <= maxOf(200, (defectListIso * 3) / 2)) return
+        defectListBuilding = true
+        val src = buffer.duplicate().order(ByteOrder.nativeOrder())
+        src.position(0)
+        val copy = ByteBuffer.allocateDirect(src.remaining()).order(ByteOrder.nativeOrder())
+        copy.put(src)
+        copy.position(0)
+        val gen = defectListGen
+        val black = bayerBlackLevelPattern.copyOf()
+        Thread({
+            try {
+                val t0 = System.nanoTime()
+                val list = DefectMap.buildList(
+                    copy, width, height, stridePixels, iso, black
+                )
+                if (gen == defectListGen) {
+                    val merged = if (existing != null && existing.isNotEmpty() &&
+                        defectListW == width && defectListH == height
+                    ) {
+                        val set = LinkedHashSet<Int>(existing.size + list.size)
+                        for (v in existing) set.add(v)
+                        for (v in list) set.add(v)
+                        set.toIntArray()
+                    } else {
+                        list
+                    }
+                    defectListW = width
+                    defectListH = height
+                    defectList = merged
+                    defectListIso = maxOf(defectListIso, iso)
+                    CrashLogger.log(
+                        TAG, "cached S1 defect list: ${width}x${height} points=${merged.size} " +
+                            "(new=${list.size}, iso=$iso) in " +
+                            "%.1f".format((System.nanoTime() - t0) / 1.0e6) + "ms"
+                    )
+                }
+            } catch (t: Throwable) {
+                CrashLogger.log(TAG, "defect list build failed: ${t.message}")
+            } finally {
+                defectListBuilding = false
+            }
+        }, "DefectListBuild").start()
     }
 
     fun start() {
@@ -1139,7 +1271,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val cellGridW = demosaicFboWidth
         val cellGridH = demosaicFboHeight
 
-        val dpEnabled = dpcStrength > 0f && dpcShader.isReady()
+        val s1ByList = dpcStrength > 0f && rawNrStrength <= 0f &&
+            defectList != null && defectListW == effW && defectListH == effH
+        val dpEnabled = false
         val rawDenoiseActive = rawNrStrength > 0f && rawDenoiseShader.isReady()
         val outDenoiseActive = outNrStrength > 0f && outNrShader.isReady()
         // S5 is split into an independent luma branch (S5-L) and chroma branch
@@ -1163,7 +1297,17 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-        bayerShader.uploadBayer(buffer!!.duplicate(), effW, effH, effStride)
+        val uploadBuffer = buffer!!
+        synchronized(bayerBufferLock) {
+            val previewBackup = snapshotAndRepair(
+                uploadBuffer, effW, effH, effStride, isoForDenoise
+            )
+            try {
+                bayerShader.uploadBayer(uploadBuffer.duplicate(), effW, effH, effStride)
+            } finally {
+                previewBackup?.let { restorePoints(uploadBuffer, effW, effStride, it) }
+            }
+        }
         logGlError("after uploadBayer", bayerRenderCount)
 
         // Hoisted slider-strength values shared by the live pipeline and the
@@ -1275,7 +1419,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             )
             sparseChainTex = demosaicDenoisedId
             logGlError("after runDpcAndGfChain", bayerRenderCount)
-        } else if (!needSparseGrid && (s1 > 0f || s3 > 0f) && bayerShader.isReady() && previewZoomK <= 2.0f) {
+        } else if (!needSparseGrid && s3 > 0f && bayerShader.isReady() && previewZoomK <= 2.0f) {
             // Pack fallback when DPC/GF shaders aren't ready.
             ensureS3PackBuffers(cellGridW, cellGridH)
             if (s3PackFboId != 0) {
@@ -1431,7 +1575,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // (u_nr_radius=2).  The smooth blend's 2x2 side passes ring=4 in-shader
         // (the full 12-tap form that drags sigma down hard up there), so the
         // preview never switches u_nr_radius below/above while blending.
-        val previewNrRadius = 2
+        val previewNrRadius = 4
         // Smooth 4->2 box weight: 0 below s3=0.65, smoothstep to 1 by s3=0.75.
         val boxBlend = if (previewZoomK <= 2f) 0f else {
             val t = ((s3 - 0.65f) / 0.10f).coerceIn(0f, 1f)
@@ -1460,7 +1604,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             denoisedTextureId = demosaicDenoisedId,
             denoiseActive = demosaicDenoisedId != 0,
             scaleFactor = previewZoomK,
-            dpStrength = if (demosaicDenoisedId != 0) 0f else s1,
+            dpStrength = if (demosaicDenoisedId != 0 || s1ByList) 0f else s1,
             rawNrStrength = if (demosaicDenoisedId != 0) 0f else s3,
             isoModelA = isoModelA,
             isoModelB = isoModelB
@@ -3112,7 +3256,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             if (rawCaptureReq != null) {
                 val outW = rawCaptureReq.targetW.takeIf { it in 1..rawCaptureReq.rawW } ?: rawCaptureReq.rawW
                 val outH = rawCaptureReq.targetH.takeIf { it in 1..rawCaptureReq.rawH } ?: rawCaptureReq.rawH
-
                 ensureRawDemosaicFbo(outW, outH)
                 ensureDownscaleFbo(outW, outH)
                 if (rawDemosaicFboId != 0 && downscaleFboId != 0) {
@@ -3131,6 +3274,102 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         rawCaptureReq.buffer.duplicate(),
                         rawCaptureReq.rawW, rawCaptureReq.rawH, rawCaptureReq.stridePixels
                     )
+                    logGlError("raw after initial uploadBayer", bayerRenderCount)
+
+                    // Build/extend the candidate list from this still's own
+                    // exposure. The preview list may have been built at a
+                    // shorter exposure and cannot see long-exposure sites.
+                    val gpuList = if (dpcStrength > 0f && rawNrStrength <= 0f) {
+                        buildCaptureS1List(
+                            rawCaptureReq.rawW, rawCaptureReq.rawH, isoForDenoise
+                        )
+                    } else {
+                        IntArray(0)
+                    }
+                    if (gpuList.isNotEmpty()) {
+                        val old = defectList
+                        val merged = if (old != null && old.isNotEmpty() &&
+                            defectListW == rawCaptureReq.rawW &&
+                            defectListH == rawCaptureReq.rawH
+                        ) {
+                            val set = LinkedHashSet<Int>(old.size + gpuList.size)
+                            for (v in old) set.add(v)
+                            for (v in gpuList) set.add(v)
+                            set.toIntArray()
+                        } else {
+                            gpuList
+                        }
+                        defectListGen++
+                        defectListW = rawCaptureReq.rawW
+                        defectListH = rawCaptureReq.rawH
+                        defectList = merged
+                        defectListIso = maxOf(defectListIso, isoForDenoise)
+                        CrashLogger.log(
+                            TAG, "capture S1 list updated: points=${merged.size} " +
+                                "(gpu=${gpuList.size}, iso=$isoForDenoise)"
+                        )
+                    }
+
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, rawDemosaicFboId)
+                    GLES20.glViewport(0, 0, rawDemosaicFboWidth, rawDemosaicFboHeight)
+
+                    // The shared S1 list is applied to the same raw copy that
+                    // the capture uploads. It is already a writable snapshot;
+                    // there is no scan, no second copy and no per-capture
+                    // list build. The list validates each point on this frame
+                    // before writing.
+                    val captureSharedList = defectList
+                    val captureS1ByList = captureSharedList != null &&
+                        defectListW == rawCaptureReq.rawW &&
+                        defectListH == rawCaptureReq.rawH &&
+                        dpcStrength > 0f && rawNrStrength <= 0f
+                    var captureListOriginals: ShortArray? = null
+                    if (captureS1ByList) {
+                        val list = captureSharedList!!
+                        captureListOriginals = ShortArray(list.size)
+                        val src = rawCaptureReq.buffer.duplicate()
+                        for (i in list.indices) {
+                            val idx = list[i]
+                            val y = idx / rawCaptureReq.rawW
+                            val x = idx - y * rawCaptureReq.rawW
+                            captureListOriginals[i] =
+                                src.getShort((y * rawCaptureReq.stridePixels + x) * 2)
+                        }
+                        val repaired = DefectMap.repairInPlace(
+                            rawCaptureReq.buffer,
+                            rawCaptureReq.rawW, rawCaptureReq.rawH,
+                            rawCaptureReq.stridePixels,
+                            isoForDenoise, bayerBlackLevelPattern,
+                            list
+                        )
+                        CrashLogger.log(
+                            TAG, "capture S1 list repaired $repaired/${list.size} points"
+                        )
+                    }
+
+                    try {
+                        bayerShader.uploadBayer(
+                            rawCaptureReq.buffer.duplicate(),
+                            rawCaptureReq.rawW, rawCaptureReq.rawH, rawCaptureReq.stridePixels
+                        )
+                    } finally {
+                        // The DNG is written from this same snapshot after the
+                        // render. Restore the few repaired samples so the DNG
+                        // remains the untouched sensor raw.
+                        val originals = captureListOriginals
+                        if (originals != null && captureSharedList != null) {
+                            val dst = rawCaptureReq.buffer.duplicate()
+                            for (i in captureSharedList.indices) {
+                                val idx = captureSharedList[i]
+                                val y = idx / rawCaptureReq.rawW
+                                val x = idx - y * rawCaptureReq.rawW
+                                dst.putShort(
+                                    (y * rawCaptureReq.stridePixels + x) * 2,
+                                    originals[i]
+                                )
+                            }
+                        }
+                    }
                     logGlError("raw after uploadBayer", bayerRenderCount)
                     if (bayerNrStrength > 0f && spatialNrShader.isReady()) {
                         ensureCaptureDenoiseBuffers(rawDemosaicFboWidth, rawDemosaicFboHeight)
@@ -3213,7 +3452,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         denoisedTextureId = if (legacyRawDenoiseActive) captureDenoisedTexId else 0,
                         denoiseActive = legacyRawDenoiseActive,
                         scaleFactor = captureK,
-                        dpStrength = dpcStrength.coerceIn(0f, 1f),
+                        dpStrength = if (captureS1ByList) 0f else dpcStrength.coerceIn(0f, 1f),
                         rawNrStrength = rawNrStrength.coerceIn(0f, 1f),
                         isoModelA = captureIsoModelA,
                         isoModelB = captureIsoModelB,
@@ -3925,6 +4164,83 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         CrashLogger.log(TAG, "Raw demosaic FBO created RGBA32F: ${width}x${height} flag=$captureFlagTexId")
     }
 
+    private fun ensureS1MaskFbo(width: Int, height: Int) {
+        if (s1MaskFboId != 0 && s1MaskWidth == width && s1MaskHeight == height) return
+        if (s1MaskFboId != 0) {
+            GLES20.glDeleteFramebuffers(1, intArrayOf(s1MaskFboId), 0)
+            GLES20.glDeleteTextures(1, intArrayOf(s1MaskTexId), 0)
+            s1MaskFboId = 0
+            s1MaskTexId = 0
+        }
+        s1MaskWidth = width
+        s1MaskHeight = height
+        val tex = IntArray(1)
+        GLES20.glGenTextures(1, tex, 0)
+        s1MaskTexId = tex[0]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, s1MaskTexId)
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES30.GL_R8,
+            width, height, 0,
+            GLES30.GL_RED, GLES20.GL_UNSIGNED_BYTE, null
+        )
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        val fbo = IntArray(1)
+        GLES20.glGenFramebuffers(1, fbo, 0)
+        s1MaskFboId = fbo[0]
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, s1MaskFboId)
+        GLES20.glFramebufferTexture2D(
+            GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+            GLES20.GL_TEXTURE_2D, s1MaskTexId, 0
+        )
+        val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
+        if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+            CrashLogger.log(TAG, "S1 mask FBO incomplete: $status")
+            GLES20.glDeleteFramebuffers(1, intArrayOf(s1MaskFboId), 0)
+            GLES20.glDeleteTextures(1, intArrayOf(s1MaskTexId), 0)
+            s1MaskFboId = 0
+            s1MaskTexId = 0
+        }
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+    }
+
+    private fun buildCaptureS1List(
+        width: Int, height: Int, iso: Int
+    ): IntArray {
+        if (!bayerShader.isS1MaskReady()) return IntArray(0)
+        ensureS1MaskFbo(width, height)
+        if (s1MaskFboId == 0) return IntArray(0)
+        val t0 = System.nanoTime()
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, s1MaskFboId)
+        GLES20.glViewport(0, 0, width, height)
+        val isoA = com.agx.camera.camera.NoiseModel.photonCoeff(iso.coerceAtLeast(1))
+        val isoB = com.agx.camera.camera.NoiseModel.readNoiseVariance(iso.coerceAtLeast(1))
+        bayerShader.drawS1Mask(
+            bayerShader.bayerTextureHandle(),
+            width, height,
+            bayerBlackLevelPattern, bayerBitDepth,
+            isoA, isoB
+        )
+        val buf = ByteBuffer.allocateDirect(width * height).order(ByteOrder.nativeOrder())
+        GLES20.glPixelStorei(GLES20.GL_PACK_ALIGNMENT, 1)
+        GLES20.glReadPixels(
+            0, 0, width, height,
+            GLES30.GL_RED, GLES20.GL_UNSIGNED_BYTE, buf
+        )
+        val out = ArrayList<Int>(128)
+        for (i in 0 until width * height) {
+            if ((buf.get(i).toInt() and 0xff) != 0) out.add(i)
+        }
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        CrashLogger.log(
+            TAG, "capture GPU S1 list: ${width}x${height} points=${out.size} in " +
+                "%.1f".format((System.nanoTime() - t0) / 1.0e6) + "ms"
+        )
+        return out.toIntArray()
+    }
+
     private fun allocRgba32fTexture(width: Int, height: Int): Int {
         val texBuf = IntArray(1)
         GLES20.glGenTextures(1, texBuf, 0)
@@ -4522,6 +4838,14 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             if (captureFlagTexId != 0) {
                 GLES20.glDeleteTextures(1, intArrayOf(captureFlagTexId), 0)
                 captureFlagTexId = 0
+            }
+            if (s1MaskFboId != 0) {
+                GLES20.glDeleteFramebuffers(1, intArrayOf(s1MaskFboId), 0)
+                s1MaskFboId = 0
+            }
+            if (s1MaskTexId != 0) {
+                GLES20.glDeleteTextures(1, intArrayOf(s1MaskTexId), 0)
+                s1MaskTexId = 0
             }
             if (denoiseFboId != 0) {
                 GLES20.glDeleteFramebuffers(1, intArrayOf(denoiseFboId), 0)

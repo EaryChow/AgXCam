@@ -84,6 +84,16 @@ class BayerShaderProgram {
     private var dUIsoModelBLoc = 0
     private var dUFlagOutputLoc = 0
 
+    private var s1MaskProgramId = 0
+    private var s1MaskBayerLoc = 0
+    private var s1MaskSensorSizeLoc = 0
+    private var s1MaskBlackLoc = 0
+    private var s1MaskBitDepthLoc = 0
+    private var s1MaskIsoALoc = 0
+    private var s1MaskIsoBLoc = 0
+    private var s1MaskDpLoc = 0
+    private var s1MaskTransformLoc = 0
+
     // S1/S3 same-colour pack fallback program: precomputes the S3 filter once
     // per texel per CFA phase into an RGBA32F denoised mosaic, which the
     // demosaic then reverse-maps. The primary preview path runs the identical
@@ -194,6 +204,21 @@ class BayerShaderProgram {
         dUIsoModelALoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_iso_model_a")
         dUIsoModelBLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_iso_model_b")
         dUFlagOutputLoc = GLES20.glGetUniformLocation(demosaicProgramId, "u_flag_output")
+
+        s1MaskProgramId = createProgram(VERTEX_SHADER, S1_MASK_FRAGMENT_SHADER)
+        if (s1MaskProgramId == 0) {
+            Log.e(TAG, "Failed to create S1 mask shader program")
+            com.agx.camera.CrashLogger.log(TAG, "Failed to create S1 mask shader program")
+        } else {
+            s1MaskBayerLoc = GLES20.glGetUniformLocation(s1MaskProgramId, "u_bayerTex")
+            s1MaskSensorSizeLoc = GLES20.glGetUniformLocation(s1MaskProgramId, "u_sensorSize")
+            s1MaskBlackLoc = GLES20.glGetUniformLocation(s1MaskProgramId, "u_black_level_pattern")
+            s1MaskBitDepthLoc = GLES20.glGetUniformLocation(s1MaskProgramId, "u_bit_depth")
+            s1MaskIsoALoc = GLES20.glGetUniformLocation(s1MaskProgramId, "u_iso_model_a")
+            s1MaskIsoBLoc = GLES20.glGetUniformLocation(s1MaskProgramId, "u_iso_model_b")
+            s1MaskDpLoc = GLES20.glGetUniformLocation(s1MaskProgramId, "u_dp_strength")
+            s1MaskTransformLoc = GLES20.glGetUniformLocation(s1MaskProgramId, "u_transformMatrix")
+        }
 
         s3PackProgramId = createProgram(VERTEX_SHADER, S3_PACK_FRAGMENT_SHADER)
         if (s3PackProgramId == 0) {
@@ -385,6 +410,44 @@ class BayerShaderProgram {
         GLES20.glDisableVertexAttribArray(texHandle)
     }
 
+    fun drawS1Mask(
+        bayerTex: Int,
+        sensorW: Int, sensorH: Int,
+        blackLevelPattern: IntArray,
+        bitDepth: Int,
+        isoModelA: Float, isoModelB: Float
+    ) {
+        if (s1MaskProgramId == 0) return
+        GLES20.glUseProgram(s1MaskProgramId)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bayerTex)
+        GLES20.glUniform1i(s1MaskBayerLoc, 0)
+        GLES20.glUniform2f(s1MaskSensorSizeLoc, sensorW.toFloat(), sensorH.toFloat())
+        GLES20.glUniform4i(s1MaskBlackLoc,
+            blackLevelPattern[0], blackLevelPattern[1],
+            blackLevelPattern[2], blackLevelPattern[3])
+        GLES20.glUniform1i(s1MaskBitDepthLoc, bitDepth)
+        GLES20.glUniform1f(s1MaskIsoALoc, isoModelA)
+        GLES20.glUniform1f(s1MaskIsoBLoc, isoModelB)
+        GLES20.glUniform1f(s1MaskDpLoc, 1.0f)
+        val identity = floatArrayOf(
+            1f, 0f, 0f, 0f,
+            0f, 1f, 0f, 0f,
+            0f, 0f, 1f, 0f,
+            0f, 0f, 0f, 1f
+        )
+        GLES20.glUniformMatrix4fv(s1MaskTransformLoc, 1, false, identity, 0)
+        val posHandle = GLES20.glGetAttribLocation(s1MaskProgramId, "a_position")
+        val texHandle = GLES20.glGetAttribLocation(s1MaskProgramId, "a_texCoord")
+        GLES20.glEnableVertexAttribArray(posHandle)
+        GLES20.glVertexAttribPointer(posHandle, 2, GLES20.GL_FLOAT, false, 0, quadVertices)
+        GLES20.glEnableVertexAttribArray(texHandle)
+        GLES20.glVertexAttribPointer(texHandle, 2, GLES20.GL_FLOAT, false, 0, quadTexCoords)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        GLES20.glDisableVertexAttribArray(posHandle)
+        GLES20.glDisableVertexAttribArray(texHandle)
+    }
+
     fun drawDemosaic(
         outputWidth: Int, outputHeight: Int,
         transformMatrix: FloatArray,
@@ -551,6 +614,8 @@ class BayerShaderProgram {
 
     fun isReady(): Boolean = programId != 0 && demosaicProgramId != 0 && s3PackProgramId != 0 && bayerTextureId != 0
 
+    fun isS1MaskReady(): Boolean = s1MaskProgramId != 0
+
     fun rawProgramId(): Int = programId
 
     fun rawDemosaicProgramId(): Int = demosaicProgramId
@@ -573,6 +638,10 @@ class BayerShaderProgram {
         if (s3PackProgramId != 0) {
             GLES20.glDeleteProgram(s3PackProgramId)
             s3PackProgramId = 0
+        }
+        if (s1MaskProgramId != 0) {
+            GLES20.glDeleteProgram(s1MaskProgramId)
+            s1MaskProgramId = 0
         }
         val textures = intArrayOf(bayerTextureId, lensShadingTextureId, fallbackFloatTextureId)
         GLES20.glDeleteTextures(3, textures, 0)
@@ -947,50 +1016,6 @@ float coarseDevAt(ivec2 coord) {
     return m;
 }
 
-// M2-style cross-colour structure dev (H2 extended veto): for a neighbouring
-// site on the +-1 cross-colour lattice, |site - its own 6-of-8 trimmed
-// same-colour mean| is zero on a truly isolated single-pixel defect (the site
-// sits at the local background) and large on spatially continuous bright
-// structure (a letter stroke, an off-lattice thin line).  Fully unrolled (no
-// arrays, no loop) so the driver never spills the register array; this is the
-// mirror of the Kotlin probe devAtSensor/VAL1() extension.
-float l1DefectDev(ivec2 s) {
-    float se2 = sampleBayerRaw(s + ivec2( 2, 0));
-    float sw2 = sampleBayerRaw(s + ivec2(-2, 0));
-    float sn2 = sampleBayerRaw(s + ivec2( 0,-2));
-    float ss2 = sampleBayerRaw(s + ivec2( 0, 2));
-    float sne = sampleBayerRaw(s + ivec2( 2,-2));
-    float snw = sampleBayerRaw(s + ivec2(-2,-2));
-    float sse = sampleBayerRaw(s + ivec2( 2, 2));
-    float ssw = sampleBayerRaw(s + ivec2(-2, 2));
-    float mn8 = min(min(min(se2, sw2), min(sn2, ss2)), min(min(sne, snw), min(sse, ssw)));
-    float mx8 = max(max(max(se2, sw2), max(sn2, ss2)), max(max(sne, snw), max(sse, ssw)));
-    float mean6 = (se2 + sw2 + sn2 + ss2 + sne + snw + sse + ssw - mn8 - mx8) * (1.0 / 6.0);
-    return abs(sampleBayerRaw(s) - mean6);
-}
-
-// H2 extended isolation veto as an early-exit predicate.  The caller's cheap
-// gate already ensured d > 6*maxNb (d = abs(c-iavg)), so d > 6*maxNbExt
-// reduces to 'every +-1 site dev < d/6' -- bail at the FIRST connected site
-// instead of folding all 8 (72 fetches).  Bit-identical to the Kotlin mirror
-// maxNbExt (tie: dev == d/6 vetoes, matching strict '>').  Iterates the
-// +-1 cross-colour offsets over a constant array: the fully-flattened
-// if-chain version tripled the inlined texelFetch load on this fragment and
-// stalled the on-device GLSL compiler (black preview), while the array loop
-// keeps the identical early-exit semantics in a small, driver-friendly form.
-bool l1IsolatedAt(ivec2 coord, float d) {
-    float thr = d * (1.0 / 6.0);
-    const ivec2 offs[8] = ivec2[8](
-        ivec2(-1, -1), ivec2(0, -1), ivec2(1, -1),
-        ivec2(-1,  0), ivec2(1,  0),
-        ivec2(-1,  1), ivec2(0,  1), ivec2(1,  1)
-    );
-    for (int k = 0; k < 8; k++) {
-        if (l1DefectDev(coord + offs[k]) >= thr) return false;
-    }
-    return true;
-}
-
 float sampleSameColorNRRing(ivec2 coord, int ring, float mCoarse) {
     float c = sampleBayerRaw(coord);
     if (u_dp_strength <= 0.0 && u_raw_nr_strength <= 0.0) return c;
@@ -1095,17 +1120,21 @@ float sampleSameColorNRRing(ivec2 coord, int ring, float mCoarse) {
         bool hot = (c > mx) && (c - iavg) > band;
         bool cold = (c < mn) && (iavg - c) > band;
         if (hot || cold) {
+            bool gate = true;
             if (ring >= 4) {
-                // H2 extended veto, nested after the cheap same-colour gate
-                // (GLSL ES does not short-circuit '&&'): d > 6*maxNb first,
-                // then the early-exit +-1 cross-colour predicate.
-                if (abs(c - iavg) > 6.0 * maxNb) {
-                    if (l1IsolatedAt(coord, abs(c - iavg))) {
-                        center = mix(c, iDir, applyStrength);
-                    }
-                }
-            } else {
-                center = mix(c, iavg, applyStrength);
+                // Exact sim four-tap gate: 12-tap hot/cold AND the four axial
+                // second-largest/second-smallest veto. The second-largest
+                // formula is the sorted-four middle value without an array.
+                float minEw = min(nE, nW);
+                float maxEw = max(nE, nW);
+                float minNs = min(nN, nS);
+                float maxNs = max(nN, nS);
+                float secondLarge = max(min(maxEw, maxNs), max(minEw, minNs));
+                float secondSmall = min(max(minEw, minNs), min(maxEw, maxNs));
+                gate = hot ? (c - secondLarge > band) : (secondSmall - c > band);
+            }
+            if (gate) {
+                center = mix(c, iDir, applyStrength);
             }
         }
     }
@@ -1392,12 +1421,16 @@ void denoisedDualRing(ivec2 coord, float mCoarse, out float lo, out float hi) {
         bool hot = (c > mx) && (c - iavg) > band;
         bool cold = (c < mn) && (iavg - c) > band;
         if (hot || cold) {
-            // H2 extended veto, nested after the cheap same-colour gate
-            // (GLSL ES does not short-circuit '&&').
-            if (abs(c - iavg) > 6.0 * maxNb) {
-                if (l1IsolatedAt(coord, abs(c - iavg))) {
-                    center = mix(c, iDir, applyStrength);
-                }
+            // Exact sim four-tap gate; this path is 12-tap only.
+            float minEw = min(nE, nW);
+            float maxEw = max(nE, nW);
+            float minNs = min(nN, nS);
+            float maxNs = max(nN, nS);
+            float secondLarge = max(min(maxEw, maxNs), max(minEw, minNs));
+            float secondSmall = min(max(minEw, minNs), min(maxEw, maxNs));
+            bool gate = hot ? (c - secondLarge > band) : (secondSmall - c > band);
+            if (gate) {
+                center = mix(c, iDir, applyStrength);
             }
         }
     }
@@ -1661,37 +1694,16 @@ float inlineDefectFlagAt(ivec2 coord, int ring) {
     bool hot = (c > mx) && (c - iavg) > band;
     bool cold = (c < mn) && (iavg - c) > band;
     if (!(hot || cold)) return 0.0;
-    // H2 extended-isolation veto: a centre that is hot/cold only counts as a
-    // defect when it is truly isolated.  Fold the same-colour directional
-    // devs (devN..devW) and the +-1 cross-colour structure devs into maxNb
-    // and require abs(c - iavg) > 6*maxNb - identical to the S1 correction
-    // gate, so the flag map covers exactly what S1 would actually correct.
-    // Without this, the un-gated hot||cold flag fires across a whole
-    // continuous bright letter, S5 then drops the letter's own taps from its
-    // SWGF windows, and the letter collapses into dark grid-anchored blocks.
     if (ring >= 4) {
-        float tN = nNN + nNE + nNW + c - min(min(nNN, nNE), min(nNW, c))
-            - max(max(nNN, nNE), max(nNW, c));
-        float devN = abs(nN - tN * 0.5);
-        float tS = nSS + nSE + nSW + c - min(min(nSS, nSE), min(nSW, c))
-            - max(max(nSS, nSE), max(nSW, c));
-        float devS = abs(nS - tS * 0.5);
-        float tE = nEE + nNE + nSE + c - min(min(nEE, nNE), min(nSE, c))
-            - max(max(nEE, nNE), max(nSE, c));
-        float devE = abs(nE - tE * 0.5);
-        float tW = nWW + nNW + nSW + c - min(min(nWW, nNW), min(nSW, c))
-            - max(max(nWW, nNW), max(nSW, c));
-        float devW = abs(nW - tW * 0.5);
-        float maxNb = max(max(devN, devS), max(devE, devW));
-        // Cheap same-colour gate first (GLSL ES does not short-circuit '&&'):
-        // the expensive +-1 cross-colour fold runs only for pixels the
-        // same-colour gate alone would accept.  Early-exit predicate, so the
-        // flag map covers exactly what S1 would correct.
-        float d = abs(c - iavg);
-        if (d > 6.0 * maxNb) {
-            return l1IsolatedAt(coord, d) ? 1.0 : 0.0;
-        }
-        return 0.0;
+        // Exact sim four-tap gate: same hot/cold test and band as the S1
+        // correction above.
+        float minEw = min(nE, nW);
+        float maxEw = max(nE, nW);
+        float minNs = min(nN, nS);
+        float maxNs = max(nN, nS);
+        float secondLarge = max(min(maxEw, maxNs), max(minEw, minNs));
+        float secondSmall = min(max(minEw, minNs), min(maxEw, maxNs));
+        return (hot ? (c - secondLarge > band) : (secondSmall - c > band)) ? 1.0 : 0.0;
     }
     return 1.0;
 }
@@ -1744,7 +1756,10 @@ void main() {
 
     // S5 defect mask (MRT location 1).  The uniform gate keeps the cost off
     // every frame that does not consume it (preview demosaic, S5 inactive).
-    float defectFlag = (u_flag_output > 0.5) ? inlineSceneFlag(sensorUV) : 0.0;
+    float defectFlag = 0.0;
+    if (u_flag_output > 0.5) {
+        defectFlag = inlineSceneFlag(sensorUV);
+    }
     fragFlag = vec4(defectFlag);
 }
 """
@@ -1759,6 +1774,89 @@ void main() {
         // stored channels.  Renders to the caller-bound RGBA32F target, where
         // the demosaic reverse-maps it as a fallback when the DPC/GF chain is
         // unavailable; otherwise the identical filter runs inline per sample.
+        private const val S1_MASK_FRAGMENT_SHADER = """
+#version 300 es
+precision highp float;
+precision highp int;
+precision highp usampler2D;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform usampler2D u_bayerTex;
+uniform vec2 u_sensorSize;
+uniform ivec4 u_black_level_pattern;
+uniform int u_bit_depth;
+uniform float u_iso_model_a;
+uniform float u_iso_model_b;
+uniform float u_dp_strength;
+
+float unpackRaw(uint rawPacked) {
+    uint mask;
+    if (u_bit_depth <= 10) {
+        mask = 0x3FFu;
+    } else if (u_bit_depth <= 12) {
+        mask = 0xFFFu;
+    } else if (u_bit_depth <= 14) {
+        mask = 0x3FFFu;
+    } else {
+        mask = 0xFFFFu;
+    }
+    return float(rawPacked & mask);
+}
+
+float sampleBayerRaw(ivec2 coord) {
+    ivec2 clamped = clamp(coord, ivec2(0), ivec2(u_sensorSize) - ivec2(1));
+    uint raw = texelFetch(u_bayerTex, clamped, 0).r;
+    float val = unpackRaw(raw);
+    int phase = abs(clamped.x % 2) + abs(clamped.y % 2) * 2;
+    val -= float(u_black_level_pattern[phase]);
+    return max(val, 0.0);
+}
+
+float inlineDefectFlagAt(ivec2 coord) {
+    if (u_dp_strength <= 0.0) return 0.0;
+    float c = sampleBayerRaw(coord);
+    float nE  = sampleBayerRaw(coord + ivec2( 2, 0));
+    float nW  = sampleBayerRaw(coord + ivec2(-2, 0));
+    float nN  = sampleBayerRaw(coord + ivec2( 0,-2));
+    float nS  = sampleBayerRaw(coord + ivec2( 0, 2));
+    float nNE = sampleBayerRaw(coord + ivec2( 2,-2));
+    float nNW = sampleBayerRaw(coord + ivec2(-2,-2));
+    float nSE = sampleBayerRaw(coord + ivec2( 2, 2));
+    float nSW = sampleBayerRaw(coord + ivec2(-2, 2));
+    float nEE = sampleBayerRaw(coord + ivec2( 4, 0));
+    float nWW = sampleBayerRaw(coord + ivec2(-4, 0));
+    float nNN = sampleBayerRaw(coord + ivec2( 0,-4));
+    float nSS = sampleBayerRaw(coord + ivec2( 0, 4));
+    float sumN = nE + nW + nN + nS + nNE + nNW + nSE + nSW + nEE + nWW + nNN + nSS;
+    float mn = min(min(min(min(min(nE, nW), min(nN, nS)), min(nNE, nNW)), min(nSE, nSW)),
+             min(min(nEE, nWW), min(nNN, nSS)));
+    float mx = max(max(max(max(max(nE, nW), max(nN, nS)), max(nNE, nNW)), max(nSE, nSW)),
+             max(max(nEE, nWW), max(nNN, nSS)));
+    float iavg = (sumN - mn - mx) * (1.0 / 10.0);
+    float sigma = sqrt(max(u_iso_model_a * max(iavg, 0.0) + u_iso_model_b, 1.0));
+    float band = max((0.1 + 0.3 * u_dp_strength) * max(iavg, 0.0),
+                     (2.0 + 2.0 * u_dp_strength) * sigma);
+    bool hot = (c > mx) && (c - iavg) > band;
+    bool cold = (c < mn) && (iavg - c) > band;
+    if (!(hot || cold)) return 0.0;
+    float minEw = min(nE, nW);
+    float maxEw = max(nE, nW);
+    float minNs = min(nN, nS);
+    float maxNs = max(nN, nS);
+    float secondLarge = max(min(maxEw, maxNs), max(minEw, minNs));
+    float secondSmall = min(max(minEw, minNs), min(maxEw, maxNs));
+    return (hot ? (c - secondLarge > band) : (secondSmall - c > band)) ? 1.0 : 0.0;
+}
+
+void main() {
+    vec2 uv = v_texCoord * u_sensorSize;
+    ivec2 c = clamp(ivec2(floor(uv)), ivec2(0), ivec2(u_sensorSize) - ivec2(1));
+    fragColor = vec4(inlineDefectFlagAt(c), 0.0, 0.0, 1.0);
+}
+"""
+
         private const val S3_PACK_FRAGMENT_SHADER = """
 #version 300 es
 precision highp float;
@@ -1832,39 +1930,6 @@ float coarseDevAt(ivec2 coord) {
         }
     }
     return m;
-}
-
-// M2-style cross-colour structure dev (H2 extended veto) - the unrolled form
-// from the demosaic copy.  See there for the full rationale.
-float l1DefectDev(ivec2 s) {
-    float se2 = sampleBayerRaw(s + ivec2( 2, 0));
-    float sw2 = sampleBayerRaw(s + ivec2(-2, 0));
-    float sn2 = sampleBayerRaw(s + ivec2( 0,-2));
-    float ss2 = sampleBayerRaw(s + ivec2( 0, 2));
-    float sne = sampleBayerRaw(s + ivec2( 2,-2));
-    float snw = sampleBayerRaw(s + ivec2(-2,-2));
-    float sse = sampleBayerRaw(s + ivec2( 2, 2));
-    float ssw = sampleBayerRaw(s + ivec2(-2, 2));
-    float mn8 = min(min(min(se2, sw2), min(sn2, ss2)), min(min(sne, snw), min(sse, ssw)));
-    float mx8 = max(max(max(se2, sw2), max(sn2, ss2)), max(max(sne, snw), max(sse, ssw)));
-    float mean6 = (se2 + sw2 + sn2 + ss2 + sne + snw + sse + ssw - mn8 - mx8) * (1.0 / 6.0);
-    return abs(sampleBayerRaw(s) - mean6);
-}
-
-// H2 extended isolation veto as an early-exit predicate - see demosaic copy.
-// The constant-array loop (not a flattened if-chain) so the 12-tap S3_PACK
-// fragment stays small enough for the on-device GLSL compiler.
-bool l1IsolatedAt(ivec2 coord, float d) {
-    float thr = d * (1.0 / 6.0);
-    const ivec2 offs[8] = ivec2[8](
-        ivec2(-1, -1), ivec2(0, -1), ivec2(1, -1),
-        ivec2(-1,  0), ivec2(1,  0),
-        ivec2(-1,  1), ivec2(0,  1), ivec2(1,  1)
-    );
-    for (int k = 0; k < 8; k++) {
-        if (l1DefectDev(coord + offs[k]) >= thr) return false;
-    }
-    return true;
 }
 
 float sampleSameColorNR(ivec2 coord, float mCoarse) {
@@ -1964,15 +2029,16 @@ float sampleSameColorNR(ivec2 coord, float mCoarse) {
         bool hot = (c > mx) && (c - iavg) > band;
         bool cold = (c < mn) && (iavg - c) > band;
         if (hot || cold) {
-            // H2 extended veto, nested after the cheap same-colour gate
-            // (GLSL ES does not short-circuit '&&').  The S3_PACK copy is
-            // unconditional (12-tap), so the early-exit predicate is what
-            // keeps a bright stroke off the expensive path.
-            float d = abs(c - iavg);
-            if (d > 6.0 * maxNb) {
-                if (l1IsolatedAt(coord, d)) {
-                    center = mix(c, iDir, applyStrength);
-                }
+            // Exact sim four-tap gate; the S3_PACK copy is unconditional 12-tap.
+            float minEw = min(nE, nW);
+            float maxEw = max(nE, nW);
+            float minNs = min(nN, nS);
+            float maxNs = max(nN, nS);
+            float secondLarge = max(min(maxEw, maxNs), max(minEw, minNs));
+            float secondSmall = min(max(minEw, minNs), min(maxEw, maxNs));
+            bool gate = hot ? (c - secondLarge > band) : (secondSmall - c > band);
+            if (gate) {
+                center = mix(c, iDir, applyStrength);
             }
         }
     }
