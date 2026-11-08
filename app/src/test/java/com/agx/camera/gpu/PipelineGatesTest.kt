@@ -149,29 +149,6 @@ class PipelineGatesTest {
     }
 
     @Test
-    fun anArmedGrabForcesACensusFrame() {
-        // Without this, 19 of every 20 grabs attached the previous census
-        // frame's structure map while meta("frame") named the current one.
-        // Mirrors the renderer's gate.
-        fun censusDue(measurementActive: Boolean, grabArmed: Boolean, cadenceHit: Boolean) =
-            (measurementActive || grabArmed) && (grabArmed || cadenceHit)
-
-        assertTrue(
-            "an armed grab is a census frame even off the cadence",
-            censusDue(measurementActive = false, grabArmed = true, cadenceHit = false)
-        )
-        assertTrue(censusDue(measurementActive = true, grabArmed = false, cadenceHit = true))
-        assertFalse(
-            "an unarmed grab off the cadence is not a census frame",
-            censusDue(measurementActive = false, grabArmed = false, cadenceHit = false)
-        )
-        assertFalse(
-            "benchmark off and nothing armed must cost nothing",
-            censusDue(measurementActive = false, grabArmed = false, cadenceHit = true)
-        )
-    }
-
-    @Test
     fun passesTextMarksDrewThisFrameDistinctlyFromEligible() {
         // The bucket draw is census-gated, so eligibility is true on nineteen
         // frames in twenty where the pass did not run. Reporting it bare read
@@ -262,32 +239,6 @@ class PipelineGatesTest {
                 viewWidth = 320, viewHeight = 240, appThermalTier = "HOT",
                 thermalPlatformThrottled = false
             )
-        )
-    }
-
-    @Test
-    fun aFrameGrabAloneCannotSwitchS5OntoASigmaEstimate() {
-        // The blocking regression. Arming a grab counts as a measurement
-        // consumer, so past the density gate (k>2) the offscreen chain runs and
-        // sigma_hat produces an estimate. If that estimate could reach S5, then
-        // checking the raw attachment would change the rendered frame's noise
-        // model - with useIsoSigma flipping to false and nothing in the pixels
-        // to say so.
-        //
-        // Mirrors the renderer's rule: S5 may consume sigma derived from the
-        // image path's own S3 output, or from a measurement-only chain while
-        // measurement is deliberately on. A grab alone is neither.
-        assertTrue(
-            "the image path's own chain may feed S5",
-            sigmaReachesImagePath(sigmaAvailable = true, sparseGridRendered = true, measurementActive = false)
-        )
-        assertTrue(
-            "measurement mode deliberately re-routes S5 and says so in the report",
-            sigmaReachesImagePath(sigmaAvailable = true, sparseGridRendered = false, measurementActive = true)
-        )
-        assertFalse(
-            "a grab alone must leave S5 on its ISO fallback",
-            sigmaReachesImagePath(sigmaAvailable = true, sparseGridRendered = false, measurementActive = false)
         )
     }
 

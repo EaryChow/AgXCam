@@ -163,8 +163,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var outNr2TexId = 0
     // Grain gate of the same stage (the S5-L grain return): its DC plane on an
     // 8-pixel grid, the notched residual plane, and the stage output once the
-    // return is added. The last is its own buffer because the grab's s5.round1
-    // plane is round 1's output, not this one.
+    // return is added. The last is its own buffer because it is the final S5
+    // output, not round 1's output.
     private var grainDcHFboId = 0
     private var grainDcHTexId = 0
     private var grainDcFboId = 0
@@ -290,10 +290,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     // timings beside them are not actionable.
     @Volatile var measurementActive = false
 
-    // Raw frame capture for the export. Fires on the next RAW_SENSOR frame and
-    // clears itself, so a session cannot sit here buffering every frame.
-    @Volatile var frameGrabArmed = false
-
     // Axis-min bucket split. S5 reads the untouched SigmaHatShaderProgram
     // output either way, so the S5 result is bit-identical.
     private var axisBucketDiagnostic = false
@@ -308,19 +304,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var formedPictureLut: FormedPictureLut? = null
 
     private var sigmaBucketFboId = 0
-
-    /**
-     * Render-frame index each sampled plane's contents were last computed on.
-     *
-     * The structure map and the axis buckets are drawn on census frames only,
-     * so between those draws their framebuffers still hold the previous census
-     * frame's data. 0 means "never drawn", which no real frame index can be.
-     * These exist so a frame grab can state which frame a plane describes
-     * instead of implying every plane came from the exported one.
-     */
-    private var structureMapFrameIndex = 0
-    private var axisBucketFrameIndex = 0
-    private var sigmaFrameIndex = 0
 
     // Whether the bucket draw actually executed this frame, as opposed to being
     // merely eligible. Kept apart from the gate flag because the draw is
@@ -341,8 +324,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var sigmaSourceThisFrame = PipelineGates.SigmaSource.NONE
     private var structureMapLumaSource = PipelineGates.LumaSource.NOT_USED
     private var lastPipelineGates: PipelineGates? = null
-    private var lastFrameGrabPath: String? = null
-    private var lastFrameGrabSummary: String? = null
 
 /**
  * Whether the last rendered frame had a measurement consumer forcing passes
@@ -424,7 +405,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
     // Held between capture and export. A later capture overwrites it rather than
     // queueing, so the memory does not grow across a long session.
-    private var pendingFrameGrab: FrameGrab? = null
     private var lastBucketStats = ""
     private var lastStructureStats = ""
     // The domain fold the map's ratio denominator last ran with, reported beside
@@ -438,8 +418,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     // sweep survive one export.
     private val structureCensusHistory = LinkedHashMap<String, String>()
     @Volatile private var currentZoomK = 0f
-    private var lastCovariance: OutputCovariance.Measurement? = null
-    private var lastCovarianceReport = OutputCovariance.NO_SAMPLE
     // Advisory only; null means no anchor sample has been taken yet, which the
     // advisory reports as INSUFFICIENT_DATA rather than as a pass.
     @Volatile private var anchorReport: AnchorAdvisory.Report? = null
@@ -575,6 +553,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     fun setMeasurementEnabled(enabled: Boolean) {
         if (measurementActive == enabled) return
         measurementActive = enabled
+        PerfTimers.setEnabled(enabled)
         if (enabled) {
             gpuTimers.arm()
             axisBucketDiagnostic = true
@@ -596,31 +575,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         )
     }
 
-    /**
-     * Arms the raw frame grab. buildFrameGrabIfArmed clears the flag on capture.
-     *
-     * A grab is self-sufficient: it collects the full forensic set - sigma, axis
-     * buckets and structure map - whether or not measurement is armed. Leaving
-     * it to inherit the armed diagnostics made the product depend on unrelated
-     * toggle state, so pressing grab with the timing switch off produced a file
-     * holding one float plane and no image, with `structureMap=0` and
-     * `axisBuckets=0` in the meta to say nothing about why.
-     *
-     * Forcing the draws does not extend them: the passes behind the planes have
-     * no image-path consumer, and the churn, stabilizer and profile updates that
-     * do have persisted state are still gated on measurement being armed, so a
-     * grab reads the buffers without folding anything into them.
-     */
-    fun armFrameGrabOnce() {
-        pendingFrameGrab = null
-        frameGrabArmed = true
-        CrashLogger.log(TAG, "framegrab armed for the next RAW_SENSOR frame")
-    }
-
 /**
  * The full measurement bundle: the GL environment, the shader budget, the gate
  * state, the pass timings grouped by configuration, the noise profile rows, the
- * covariance scan verdict, the structure-map probe results and the armed grab.
+ * covariance scan verdict, and the structure-map probe results.
  * MainActivity feeds this to CrashLogger as a section so it lands in the same
  * download as the log.
  *
@@ -651,13 +609,15 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         } else {
             sb.append("no frame has been rendered with a measurement consumer live yet\n")
         }
-        if (frameGrabArmed) {
-            sb.append("framegrab: armed, implies the measurement chain on the next RAW_SENSOR frame\n")
-        }
         sb.append('\n')
 
         sb.append("== GPU pass timing ==\n")
         sb.append(gpuTimers.report()).append("\n\n")
+
+        val cpuReport = PerfTimers.report()
+        if (cpuReport.isNotEmpty()) {
+            sb.append(cpuReport).append('\n')
+        }
 
         sb.append("== noise profile ==\n")
         sb.append(profileStats.report(com.agx.camera.camera.NoiseProfileStats.offlineRatioTable())).append('\n')
@@ -686,52 +646,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             sb.append("census by geometry (survives a resolution sweep; newest row per key)\n")
             structureCensusHistory.values.forEach { sb.append(it).append('\n') }
         }
-        sb.append(lastCovarianceReport).append('\n')
         sb.append('\n')
         sb.append(
             (anchorReport ?: AnchorAdvisory.judge(null, probeIso = isoForDenoise.coerceAtLeast(1))).text()
         ).append('\n')
 
-        sb.append("== frame grab ==\n")
-        val grab = pendingFrameGrab ?: lastFrameGrabSummary
-        if (grab != null) {
-            sb.append("captured raw frame: ").append(grab).append('\n')
-            sb.append(if (lastFrameGrabPath != null) {
-                "saved to: ${lastFrameGrabPath}\n"
-            } else {
-                "saved to: not written yet (the export writes it after this bundle is built)\n"
-            })
-        } else {
-            sb.append("captured raw frame: ")
-                .append(if (frameGrabArmed) "requested, waiting for the next RAW_SENSOR frame" else "none")
-                .append('\n')
-        }
         return sb.toString()
-    }
-
-    /**
-     * Called once the export has written the sidecar, so the bundle can name the
-     * file a reader can open rather than only its size.
-     */
-    fun setFrameGrabSavedPath(path: String?) {
-        lastFrameGrabPath = path
-    }
-
-    /**
-     * Retires the one-shot grab's report lines. Called by the export once the
-     * bundle has been built, so the next export with no fresh grab reports none
-     * rather than replaying a capture the reader has already seen.
-     */
-    fun clearFrameGrabReport() {
-        lastFrameGrabSummary = null
-        lastFrameGrabPath = null
-    }
-
-    /** Bytes of the last armed grab, or null. Consumed once when saving. */
-    fun takeFrameGrabBytes(): ByteArray? {
-        val grab = pendingFrameGrab ?: return null
-        pendingFrameGrab = null
-        return grab.toBytes()
     }
 
     /** Critical-battery blackout: drop any held frame and render black. */
@@ -1093,17 +1013,23 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         defectListBuilding = true
         val src = buffer.duplicate().order(ByteOrder.nativeOrder())
         src.position(0)
-        val copy = ByteBuffer.allocateDirect(src.remaining()).order(ByteOrder.nativeOrder())
-        copy.put(src)
-        copy.position(0)
+        val copy = PerfTimers.measure("preview.list_copy") {
+            ByteBuffer.allocateDirect(src.remaining()).order(ByteOrder.nativeOrder()).also {
+                it.put(src)
+                it.position(0)
+            }
+        }
         val gen = defectListGen
         val black = bayerBlackLevelPattern.copyOf()
         Thread({
             try {
                 val t0 = System.nanoTime()
+                // Scan only; the frame-thread raw copy is timed separately as
+                // preview.list_copy.
                 val list = DefectMap.buildList(
                     copy, width, height, stridePixels, iso, black
                 )
+                PerfTimers.record("preview.list_build", System.nanoTime() - t0)
                 if (gen == defectListGen) {
                     val merged = if (existing != null && existing.isNotEmpty() &&
                         defectListW == width && defectListH == height
@@ -1290,13 +1216,19 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
         val uploadBuffer = buffer!!
         synchronized(bayerBufferLock) {
-            val previewBackup = snapshotAndRepair(
-                uploadBuffer, effW, effH, effStride, isoForDenoise
-            )
+            val previewBackup = PerfTimers.measure("preview.list_validate") {
+                snapshotAndRepair(uploadBuffer, effW, effH, effStride, isoForDenoise)
+            }
             try {
-                bayerShader.uploadBayer(uploadBuffer.duplicate(), effW, effH, effStride)
+                PerfTimers.measure("preview.raw_upload") {
+                    bayerShader.uploadBayer(uploadBuffer.duplicate(), effW, effH, effStride)
+                }
             } finally {
-                previewBackup?.let { restorePoints(uploadBuffer, effW, effStride, it) }
+                previewBackup?.let {
+                    PerfTimers.measure("preview.list_restore") {
+                        restorePoints(uploadBuffer, effW, effStride, it)
+                    }
+                }
             }
         }
         logGlError("after uploadBayer", bayerRenderCount)
@@ -1324,33 +1256,19 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // Measurement consumers read statistics rather than filtering the
         // displayed image, so they need the sparse chain and the sigma-hat
         // estimate even when the density gate has them switched off for the
-        // image path. Armed counts as a consumer: a one-shot grab is worth one
-        // frame of extra passes to have the attribution planes attached.
+        // image path.
         val sparseGridRendered = needSparseGrid && previewZoomK <= 2.0f
 
-        // Which diagnostics this frame owes a plane to. An armed grab widens the
-        // set so the container is self-sufficient; see armFrameGrabOnce. Only
-        // the draws are widened - everything that folds a frame into persisted
-        // measurement state stays on the armed flags alone, so a grab cannot
-        // perturb the churn, the stabilizer, the anchor advisory or the noise
-        // profile.
-        val axisBucketForFrame = FrameGrab.collectsPlane(axisBucketDiagnostic, frameGrabArmed)
-        val structureMapForFrame = FrameGrab.collectsPlane(structureMapDiagnostic, frameGrabArmed)
+        val axisBucketForFrame = axisBucketDiagnostic
+        val structureMapForFrame = structureMapDiagnostic
 
         // Set before anything reads it this frame, and read again by the export
         // thread later. The field rather than a local because the bundle is
         // built off the render thread.
-        measurementConsumerActive = measurementActive || frameGrabArmed
+        measurementConsumerActive = measurementActive
         // Decided once per frame so the profile census and the churn census
         // cannot drift into sampling on different schedules.
-        //
-        // An armed grab forces a census frame. Without this, 19 of every 20 grabs
-        // would attach the previous census frame's structure map while
-        // meta("frame") named the current one - the container would assert a
-        // currency it could not back up. One extra census frame on a one-shot
-        // grab costs the map's 3.5 ms once, which is nothing next to shipping a
-        // stale plane as if it described the exported frame.
-        val censusDue = measurementConsumerActive && (frameGrabArmed || censusDueThisFrame())
+        val censusDue = measurementActive && censusDueThisFrame()
         var s1Raw = 0
         var s3Raw = 0
         var s5Raw = 0
@@ -1488,11 +1406,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 effW = effW.toFloat(), effH = effH.toFloat(),
                 effBlack = effBlack,
                 isoModelA = isoModelA, isoModelB = isoModelB, whiteRange = whiteRange,
-                // Census-gated, because that is the only cadence anything reads
-                // this at: updateProfileFromSample below samples on census
-                // frames, and the frame grab stamps whatever frame the plane
-                // holds. Drawing it every frame cost 0.330 ms to fill a target
-                // that nineteen times out of twenty was overwritten unread.
+                // Census-gated, because updateProfileFromSample below samples
+                // on census frames. Drawing it every frame cost 0.330 ms to
+                // fill a target that nineteen times out of twenty was
+                // overwritten unread.
                 // The earlier justification for that - that sigma_hat consumes
                 // the buckets - was simply false; sigma_hat writes them and
                 // reads only its own output.
@@ -1500,7 +1417,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 renderCount = bayerRenderCount
             )
             axisBucketDrawn = axisBucketForFrame && censusDue
-            if (sigmaAvailable) sigmaFrameIndex = bayerRenderCount
         }
         if (measurementConsumerActive) {
             passSwgfThisFrame = sparseGridRendered && rawDenoiseActive
@@ -1508,11 +1424,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             sigmaSourceThisFrame = sigmaSource
         }
 
-        if (FrameGrab.foldsPersistedState(axisBucketDiagnostic, frameGrabArmed) &&
-            sigmaBucketTexId != 0 && censusDue) {
-            // Deliberately narrower than axisBucketForFrame: a grab-only bucket
-            // draw must not fold a sample into the runtime noise profile, because
-            // the grab is a read-only request.
+        if (axisBucketDiagnostic && sigmaBucketTexId != 0 && censusDue) {
             updateProfileFromSample(iso, rawDenoiseActive, gridW, gridH)
         }
 
@@ -1580,6 +1492,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             android.util.Log.i(TAG, "preview sliders: s1=$s1 s3=$s3 boxAA=$previewBoxAA nrRadius=$previewNrRadius boxBlend=$boxBlend")
         }
 
+        gpuTimers.begin("demosaic")
         bayerShader.drawDemosaic(
             cellGridW, cellGridH, // u_outputResolution: maps sensor coords -> denoised grid texels
             previewTransform,
@@ -1601,6 +1514,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             isoModelA = isoModelA,
             isoModelB = isoModelB
         )
+        gpuTimers.end("demosaic")
         logGlError("after drawDemosaic", bayerRenderCount)
 
         var ispInputTex = demosaicFboTextureId
@@ -1619,17 +1533,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             // and discloses it, via SigmaSource.OFFSCREEN_CHAIN and
             // shaderBudget's measurementForcedChain.
             //
-            // It may NOT do so because a frame grab was armed. A grab is a
-            // read-only request to attach planes to a frame; letting it change
-            // S5's noise model means inspecting the raw attachment changes the
-            // frame under inspection, on the one frame someone is trying to
-            // reason about, with nothing in the pixels to say so. Past the
-            // density gate (k>2) the image path takes the inline route with no
-            // grid chain at all, so the offscreen chain below is pure
-            // diagnostic machinery and must stay out of S5.
+            // Past the density gate (k>2) the image path takes the inline
+            // route with no grid chain at all, so the offscreen chain below is
+            // pure diagnostic machinery and must stay out of S5.
             //
-            // Gated on measurementActive, not measurementConsumerActive, for
-            // that reason alone. The flag plane below already worked this way.
+            // Gated on measurementActive, not measurementConsumerActive.
             val sigmaForImagePath =
                 sigmaAvailable && (sparseGridRendered || measurementActive)
             var s5Tex = demosaicFboTextureId
@@ -1707,11 +1615,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 calibScale = S5_CALIB_TO_RESIDUAL_SCALE,
                 epsBoost = 1f
             )
-            structureMapFrameIndex = bayerRenderCount
-            // Only the armed flag folds this frame into persisted measurement
-            // state. A grab-only draw leaves churn, the stabilizer and the
-            // anchor advisory untouched; the grab reads the FBO directly.
-            if (FrameGrab.foldsPersistedState(structureMapDiagnostic, frameGrabArmed)) {
+            if (structureMapDiagnostic) {
                 updateStructureChurn()
             }
         }
@@ -1733,6 +1637,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
+        gpuTimers.begin("agx")
         nrShader.draw(
             ispInputTex,
             exposureEv,
@@ -1747,6 +1652,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             agxVibrance,
             clipAttenFactor
         )
+        gpuTimers.end("agx")
         logGlError("after nrShader.draw", bayerRenderCount)
 
         gpuTimers.poll()
@@ -1788,12 +1694,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 CrashLogger.log(TAG, gates.reportText().replace('\n', ' '))
             }
             logFrameRateIfDue()
-        }
-
-        // A grab needs the attribution planes, so it implies the measurement
-        // chain regardless of whether the image path was drawing it.
-        if (frameGrabArmed) {
-            buildFrameGrabIfArmed(iso, gridW, gridH)
         }
     }
 
@@ -2392,7 +2292,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         )
         logGlError("after axis-min buckets", bayerRenderCount)
         gpuTimers.end("S2.axis_buckets")
-        axisBucketFrameIndex = renderCount
     }
 
     /**
@@ -2504,9 +2403,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
      * own: nothing reads them between census frames. They cost 0.330 ms
      * against the map's 3.5 ms, so drawing them every frame would have bought
      * a target that was overwritten unread nineteen times out of twenty.
-     *
-     * An armed frame grab forces the census, so a grab always lands on a frame
-     * where both draws have just run and its planes are current.
      */
     private fun censusDueThisFrame(): Boolean {
         censusFrame++
@@ -2747,145 +2643,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         structureMapTexId = 0
         structureMapWidth = 0
         structureMapHeight = 0
-    }
-
-    /**
-     * Builds the armed forensic grab from whatever diagnostic buffers exist
-     * this frame. Every plane is optional: a grab with three planes is still a
-     * valid, parseable file, which is the point of the container.
-     */
-    private fun buildFrameGrabIfArmed(iso: Int, gridW: Int, gridH: Int) {
-        if (!frameGrabArmed) return
-        val b = FrameGrab.builder()
-            .meta("format", "framegrab")
-            .meta("version", FrameGrab.VERSION)
-            .meta("frame", bayerRenderCount)
-            .meta("iso", iso)
-            .meta("isoBucket", com.agx.camera.camera.NoiseProfileStats.isoBucketFor(iso))
-            .meta("s1", dpcStrength)
-            .meta("s3", rawNrStrength)
-            .meta("s5", outNrStrength)
-            .meta("sensorW", bayerWidth)
-            .meta("sensorH", bayerHeight)
-            .meta("gridW", gridW)
-            .meta("gridH", gridH)
-            .meta("outW", demosaicFboWidth)
-            .meta("outH", demosaicFboHeight)
-            .meta("whiteRange", agxWhiteLevel - agxBlackLevel)
-            .meta("exposureEv", exposureEv)
-            .meta("axisBuckets", axisBucketDiagnostic)
-            .meta("structureMap", structureMapDiagnostic)
-            .meta("measurement", measurementActive)
-
-        if (sigmaTexId != 0 && gridW > 0 && gridH > 0) {
-            val data = readFloatPlane(sigmaFboId, gridW, gridH)
-            b.plane("s2.sigma", gridW, gridH, 4, data, sourceFrame = sigmaFrameIndex)
-        }
-        if (sigmaBucketTexId != 0 && gridW > 0 && gridH > 0) {
-            b.plane(
-                "s2.axisBuckets", gridW, gridH, 4,
-                readFloatPlane(sigmaBucketFboId, gridW, gridH),
-                sourceFrame = axisBucketFrameIndex
-            )
-        }
-        if (structureMapTexId != 0 && structureMapWidth > 0 && structureMapHeight > 0) {
-            // Sized from the map's own buffer, not from the demosaic dimensions.
-            // They are equal whenever the map ran, but the buffer is what is
-            // actually bound here, and a readback whose extents disagree with the
-            // attachment is a GL error rather than a slightly wrong plane.
-            val structure = readFloatPlane(
-                structureMapFboId, structureMapWidth, structureMapHeight
-            )
-            b.plane(
-                "s5.structureMap", structureMapWidth, structureMapHeight, 4,
-                structure,
-                sourceFrame = structureMapFrameIndex
-            )
-            // Round-1 output is the noise field the covariance is measured on, and
-            // it ships as a plane in its own right: it is the one buffer in the
-            // grab that lets an offline reader re-derive the measurement instead
-            // of trusting it. Only readable at the map's resolution, which is the
-            // S5 work resolution - a mismatch means the two passes ran at
-            // different sizes and the pairing would be meaningless.
-            val round1 =
-                if (structure != null && outNr1FboId != 0 &&
-                    outNrBufferWidth == structureMapWidth &&
-                    outNrBufferHeight == structureMapHeight
-                ) {
-                    readFloatPlane(outNr1FboId, structureMapWidth, structureMapHeight)
-                } else {
-                    null
-                }
-            b.plane(
-                "s5.round1", structureMapWidth, structureMapHeight, 4, round1,
-                sourceFrame = structureMapFrameIndex
-            )
-            lastCovariance = OutputCovariance.measure(
-                round1, structure, structureMapWidth, structureMapHeight
-            )
-            lastCovarianceReport = lastCovariance?.report() ?: OutputCovariance.NO_SAMPLE
-        }
-        // States the rule the @frame stamps above follow, so the file explains
-        // itself without this class's source in hand.
-        b.meta(
-            "planeFramePolicy",
-            "each plane's @frame is the render frame its contents were computed on; " +
-                "a value equal to frame describes this export, a lower value is an " +
-                "earlier census frame; a grab collects s2.sigma, s2.axisBuckets, " +
-                "s5.structureMap and s5.round1 whether or not measurement was armed, and " +
-                "omits a plane only when the pass that produces it could not run"
-        )
-        b.meta(
-            "structureMapLayout",
-            "s5.structureMap is (ratio, aLum, class, organization) measured on this " +
-                "frame's S5 round-1 output; class is 0 PLAIN / 1 TEXTURE / 2 EDGE; " +
-                "the ratio denominator is S5's own luma noise prediction, so the " +
-                "ratio is dimensionless and 1.0 is the pure-noise anchor on both " +
-                "host and device"
-        )
-        b.meta(
-            "covarianceBasis",
-            "the output-domain 3x3 RGB covariance is measured on the s5.round1 plane " +
-                "over texels whose whole 3x3 neighbourhood classifies PLAIN, as the " +
-                "second moment of (texel minus its neighbourhood mean); only ratios are " +
-                "reported, so no working-range or DN-scale assumption enters"
-        )
-        pendingFrameGrab = b.build()
-        // Captured here rather than read from pendingFrameGrab at export time,
-        // because the export writes the bytes before it builds the bundle. The
-        // summary therefore has to survive the grab being consumed.
-        lastFrameGrabSummary = "${pendingFrameGrab!!.byteCount()} bytes\n" + pendingFrameGrab!!.indexText()
-        // Single shot, like a camera's self-timer: fire once, fall back to safe.
-        // Staying armed would buffer another full grab on every frame.
-        frameGrabArmed = false
-        // A grab can force the bucket and map draws without measurement armed,
-        // which allocates buffers the off state does not otherwise hold. Give
-        // them back so "measurement off" keeps meaning off rather than quietly
-        // retaining several megabytes of GPU memory per session.
-        if (!axisBucketDiagnostic) releaseSigmaBucketBuffer()
-        if (!structureMapDiagnostic) releaseStructureMapBuffer()
-        CrashLogger.log(
-            TAG,
-            "framegrab captured and disarmed" +
-                if (measurementActive) "" else " (grab-only: diagnostic buffers released)"
-        )
-    }
-
-    /** Full RGBA32F readback of one FBO attachment, native byte order. */
-    private fun readFloatPlane(fboId: Int, width: Int, height: Int): FloatArray? {
-        return try {
-            val texels = width * height
-            val buf = ByteBuffer.allocateDirect(FloatReadback.planeBytes(width, height))
-                .order(ByteOrder.nativeOrder())
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
-            GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_FLOAT, buf)
-            val out = FloatArray(texels * 4)
-            buf.asFloatBuffer().get(out)
-            out
-        } catch (t: Throwable) {
-            CrashLogger.log(TAG, "framegrab readback failed ${width}x$height: ${t.message}")
-            null
-        }
     }
 
     // GL writes GL_FLOAT pixels in the platform's native (little-endian) byte
@@ -3246,6 +3003,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             }
 
             if (rawCaptureReq != null) {
+                val captureStartNs = System.nanoTime()
                 val outW = rawCaptureReq.targetW.takeIf { it in 1..rawCaptureReq.rawW } ?: rawCaptureReq.rawW
                 val outH = rawCaptureReq.targetH.takeIf { it in 1..rawCaptureReq.rawH } ?: rawCaptureReq.rawH
                 ensureRawDemosaicFbo(outW, outH)
@@ -3262,10 +3020,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     GLES20.glClearColor(0f, 0f, 0f, 1f)
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-                    bayerShader.uploadBayer(
-                        rawCaptureReq.buffer.duplicate(),
-                        rawCaptureReq.rawW, rawCaptureReq.rawH, rawCaptureReq.stridePixels
-                    )
+                    PerfTimers.measure("capture.raw_upload_initial") {
+                        bayerShader.uploadBayer(
+                            rawCaptureReq.buffer.duplicate(),
+                            rawCaptureReq.rawW, rawCaptureReq.rawH, rawCaptureReq.stridePixels
+                        )
+                    }
                     logGlError("raw after initial uploadBayer", bayerRenderCount)
 
                     // Build/extend the candidate list from this still's own
@@ -3327,38 +3087,44 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                             captureListOriginals[i] =
                                 src.getShort((y * rawCaptureReq.stridePixels + x) * 2)
                         }
-                        val repaired = DefectMap.repairInPlace(
-                            rawCaptureReq.buffer,
-                            rawCaptureReq.rawW, rawCaptureReq.rawH,
-                            rawCaptureReq.stridePixels,
-                            isoForDenoise, bayerBlackLevelPattern,
-                            list
-                        )
+                        val repaired = PerfTimers.measure("capture.list_repair") {
+                            DefectMap.repairInPlace(
+                                rawCaptureReq.buffer,
+                                rawCaptureReq.rawW, rawCaptureReq.rawH,
+                                rawCaptureReq.stridePixels,
+                                isoForDenoise, bayerBlackLevelPattern,
+                                list
+                            )
+                        }
                         CrashLogger.log(
                             TAG, "capture S1 list repaired $repaired/${list.size} points"
                         )
                     }
 
                     try {
-                        bayerShader.uploadBayer(
-                            rawCaptureReq.buffer.duplicate(),
-                            rawCaptureReq.rawW, rawCaptureReq.rawH, rawCaptureReq.stridePixels
-                        )
+                        PerfTimers.measure("capture.raw_upload_final") {
+                            bayerShader.uploadBayer(
+                                rawCaptureReq.buffer.duplicate(),
+                                rawCaptureReq.rawW, rawCaptureReq.rawH, rawCaptureReq.stridePixels
+                            )
+                        }
                     } finally {
                         // The DNG is written from this same snapshot after the
                         // render. Restore the few repaired samples so the DNG
                         // remains the untouched sensor raw.
                         val originals = captureListOriginals
                         if (originals != null && captureSharedList != null) {
-                            val dst = rawCaptureReq.buffer.duplicate()
-                            for (i in captureSharedList.indices) {
-                                val idx = captureSharedList[i]
-                                val y = idx / rawCaptureReq.rawW
-                                val x = idx - y * rawCaptureReq.rawW
-                                dst.putShort(
-                                    (y * rawCaptureReq.stridePixels + x) * 2,
-                                    originals[i]
-                                )
+                            PerfTimers.measure("capture.list_restore") {
+                                val dst = rawCaptureReq.buffer.duplicate()
+                                for (i in captureSharedList.indices) {
+                                    val idx = captureSharedList[i]
+                                    val y = idx / rawCaptureReq.rawW
+                                    val x = idx - y * rawCaptureReq.rawW
+                                    dst.putShort(
+                                        (y * rawCaptureReq.stridePixels + x) * 2,
+                                        originals[i]
+                                    )
+                                }
                             }
                         }
                     }
@@ -3543,6 +3309,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                 } else {
                     Log.e(TAG, "RAW render FBO not available")
                 }
+                PerfTimers.record("capture.render", System.nanoTime() - captureStartNs)
                 rawCaptureReq.latch.countDown()
             }
 
@@ -3592,6 +3359,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             }
             GLES20.glViewport(vpX, vpY, vpW, vpH)
 
+            gpuTimers.begin("present")
             if (focusPeakEnabled) {
                 val zoom = zoomController.zoomFactor.coerceAtLeast(1f)
                 val srcW = if (useBayerPath) bayerWidth else yuvWidth
@@ -3610,6 +3378,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             } else {
                 blitShader.draw(fboTextureId)
             }
+            gpuTimers.end("present")
 
             val swapResult = EGL14.eglSwapBuffers(eglDisplay, eglSurface)
             if (!swapResult) {
@@ -3621,7 +3390,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             }
 
             if (captureReq == null && rawCaptureReq == null && frameStartNs > 0) {
-                val frameTimeMs = (System.nanoTime() - frameStartNs) / 1_000_000L
+                val frameTimeNs = System.nanoTime() - frameStartNs
+                val frameTimeMs = frameTimeNs / 1_000_000L
+                PerfTimers.record("preview.frame", frameTimeNs)
                 onFrameRendered?.invoke(frameTimeMs)
 
                 degradedManager?.let { dm ->
@@ -4187,9 +3958,11 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             if ((buf.get(i).toInt() and 0xff) != 0) out.add(i)
         }
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        val elapsed = System.nanoTime() - t0
+        PerfTimers.record("capture.s1_mask", elapsed)
         CrashLogger.log(
             TAG, "capture GPU S1 list: ${width}x${height} points=${out.size} in " +
-                "%.1f".format((System.nanoTime() - t0) / 1.0e6) + "ms"
+                "%.1f".format(elapsed / 1.0e6) + "ms"
         )
         return out.toIntArray()
     }
@@ -4799,7 +4572,6 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             sigmaBucketShader.destroy()
             structureMapShader.destroy()
             gpuTimers.disarm()
-            pendingFrameGrab = null
             if (fallbackFloatTexId != 0) {
                 GLES20.glDeleteTextures(1, intArrayOf(fallbackFloatTexId), 0)
                 fallbackFloatTexId = 0

@@ -1398,8 +1398,8 @@ class Camera2Manager(private val context: Context) {
         CrashLogger.log(TAG, "captureStill afMode=$afMode aeMode=$aeMode manual=$isManualExposure")
 
         captureImageLatch = CountDownLatch(1)
-        // Optional DNG twin: latch the next raw frame and swap the raw
-        // reader's listener so the framegrab path cannot race the acquire.
+        // Optional DNG template: latch the next raw frame and swap the raw
+        // reader's listener so the preview path cannot race the acquire.
         var dngRawLatch: CountDownLatch? = null
         if (wantDng) {
             if (rawReader == null) {
@@ -1625,7 +1625,7 @@ CaptureRequest.CONTROL_AWB_MODE_SHADE -> "SHADE"
      *  stream. Bayer-path captures never issue a still request, so the
      *  captureStill DNG plumbing cannot serve them; this grabs the nearest
      *  raw instead (its own result records the true ISO/exposure). The
-     *  framegrab listener is swapped out for the wait and restored after.
+     *  preview raw listener is swapped out for the wait and restored after.
      *  The caller owns and must close the returned image. */
     fun grabRawFrame(timeoutMs: Long = 1500): Image? {
         val reader = rawReader ?: return null
