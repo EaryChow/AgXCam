@@ -20,6 +20,9 @@ class BayerShaderProgram {
     /** Exposed only for the shader budget table in the measurement report. */
     fun budgetDemosaicProgramId(): Int = demosaicProgramId
     private var bayerTextureId = 0
+    private var bayerTextureId2 = 0
+    private var bayerTextureWidth = 0
+    private var bayerTextureHeight = 0
     private var lensShadingTextureId = 0
     // 1x1 native-RGBA texture bound to the u_denoisedTex unit whenever no real
     // denoised mosaic is provided: the sampler is float-typed so binding the
@@ -242,10 +245,11 @@ class BayerShaderProgram {
         pUBlackLevelLoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_black_level")
         pUPackWbGainsLoc = GLES20.glGetUniformLocation(s3PackProgramId, "u_pack_wb_gains")
 
-        val textures = IntArray(2)
-        GLES20.glGenTextures(2, textures, 0)
+        val textures = IntArray(3)
+        GLES20.glGenTextures(3, textures, 0)
         bayerTextureId = textures[0]
-        lensShadingTextureId = textures[1]
+        bayerTextureId2 = textures[1]
+        lensShadingTextureId = textures[2]
 
         val fallback = IntArray(1)
         GLES20.glGenTextures(1, fallback, 0)
@@ -261,11 +265,13 @@ class BayerShaderProgram {
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
-        GLES30.glBindTexture(GLES20.GL_TEXTURE_2D, bayerTextureId)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        for (tex in intArrayOf(bayerTextureId, bayerTextureId2)) {
+            GLES30.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        }
 
         GLES30.glBindTexture(GLES20.GL_TEXTURE_2D, lensShadingTextureId)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
@@ -297,22 +303,43 @@ class BayerShaderProgram {
         sensorHeight = height
 
         GLES30.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES30.glBindTexture(GLES20.GL_TEXTURE_2D, bayerTextureId)
 
+        val uploadTexture = bayerTextureId2
+        if (bayerTextureWidth != width || bayerTextureHeight != height) {
+            // Two R16UI textures, alternating uploads. The previous frame's
+            // demosaic can still be reading the current texture; uploading into
+            // the idle one avoids the write-after-read stall that otherwise
+            // makes glTexSubImage2D wait for the GPU.
+            for (tex in intArrayOf(bayerTextureId, bayerTextureId2)) {
+                GLES30.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
+                GLES30.glTexImage2D(
+                    GLES20.GL_TEXTURE_2D, 0, GLES30.GL_R16UI,
+                    width, height, 0,
+                    GLES30.GL_RED_INTEGER, GLES20.GL_UNSIGNED_SHORT, null
+                )
+            }
+            bayerTextureWidth = width
+            bayerTextureHeight = height
+        }
+
+        GLES30.glBindTexture(GLES20.GL_TEXTURE_2D, uploadTexture)
         if (stridePixels > width && stridePixels > 0) {
             GLES30.glPixelStorei(GLES30.GL_UNPACK_ROW_LENGTH, stridePixels)
         }
-
         buffer.position(0)
-        GLES30.glTexImage2D(
-            GLES20.GL_TEXTURE_2D, 0, GLES30.GL_R16UI,
-            width, height, 0,
+        GLES30.glTexSubImage2D(
+            GLES20.GL_TEXTURE_2D, 0, 0, 0,
+            width, height,
             GLES30.GL_RED_INTEGER, GLES20.GL_UNSIGNED_SHORT, buffer
         )
-
         if (stridePixels > width && stridePixels > 0) {
             GLES30.glPixelStorei(GLES30.GL_UNPACK_ROW_LENGTH, 0)
         }
+
+        // The just-uploaded texture becomes the current one; the old current
+        // becomes the next upload target.
+        bayerTextureId2 = bayerTextureId
+        bayerTextureId = uploadTexture
     }
 
     fun uploadLensShadingMap(data: ShortArray, width: Int, height: Int) {
@@ -643,9 +670,14 @@ class BayerShaderProgram {
             GLES20.glDeleteProgram(s1MaskProgramId)
             s1MaskProgramId = 0
         }
-        val textures = intArrayOf(bayerTextureId, lensShadingTextureId, fallbackFloatTextureId)
-        GLES20.glDeleteTextures(3, textures, 0)
+        val textures = intArrayOf(
+            bayerTextureId, bayerTextureId2, lensShadingTextureId, fallbackFloatTextureId
+        )
+        GLES20.glDeleteTextures(4, textures, 0)
         bayerTextureId = 0
+        bayerTextureId2 = 0
+        bayerTextureWidth = 0
+        bayerTextureHeight = 0
         lensShadingTextureId = 0
         fallbackFloatTextureId = 0
     }
@@ -1552,12 +1584,52 @@ void demosaicAtDual(ivec2 sensorCoord, vec2 lsSensorUV, float mCoarse, out vec3 
     hi = vec3(hiR, hiG, hiB);
 }
 
+// Cached reconstruction for the 4x4 box path.  rawCache[] holds
+// wbPhaseGain * denoisedSampleRawRing for the 6x6 source union, and lsCache[]
+// holds the matching neighbour lens-shading gains.  The arrays are passed in
+// so the 16 centre reconstructions do not repeat the same raw/lens reads.
+// The caller only uses this path when the whole 6x6 footprint is inside the
+// sensor, so the original neighbour clamping is a no-op and the result is
+// bit-identical to demosaicAt().
+vec3 demosaicReconstruct(ivec2 sensorCoord,
+                         float nN, float nS, float nW, float nE,
+                         float nNW, float nNE, float nSW, float nSE,
+                         float center) {
+    int color = u_bayer_color_map[safePhase(sensorCoord.x, sensorCoord.y)];
+    float r = 0.0, g = 0.0, b = 0.0;
+    if (color == 0) {
+        r = center;
+        float diag = (nNW + nNE + nSW + nSE) * 0.25;
+        g = (nW + nE + nN + nS) * 0.25;
+        b = diag;
+    } else if (color == 2) {
+        b = center;
+        float diag = (nNW + nNE + nSW + nSE) * 0.25;
+        g = (nW + nE + nN + nS) * 0.25;
+        r = diag;
+    } else {
+        g = center;
+        int colorNS = u_bayer_color_map[safePhase(sensorCoord.x, sensorCoord.y - 1)];
+        if (colorNS == 0) {
+            r = (nN + nS) * 0.5;
+            b = (nW + nE) * 0.5;
+        } else {
+            r = (nW + nE) * 0.5;
+            b = (nN + nS) * 0.5;
+        }
+    }
+    return vec3(r, g, b);
+}
+
 vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
     if (u_box_aa <= 1) {
         // 1:1 capture: one demosaic per output pixel, the coarse dev is read
         // once at the clamped sample (bit-identical to pre-thread GLSL).
         vec2 s0 = clampSensor(sensorUV);
-        float mCoarse = coarseDevAt(ivec2(s0));
+        float mCoarse = 0.0;
+        if (u_dp_strength > 0.0 || u_raw_nr_strength > 0.0) {
+            mCoarse = coarseDevAt(ivec2(s0));
+        }
         return demosaicAt(ivec2(s0), lsSensorUV, u_nr_radius, mCoarse);
     }
     // Honor the real box size: the inline S1/S3 filter carries the averaging
@@ -1572,13 +1644,79 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
     // (base + bx/2); every box-AA ring sample shares it.  The old per-sample
     // coarse read re-fetched the whole 3x3 coarse cell ring per ring sample
     // (~10x the texel fetches in the smooth box path - the S3 regression).
-    float mCoarse = coarseDevAt(ivec2(base) + ivec2(bx / 2, bx / 2));
+    // When neither inline DPC nor S3 is active (the shipped preview path uses
+    // the validated S1 list), no consumer reads mCoarse, so do not spend the
+    // 9x4 raw fetches that compute it.
+    float mCoarse = 0.0;
+    if (u_dp_strength > 0.0 || u_raw_nr_strength > 0.0) {
+        mCoarse = coarseDevAt(ivec2(base) + ivec2(bx / 2, bx / 2));
+    }
     // Smooth box-AA step (preview k>2): instead of stepping 4x4+nr2 -> 2x2+nr4
     // at s3>=0.7, blend the two box means by u_box_blend (host =
     // smoothstep(s3, 0.65, 0.75)).  A continuous box removes the sigma step
     // that a directional flat pull pops, and at the endpoints the blend is
     // bit-identical to the plain box (mirror-validated: maxDelta <= 0.00027).
     float blendW = u_box_blend;
+
+    // Fast path for the shipped preview box: 4x4 centres whose 3x3
+    // reconstructions span only a 6x6 source union.  The old loop called
+    // demosaicAt 16 times, each re-reading/recomputing overlapping raw and
+    // lens samples.  Build the union once and reconstruct from it.  The
+    // interior guard keeps exact edge clamping in the old path.
+    if (bx == 4 && blendW <= 0.0 &&
+        base.x >= 1.0 && base.y >= 1.0 &&
+        base.x + float(bx) <= u_sensorSize.x - 1.0 &&
+        base.y + float(bx) <= u_sensorSize.y - 1.0) {
+        float rawCache[36];
+        float lsCache[36];
+        for (int cy = 0; cy < 6; cy++) {
+            for (int cx = 0; cx < 6; cx++) {
+                int relX = cx - 1;
+                int relY = cy - 1;
+                ivec2 s = ivec2(base) + ivec2(relX, relY);
+                int ci = cy * 6 + cx;
+                rawCache[ci] = wbPhaseGain(s) *
+                    denoisedSampleRawRing(s, u_nr_radius, mCoarse);
+                lsCache[ci] = lsGain(
+                    lsSensorUV + vec2(float(relX) + baseOff, float(relY) + baseOff)
+                );
+            }
+        }
+        vec3 sumCached = vec3(0.0);
+        for (int dy = 0; dy < 4; dy++) {
+            for (int dx = 0; dx < 4; dx++) {
+                ivec2 c = ivec2(base) + ivec2(dx, dy);
+                vec2 lsC = lsSensorUV + vec2(float(dx) + baseOff, float(dy) + baseOff);
+                int phase = safePhase(c.x, c.y);
+                float centerGain = texture(u_lens_shading_map, lsC / u_sensorSize)[phase];
+
+                int row = dy + 1;
+                int col = dx + 1;
+                int iN  = (row - 1) * 6 + col;
+                int iS  = (row + 1) * 6 + col;
+                int iW  = row * 6 + (col - 1);
+                int iE  = row * 6 + (col + 1);
+                int iNW = (row - 1) * 6 + (col - 1);
+                int iNE = (row - 1) * 6 + (col + 1);
+                int iSW = (row + 1) * 6 + (col - 1);
+                int iSE = (row + 1) * 6 + (col + 1);
+                sumCached += demosaicReconstruct(
+                    c,
+                    rawCache[iN]  * lsCache[iN],
+                    rawCache[iS]  * lsCache[iS],
+                    rawCache[iW]  * lsCache[iW],
+                    rawCache[iE]  * lsCache[iE],
+                    rawCache[iNW] * lsCache[iNW],
+                    rawCache[iNE] * lsCache[iNE],
+                    rawCache[iSW] * lsCache[iSW],
+                    rawCache[iSE] * lsCache[iSE],
+                    rawCache[row * 6 + col] * centerGain
+                );
+            }
+        }
+        return sumCached * (1.0 / 16.0);
+    }
+
     if (blendW > 0.0) {
         // Fused smooth blend: the 2x2 ring-4 box sits exactly on the middle
         // four cells of the 4x4 ring-2 box (base2 = base + mOff), so those four
