@@ -456,7 +456,7 @@ class BayerShaderProgram {
         GLES20.glUniform1i(s1MaskBitDepthLoc, bitDepth)
         GLES20.glUniform1f(s1MaskIsoALoc, isoModelA)
         GLES20.glUniform1f(s1MaskIsoBLoc, isoModelB)
-        GLES20.glUniform1f(s1MaskDpLoc, 1.0f)
+        GLES20.glUniform1f(s1MaskDpLoc, 0.6f)
         val identity = floatArrayOf(
             1f, 0f, 0f, 0f,
             0f, 1f, 0f, 0f,
@@ -1976,8 +1976,10 @@ float inlineDefectFlagAt(ivec2 coord) {
     float sigma = sqrt(max(u_iso_model_a * max(iavg, 0.0) + u_iso_model_b, 1.0));
     float band = max((0.1 + 0.3 * u_dp_strength) * max(iavg, 0.0),
                      (2.0 + 2.0 * u_dp_strength) * sigma);
-    bool hot = (c > mx) && (c - iavg) > band;
-    bool cold = (c < mn) && (iavg - c) > band;
+    // Mean-excess gate: adjacent same-colour hot pixels otherwise hide
+    // behind the maximum-neighbour test.
+    bool hot = (c - iavg) > band;
+    bool cold = (iavg - c) > band;
     if (!(hot || cold)) return 0.0;
     float minEw = min(nE, nW);
     float maxEw = max(nE, nW);

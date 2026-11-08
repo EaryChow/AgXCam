@@ -10,12 +10,20 @@ import kotlin.math.sqrt
 /**
  * Shared S1 candidate list.
  *
- * The list is built once from a high-exposure frame with the same 12-tap
- * alpha-trim + four-tap gate the demosaic uses. Every frame then checks only
- * the listed coordinates with the normal gate; only coordinates that trigger
- * are repaired. The list is a candidate set, not an unconditional repair map.
+ * The list is built once from a high-exposure frame with the mean-excess
+ * 12-tap alpha-trim plus the direction-specific four-tap veto. This is the
+ * capture list/S1-mask operator, not the demosaic's inline max-neighbour
+ * isolation gate. Every frame then checks only the listed coordinates with
+ * the same mean-excess gate; only coordinates that trigger are repaired. The
+ * list is a candidate set, not an unconditional repair map.
  */
 object DefectMap {
+    // dp=0.6 mean-excess band. The centre is compared with the trimmed mean,
+    // not the maximum neighbour: adjacent same-colour hot pixels otherwise
+    // mask each other. The four-tap veto below is unchanged.
+    private const val BAND_M1 = 0.28f
+    private const val BAND_M2 = 3.2f
+
     fun buildList(
         raw: ByteBuffer,
         width: Int,
@@ -84,9 +92,9 @@ object DefectMap {
                 maxOf(maxOf(nw, se), sw)), maxOf(maxOf(ee, ww), maxOf(nn, ss)))
             val iavg = (sum - mn - mx) * 0.1f
             val sigma = sqrt(max(isoA * max(iavg, 0f) + isoB, 1f))
-            val band = max(0.4f * max(iavg, 0f), 4.0f * sigma)
-            val hot = c > mx && c - iavg > band
-            val cold = c < mn && iavg - c > band
+            val band = max(BAND_M1 * max(iavg, 0f), BAND_M2 * sigma)
+            val hot = c - iavg > band
+            val cold = iavg - c > band
             if (!hot && !cold) return false
 
             val ewMin = minOf(e, w)
@@ -95,7 +103,10 @@ object DefectMap {
             val nsMax = maxOf(n, s)
             val secondSmall = minOf(maxOf(ewMin, nsMin), minOf(ewMax, nsMax))
             val secondLarge = maxOf(minOf(ewMax, nsMax), maxOf(ewMin, nsMin))
-            return c - secondLarge > band || secondSmall - c > band
+            // Use the hot/cold direction that raised the mean-excess test.
+            // An OR here can accept the opposite direction's veto.
+            return if (hot) c - secondLarge > band
+            else secondSmall - c > band
         }
 
         val triggered = HashSet<Int>(list.size * 2)
@@ -180,9 +191,9 @@ object DefectMap {
                     maxOf(maxOf(nw, se), sw)), maxOf(maxOf(ee, ww), maxOf(nn, ss)))
                 val iavg = (sum - mn - mx) * 0.1f
                 val sigma = sqrt(max(isoA * max(iavg, 0f) + isoB, 1f))
-                val band = max(0.4f * max(iavg, 0f), 4.0f * sigma)
-                val hot = c > mx && c - iavg > band
-                val cold = c < mn && iavg - c > band
+                val band = max(BAND_M1 * max(iavg, 0f), BAND_M2 * sigma)
+                val hot = c - iavg > band
+                val cold = iavg - c > band
                 if (!hot && !cold) continue
 
                 val ewMin = minOf(e, w)
@@ -191,7 +202,9 @@ object DefectMap {
                 val nsMax = maxOf(n, s)
                 val secondSmall = minOf(maxOf(ewMin, nsMin), minOf(ewMax, nsMax))
                 val secondLarge = maxOf(minOf(ewMax, nsMax), maxOf(ewMin, nsMin))
-                if (c - secondLarge > band || secondSmall - c > band) {
+                val veto = if (hot) c - secondLarge > band
+                else secondSmall - c > band
+                if (veto) {
                     out[y * width + x] = 255.toByte()
                 }
             }
