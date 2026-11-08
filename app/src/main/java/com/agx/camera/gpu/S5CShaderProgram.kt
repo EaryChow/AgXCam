@@ -51,6 +51,10 @@ class S5CShaderProgram {
     private var mainProgramId = 0
     private var cellProgramId = 0
     private var blendProgramId = 0
+    private var lumaProgramId = 0
+    private var chromaProgramId = 0
+    private var mainLumaProgramId = 0
+    private var mainLumaChromaProgramId = 0
     private var ready = false
 
     /**
@@ -58,6 +62,13 @@ class S5CShaderProgram {
      * pass runs at 1/64 the texel count, so the budget counts this pass.
      */
     fun budgetProgramId(): Int = mainProgramId
+
+    /** True when the single-channel guide-luma fast path is available. */
+    fun lumaReady(): Boolean = lumaProgramId != 0 && mainLumaProgramId != 0
+
+    /** True when the precomputed luma+chroma fast path is available. */
+    fun lumaChromaReady(): Boolean =
+        lumaProgramId != 0 && chromaProgramId != 0 && mainLumaChromaProgramId != 0
 
     private val quadVertices: FloatBuffer = ByteBuffer.allocateDirect(QUAD_COORDS.size * 4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer().put(QUAD_COORDS).also { it.position(0) }
@@ -69,6 +80,10 @@ class S5CShaderProgram {
         mainProgramId = createProgram(VERTEX_SHADER, MAIN_FRAGMENT)
         cellProgramId = createProgram(VERTEX_SHADER, CELL_FRAGMENT)
         blendProgramId = createProgram(VERTEX_SHADER, BLEND_FRAGMENT)
+        lumaProgramId = createProgram(VERTEX_SHADER, LUMA_FRAGMENT)
+        chromaProgramId = createProgram(VERTEX_SHADER, CHROMA_FRAGMENT)
+        mainLumaProgramId = createProgram(VERTEX_SHADER, lumaMainSource())
+        mainLumaChromaProgramId = createProgram(VERTEX_SHADER, lumaChromaMainSource())
         if (sigmaProgramId == 0 || mainProgramId == 0 ||
             cellProgramId == 0 || blendProgramId == 0
         ) {
@@ -77,9 +92,15 @@ class S5CShaderProgram {
             return
         }
         ready = true
-        Log.d(TAG, "Stage-5C programs created: s=$sigmaProgramId m=$mainProgramId c=$cellProgramId b=$blendProgramId")
+        Log.d(
+            TAG, "Stage-5C programs created: s=$sigmaProgramId m=$mainProgramId " +
+                "c=$cellProgramId b=$blendProgramId " +
+                "luma=$lumaProgramId/$mainLumaProgramId chroma=$chromaProgramId/$mainLumaChromaProgramId"
+        )
         com.agx.camera.CrashLogger.log(
-            TAG, "Program created: s5c=($sigmaProgramId,$mainProgramId,$cellProgramId,$blendProgramId)"
+            TAG,
+            "Program created: s5c=($sigmaProgramId,$mainProgramId,$cellProgramId,$blendProgramId," +
+                "$lumaProgramId,$mainLumaProgramId,$chromaProgramId,$mainLumaChromaProgramId)"
         )
     }
 
@@ -90,11 +111,19 @@ class S5CShaderProgram {
         GLES20.glDeleteProgram(mainProgramId)
         GLES20.glDeleteProgram(cellProgramId)
         GLES20.glDeleteProgram(blendProgramId)
+        GLES20.glDeleteProgram(lumaProgramId)
+        GLES20.glDeleteProgram(chromaProgramId)
+        GLES20.glDeleteProgram(mainLumaProgramId)
+        GLES20.glDeleteProgram(mainLumaChromaProgramId)
         ready = false
         sigmaProgramId = 0
         mainProgramId = 0
         cellProgramId = 0
         blendProgramId = 0
+        lumaProgramId = 0
+        chromaProgramId = 0
+        mainLumaProgramId = 0
+        mainLumaChromaProgramId = 0
     }
 
     private fun drawQuad(programId: Int) {
@@ -159,22 +188,81 @@ class S5CShaderProgram {
         s: Float, sW: Float, gC: Float, gLum: Float, rRetain: Float, mCx: Float, mCy: Float,
         rSupport: Float, rGuide: Float, mottleFix: Float = 1f
     ) {
-        if (mainProgramId == 0) return
-        GLES20.glUseProgram(mainProgramId)
-        setTex(mainProgramId, "u_inTex", 0, inTex)
-        setTex(mainProgramId, "u_guideTex", 1, guideTex)
-        setTex(mainProgramId, "u_sigmaTex", 2, sigmaTex)
-        setF(mainProgramId, "u_strength", strength)
-        setF(mainProgramId, "u_s", s)
-        setF(mainProgramId, "u_s_w", sW)
-        setF(mainProgramId, "u_g_c", gC)
-        setF(mainProgramId, "u_g_lum", gLum)
-        setF(mainProgramId, "u_r_retain", rRetain)
-        set2F(mainProgramId, "u_m_c", mCx, mCy)
-        setF(mainProgramId, "u_r_support", rSupport)
-        setF(mainProgramId, "u_r_guide", rGuide)
-        setF(mainProgramId, "u_mottle_fix", mottleFix)
-        drawQuad(mainProgramId)
+        drawStage1Internal(
+            mainProgramId, inTex, guideTex, 0, sigmaTex, strength,
+            s, sW, gC, gLum, rRetain, mCx, mCy, rSupport, rGuide, mottleFix
+        )
+    }
+
+    /**
+     * Stage-1 chroma filter with a precomputed single-channel guide luma.
+     * The arithmetic is the same as drawStage1; the main shader reads luma
+     * directly instead of fetching guide RGB and recomputing it per tap.
+     */
+    fun drawStage1Luma(
+        inTex: Int, guideLumaTex: Int, sigmaTex: Int, strength: Float,
+        s: Float, sW: Float, gC: Float, gLum: Float, rRetain: Float, mCx: Float, mCy: Float,
+        rSupport: Float, rGuide: Float, mottleFix: Float = 1f
+    ) {
+        drawStage1Internal(
+            mainLumaProgramId, inTex, guideLumaTex, 0, sigmaTex, strength,
+            s, sW, gC, gLum, rRetain, mCx, mCy, rSupport, rGuide, mottleFix
+        )
+    }
+
+    /**
+     * Stage-1 chroma filter with both guide luma and input chroma precomputed.
+     * The arithmetic and tap selection are unchanged.
+     */
+    fun drawStage1LumaChroma(
+        inTex: Int, guideLumaTex: Int, chromaTex: Int, sigmaTex: Int, strength: Float,
+        s: Float, sW: Float, gC: Float, gLum: Float, rRetain: Float, mCx: Float, mCy: Float,
+        rSupport: Float, rGuide: Float, mottleFix: Float = 1f
+    ) {
+        drawStage1Internal(
+            mainLumaChromaProgramId, inTex, guideLumaTex, chromaTex, sigmaTex, strength,
+            s, sW, gC, gLum, rRetain, mCx, mCy, rSupport, rGuide, mottleFix
+        )
+    }
+
+    private fun drawStage1Internal(
+        programId: Int, inTex: Int, guideTex: Int, chromaTex: Int, sigmaTex: Int,
+        strength: Float, s: Float, sW: Float, gC: Float, gLum: Float, rRetain: Float,
+        mCx: Float, mCy: Float, rSupport: Float, rGuide: Float, mottleFix: Float
+    ) {
+        if (programId == 0) return
+        GLES20.glUseProgram(programId)
+        setTex(programId, "u_inTex", 0, inTex)
+        setTex(programId, "u_guideTex", 1, guideTex)
+        if (chromaTex != 0) setTex(programId, "u_chromaTex", 3, chromaTex)
+        setTex(programId, "u_sigmaTex", 2, sigmaTex)
+        setF(programId, "u_strength", strength)
+        setF(programId, "u_s", s)
+        setF(programId, "u_s_w", sW)
+        setF(programId, "u_g_c", gC)
+        setF(programId, "u_g_lum", gLum)
+        setF(programId, "u_r_retain", rRetain)
+        set2F(programId, "u_m_c", mCx, mCy)
+        setF(programId, "u_r_support", rSupport)
+        setF(programId, "u_r_guide", rGuide)
+        setF(programId, "u_mottle_fix", mottleFix)
+        drawQuad(programId)
+    }
+
+    /** Writes the guide luma into the red channel of the bound target. */
+    fun drawLuma(guideTex: Int) {
+        if (lumaProgramId == 0) return
+        GLES20.glUseProgram(lumaProgramId)
+        setTex(lumaProgramId, "u_guideTex", 0, guideTex)
+        drawQuad(lumaProgramId)
+    }
+
+    /** Writes input C1/C2 into the red/green channels of the bound target. */
+    fun drawChroma(inTex: Int) {
+        if (chromaProgramId == 0) return
+        GLES20.glUseProgram(chromaProgramId)
+        setTex(chromaProgramId, "u_inTex", 0, inTex)
+        drawQuad(chromaProgramId)
     }
 
     /** Cell mottle pass, one texel per 8x8 cell of the stage-1 image. */
@@ -316,6 +404,7 @@ out vec4 outColor;
 uniform sampler2D u_inTex;
 uniform sampler2D u_guideTex;
 uniform sampler2D u_sigmaTex;
+uniform sampler2D u_chromaTex;
 uniform float u_strength;
 uniform float u_s;
 uniform float u_s_w;
@@ -422,6 +511,89 @@ void main() {
         (1.0 - lam2) * cin.y + lam2 * chat.y
     );
     outColor = vec4(rgbOf(yhat, cOut), 1.0);
+}
+"""
+
+        private const val LUMA_FRAGMENT = """
+#version 300 es
+precision highp float;
+precision highp int;
+
+in vec2 v_texCoord;
+out vec4 outColor;
+
+uniform sampler2D u_guideTex;
+
+float luma(vec3 rgb) { return 0.25 * rgb.r + 0.5 * rgb.g + 0.25 * rgb.b; }
+
+void main() {
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    outColor = vec4(luma(texelFetch(u_guideTex, p, 0).rgb), 0.0, 0.0, 1.0);
+}
+"""
+
+        /**
+         * The same main filter with the guide-luma texture read substituted
+         * for the RGB fetch plus per-tap luma arithmetic. The source is
+         * transformed mechanically; if either expected line is missing, the
+         * transform returns an empty source so program creation fails and the
+         * caller falls back to the RGB-guide path instead of producing a
+         * scaled-luma image.
+         */
+        private fun lumaMainSource(): String {
+            val src = MAIN_FRAGMENT
+                .replace(
+                    "float yhat = luma(texelFetch(u_guideTex, base, 0).rgb);",
+                    "float yhat = texelFetch(u_guideTex, base, 0).r;"
+                )
+                .replace(
+                    "float yv = luma(texelFetch(u_guideTex, t, 0).rgb);",
+                    "float yv = texelFetch(u_guideTex, t, 0).r;"
+                )
+            if (!src.contains("texelFetch(u_guideTex, base, 0).r") ||
+                !src.contains("texelFetch(u_guideTex, t, 0).r")
+            ) {
+                com.agx.camera.CrashLogger.log(
+                    TAG, "S5C luma source transform missed; disabling luma path"
+                )
+                return ""
+            }
+            return src
+        }
+
+        /**
+         * Main filter with both precomputed products. C1/C2 are read from the
+         * precomputed RG texture; the chroma arithmetic and RGB fetches are
+         * removed without changing the weighted-mean math.
+         */
+        private fun lumaChromaMainSource(): String = lumaMainSource()
+            .replace(
+                "vec2 cin = chroma(texelFetch(u_inTex, base, 0).rgb) - u_m_c;",
+                "vec2 cin = texelFetch(u_chromaTex, base, 0).rg - u_m_c;"
+            )
+            .replace(
+                "vec2 cv = chroma(texelFetch(u_inTex, t, 0).rgb) - u_m_c;",
+                "vec2 cv = texelFetch(u_chromaTex, t, 0).rg - u_m_c;"
+            )
+
+        private const val CHROMA_FRAGMENT = """
+#version 300 es
+precision highp float;
+precision highp int;
+
+in vec2 v_texCoord;
+out vec4 outColor;
+
+uniform sampler2D u_inTex;
+
+vec2 chroma(vec3 rgb) {
+    return vec2((rgb.b - rgb.r) * 0.25, (rgb.r - 2.0 * rgb.g + rgb.b) * 0.25);
+}
+
+void main() {
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    vec2 c = chroma(texelFetch(u_inTex, p, 0).rgb);
+    outColor = vec4(c.x, c.y, 0.0, 1.0);
 }
 """
 

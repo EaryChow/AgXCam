@@ -181,6 +181,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     // Stage 5-C (post-demosaic chroma) buffers: the propagated sigma texture,
     // the stage-1 chroma-filtered image, and the per-8x8-cell mottle plane.
     // RGBA32F at the demosaic resolution except the cell plane (ceil/8).
+    private var s5cLumaFboId = 0
+    private var s5cLumaTexId = 0
+    private var s5cChromaFboId = 0
+    private var s5cChromaTexId = 0
     private var s5cSigmaFboId = 0
     private var s5cSigmaTexId = 0
     private var s5cStage1FboId = 0
@@ -2060,6 +2064,22 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val rSupport = maxOf(1, (4.0 / 1.5 * winScale + 0.5).toInt()).toFloat()
         val rGuide = maxOf(1, (2.0 / 1.5 * winScale + 0.5).toInt()).toFloat()
         ensureS5CBuffers(w, h)
+        val useGuideLuma = s5cLumaFboId != 0 && s5cLumaTexId != 0 &&
+            s5cShader.lumaReady()
+        val useGuideChroma = useGuideLuma && s5cChromaFboId != 0 &&
+            s5cChromaTexId != 0 && s5cShader.lumaChromaReady()
+        if (useGuideLuma) {
+            gpuTimers.begin("${timerPrefix}S5C.luma")
+            bindTarget(s5cLumaFboId, w, h)
+            s5cShader.drawLuma(guideTex)
+            gpuTimers.end("${timerPrefix}S5C.luma")
+        }
+        if (useGuideChroma) {
+            gpuTimers.begin("${timerPrefix}S5C.chroma")
+            bindTarget(s5cChromaFboId, w, h)
+            s5cShader.drawChroma(chromaTex)
+            gpuTimers.end("${timerPrefix}S5C.chroma")
+        }
         val inverseRange2 = 1f / (whiteRange * whiteRange)
 
         gpuTimers.begin("${timerPrefix}S5C.sigma")
@@ -2069,10 +2089,22 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
         gpuTimers.begin("${timerPrefix}S5C.main")
         bindTarget(s5cStage1FboId, w, h)
-        s5cShader.drawStage1(
-            chromaTex, guideTex, s5cSigmaTexId, s,
-            S5C_S, S5C_S_W, S5C_G_C, S5C_G_LUM, S5C_RETAIN, 0f, 0f, rSupport, rGuide
-        )
+        if (useGuideChroma) {
+            s5cShader.drawStage1LumaChroma(
+                chromaTex, s5cLumaTexId, s5cChromaTexId, s5cSigmaTexId, s,
+                S5C_S, S5C_S_W, S5C_G_C, S5C_G_LUM, S5C_RETAIN, 0f, 0f, rSupport, rGuide
+            )
+        } else if (useGuideLuma) {
+            s5cShader.drawStage1Luma(
+                chromaTex, s5cLumaTexId, s5cSigmaTexId, s,
+                S5C_S, S5C_S_W, S5C_G_C, S5C_G_LUM, S5C_RETAIN, 0f, 0f, rSupport, rGuide
+            )
+        } else {
+            s5cShader.drawStage1(
+                chromaTex, guideTex, s5cSigmaTexId, s,
+                S5C_S, S5C_S_W, S5C_G_C, S5C_G_LUM, S5C_RETAIN, 0f, 0f, rSupport, rGuide
+            )
+        }
         gpuTimers.end("${timerPrefix}S5C.main")
 
         gpuTimers.begin("${timerPrefix}S5C.cell")
@@ -4125,6 +4157,74 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         return Pair(tex, fbo)
     }
 
+    // Single-channel guide-luma target. R32F is the fast form. If the driver
+    // cannot render it, ensureS5CBuffers disables this path and keeps the
+    // original RGB-guide main shader; it does not allocate an RGBA32F copy.
+    private fun allocR32fFbo(width: Int, height: Int): Pair<Int, Int> {
+        val texBuf = IntArray(1)
+        GLES20.glGenTextures(1, texBuf, 0)
+        if (texBuf[0] == 0) return Pair(0, 0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texBuf[0])
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES30.GL_R32F,
+            width, height, 0,
+            GLES30.GL_RED, GLES20.GL_FLOAT, null
+        )
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        val fboBuf = IntArray(1)
+        GLES20.glGenFramebuffers(1, fboBuf, 0)
+        val fbo = fboBuf[0]
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo)
+        GLES20.glFramebufferTexture2D(
+            GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+            GLES20.GL_TEXTURE_2D, texBuf[0], 0
+        )
+        val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
+        if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+            CrashLogger.log(TAG, "R32F FBO incomplete: $status (${width}x$height)")
+            GLES20.glDeleteFramebuffers(1, intArrayOf(fbo), 0)
+            GLES20.glDeleteTextures(1, intArrayOf(texBuf[0]), 0)
+            return Pair(0, 0)
+        }
+        return Pair(texBuf[0], fbo)
+    }
+
+    // Two-channel chroma target for the precomputed C1/C2 path.
+    private fun allocRG32fFbo(width: Int, height: Int): Pair<Int, Int> {
+        val texBuf = IntArray(1)
+        GLES20.glGenTextures(1, texBuf, 0)
+        if (texBuf[0] == 0) return Pair(0, 0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texBuf[0])
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES30.GL_RG32F,
+            width, height, 0,
+            GLES30.GL_RG, GLES20.GL_FLOAT, null
+        )
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        val fboBuf = IntArray(1)
+        GLES20.glGenFramebuffers(1, fboBuf, 0)
+        val fbo = fboBuf[0]
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo)
+        GLES20.glFramebufferTexture2D(
+            GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+            GLES20.GL_TEXTURE_2D, texBuf[0], 0
+        )
+        val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
+        if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+            CrashLogger.log(TAG, "RG32F FBO incomplete: $status (${width}x$height)")
+            GLES20.glDeleteFramebuffers(1, intArrayOf(fbo), 0)
+            GLES20.glDeleteTextures(1, intArrayOf(texBuf[0]), 0)
+            return Pair(0, 0)
+        }
+        return Pair(texBuf[0], fbo)
+    }
+
     // Builds the S5-W level target: one FBO with two same-format float
     // attachments, both drawn (MRT). RGBA16F halves the full-res pair's
     // footprint; when a 16F framebuffer is not renderable the pair is retried
@@ -4464,16 +4564,40 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             val (ce, cef) = allocRgba32fFbo(cellW, cellH); s5cCellTexId = ce; s5cCellFboId = cef
             if (s5cCellFboId == 0) break
             val (bl, blf) = allocRgba32fFbo(width, height); s5cBlendTexId = bl; s5cBlendFboId = blf
+            if (s5cBlendFboId == 0) break
+            val (lm, lmf) = allocR32fFbo(width, height)
+            if (lmf != 0) {
+                s5cLumaTexId = lm
+                s5cLumaFboId = lmf
+                // The chroma precompute needs the same full-res budget. If it
+                // cannot be rendered, keep the luma-only path.
+                val (cm, cmf) = allocRG32fFbo(width, height)
+                if (cmf != 0) {
+                    s5cChromaTexId = cm
+                    s5cChromaFboId = cmf
+                }
+            }
+            // If R32F is not renderable, leave the luma path disabled and run
+            // the original RGB-guide main shader. Do not allocate a second
+            // RGBA32F full-resolution texture just for the fallback.
             break
         }
-        CrashLogger.log(TAG, "Stage-5C buffers: ${width}x${height} (cells ${cellW}x$cellH) sigma=$s5cSigmaTexId stage1=$s5cStage1TexId cell=$s5cCellTexId blend=$s5cBlendTexId")
+        CrashLogger.log(
+            TAG, "Stage-5C buffers: ${width}x${height} (cells ${cellW}x$cellH) " +
+                "luma=$s5cLumaTexId chroma=$s5cChromaTexId sigma=$s5cSigmaTexId " +
+                "stage1=$s5cStage1TexId cell=$s5cCellTexId blend=$s5cBlendTexId"
+        )
     }
 
     private fun releaseS5CBuffers() {
+        deleteFboTex(s5cLumaFboId, s5cLumaTexId)
+        deleteFboTex(s5cChromaFboId, s5cChromaTexId)
         deleteFboTex(s5cSigmaFboId, s5cSigmaTexId)
         deleteFboTex(s5cStage1FboId, s5cStage1TexId)
         deleteFboTex(s5cCellFboId, s5cCellTexId)
         deleteFboTex(s5cBlendFboId, s5cBlendTexId)
+        s5cLumaFboId = 0; s5cLumaTexId = 0
+        s5cChromaFboId = 0; s5cChromaTexId = 0
         s5cSigmaFboId = 0; s5cSigmaTexId = 0
         s5cStage1FboId = 0; s5cStage1TexId = 0
         s5cCellFboId = 0; s5cCellTexId = 0
