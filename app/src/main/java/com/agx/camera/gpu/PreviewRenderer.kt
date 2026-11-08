@@ -431,6 +431,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     // Live ISO used to derive the Stage-0 noise-model uniforms for every
     // denoise stage. Pushed by MainActivity from the auto-exposure readout.
     @Volatile var isoForDenoise = 200
+    // The S1 candidate list is only valid from an exposed frame. The frame
+    // handler sets this when AE has converged or manual exposure owns the
+    // sensor; a dark pre-AE frame would otherwise seed the list with noise.
+    @Volatile var s1ListSourceReady = false
     @Volatile var wbGainR = 1f
     @Volatile var wbGainG = 1f
     @Volatile var wbGainB = 1f
@@ -1009,6 +1013,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         buffer: ByteBuffer, width: Int, height: Int, stridePixels: Int, iso: Int
     ) {
         if (dpcStrength <= 0f || rawNrStrength > 0f) return
+        // A pre-AE frame is not a valid candidate source. The list is a sensor
+        // property, but its source frame must be exposed; otherwise read noise
+        // from a dark preview frame is admitted as thousands of candidates.
+        if (!s1ListSourceReady) return
         if (defectListBuilding) return
         val existing = defectList
         // Build from the first frame, then only when exposure/ISO rises

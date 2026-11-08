@@ -3145,6 +3145,9 @@ class MainActivity : AppCompatActivity() {
             // change above threshold so a captured flicker can be traced
             // to the field that moved.
             logRenderDrift()
+            // S1 list source validity: auto exposure has converged, or manual
+            // exposure owns the sensor and there is no AE state to wait for.
+            previewRenderer.s1ListSourceReady = aeConvergedOnce || isManualMode
             previewRenderer.setBayerFrame(dest, rawW, rawH, rawW)
         }
 
