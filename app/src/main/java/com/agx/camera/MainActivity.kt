@@ -5331,8 +5331,8 @@ override fun onResume() {
         }
     }
 
-    /** Encodes the already-processed bitmap to JPEG and builds capture EXIF metadata. */
-    private fun encodeCaptureBitmap(bitmap: Bitmap, session: CaptureSession): Pair<ByteArray, CaptureMetadata> {
+    /** Builds capture EXIF metadata independently of the JPEG transport. */
+    private fun buildCaptureMetadata(session: CaptureSession): CaptureMetadata {
         val activeLens = lensManager.activeLens ?: lensManager.selectPrimary()
         val chars = activeLens?.let { lensManager.getCharacteristicsForLens(it) }
         val wallClockOffsetMs = System.currentTimeMillis() - (SystemClock.elapsedRealtimeNanos() / 1_000_000)
@@ -5368,6 +5368,12 @@ override fun onResume() {
             aeState = null,
             captureWallClockMs = captureWallClockMs
         )
+        return metadata
+    }
+
+    /** Encodes an already-processed bitmap to JPEG for the YUV capture path. */
+    private fun encodeCaptureBitmap(bitmap: Bitmap, session: CaptureSession): Pair<ByteArray, CaptureMetadata> {
+        val metadata = buildCaptureMetadata(session)
         return Pair(JpegEncoder.encodeToJpeg(bitmap, session.jpegQuality), metadata)
     }
 
@@ -5403,7 +5409,7 @@ override fun onResume() {
         thumbnailRef: java.util.concurrent.atomic.AtomicReference<Bitmap?>,
         wantDng: Boolean = false
     ) {
-        val gpuBitmapRef = java.util.concurrent.atomic.AtomicReference<Bitmap?>(null)
+        val gpuJpegRef = java.util.concurrent.atomic.AtomicReference<ByteArray?>(null)
         val gpuLatch = java.util.concurrent.CountDownLatch(1)
         val targetW = if (session.resolutionWidth > 0) session.resolutionWidth else frame.width
         val targetH = if (session.resolutionHeight > 0) session.resolutionHeight else frame.height
@@ -5412,22 +5418,21 @@ override fun onResume() {
                 val gpuReady = PerfTimers.measure("capture.submit_wait") {
                     previewRenderer.submitRawCaptureFrame(
                         frame.buffer, frame.width, frame.height, frame.width,
-                        targetW, targetH, session, gpuBitmapRef, gpuLatch
+                        targetW, targetH, session, gpuJpegRef, gpuLatch
                     )
                     gpuLatch.await(8000, TimeUnit.MILLISECONDS)
                 }
-                val bitmap = if (gpuReady) gpuBitmapRef.get() else null
-                if (bitmap == null) {
+                val jpegData = if (gpuReady) gpuJpegRef.get() else null
+                if (jpegData == null) {
                     Log.e(TAG, "RAW capture render failed or timed out (ready=$gpuReady)")
                     mainHandler.post {
                         Toast.makeText(this, "RAW capture failed: render timeout", Toast.LENGTH_SHORT).show()
                     }
                     return@Thread
                 }
-                val (jpegData, metadata) = PerfTimers.measure("capture.jpeg") {
-                    encodeCaptureBitmap(bitmap, session)
+                val metadata = PerfTimers.measure("capture.metadata") {
+                    buildCaptureMetadata(session)
                 }
-                bitmap.recycle()
 
                 val thumbnailReady = thumbnailLatch.await(2000, TimeUnit.MILLISECONDS)
                 val thumbnailBitmap = if (thumbnailReady) thumbnailRef.get() else null

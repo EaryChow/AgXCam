@@ -15,6 +15,7 @@ object JpegEncoder {
 
     private const val TAG = "JpegEncoder"
     private var nativeAvailable: Boolean? = null
+    @Volatile private var flippedNativeUnavailable = false
 
     init {
         try {
@@ -29,6 +30,11 @@ object JpegEncoder {
 
     @JvmStatic
     private external fun nativeEncodeRgba(buffer: ByteBuffer, width: Int, height: Int, quality: Int): ByteArray?
+
+    @JvmStatic
+    private external fun nativeEncodeRgbaFlipped(
+        buffer: ByteBuffer, width: Int, height: Int, quality: Int
+    ): ByteArray?
 
     fun yuvImageToBitmap(image: Image): Bitmap {
         val yPlane = image.planes[0]
@@ -85,6 +91,61 @@ object JpegEncoder {
         val stream = ByteArrayOutputStream()
         bitmap.compress(Bitmap.CompressFormat.JPEG, quality, stream)
         return stream.toByteArray()
+    }
+
+    /**
+     * Encode a bottom-up RGBA readback directly, flipping rows in libjpeg's
+     * scanline loop. Returns null when the native encoder is unavailable so
+     * the caller can retain the Bitmap fallback.
+     */
+    fun encodeBottomUpRgbaToJpeg(
+        buffer: ByteBuffer, width: Int, height: Int, quality: Int
+    ): ByteArray? {
+        if (nativeAvailable != true || flippedNativeUnavailable) return null
+        buffer.rewind()
+        return try {
+            nativeEncodeRgbaFlipped(buffer, width, height, quality)
+        } catch (e: UnsatisfiedLinkError) {
+            // A prebuilt native library may predate the flipped entry point.
+            // Remember the failure so every later capture uses the fallback
+            // without probing the missing symbol again.
+            flippedNativeUnavailable = true
+            null
+        }
+    }
+
+    /**
+     * Fast Bitmap conversion for the non-native encoder fallback. Flips the
+     * RGBA rows in the existing direct buffer, then hands the whole buffer to
+     * Bitmap.copyPixelsFromBuffer instead of packing an IntArray per pixel.
+     */
+    fun rgbaBufferToBitmapCopied(buffer: ByteBuffer, width: Int, height: Int): Bitmap {
+        buffer.rewind()
+        flipRgbaRowsInPlace(buffer, width, height)
+        buffer.rewind()
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        bitmap.copyPixelsFromBuffer(buffer)
+        return bitmap
+    }
+
+    private fun flipRgbaRowsInPlace(buffer: ByteBuffer, width: Int, height: Int) {
+        val rowBytes = width * 4
+        val top = ByteArray(rowBytes)
+        val bottom = ByteArray(rowBytes)
+        var y = 0
+        while (y < height / 2) {
+            val topOffset = y * rowBytes
+            val bottomOffset = (height - 1 - y) * rowBytes
+            buffer.position(topOffset)
+            buffer.get(top)
+            buffer.position(bottomOffset)
+            buffer.get(bottom)
+            buffer.position(topOffset)
+            buffer.put(bottom)
+            buffer.position(bottomOffset)
+            buffer.put(top)
+            y++
+        }
     }
 
     /** Readback half of the old fused bitmap path, kept separate for timing. */

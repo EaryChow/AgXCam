@@ -43,10 +43,9 @@ static boolean empty_mem_buffer(j_compress_ptr cinfo) {
 
 static void term_mem_destination(j_compress_ptr cinfo) {}
 
-JNIEXPORT jbyteArray JNICALL
-Java_com_agx_camera_io_JpegEncoder_nativeEncodeRgba(
-        JNIEnv *env, jclass clazz,
-        jobject rgbaBuffer, jint width, jint height, jint quality) {
+static jbyteArray encode_rgba(
+        JNIEnv *env, jobject rgbaBuffer, jint width, jint height, jint quality,
+        int flipRows) {
 
     unsigned char *rgba = (unsigned char *)(*env)->GetDirectBufferAddress(env, rgbaBuffer);
     if (!rgba) {
@@ -100,7 +99,10 @@ Java_com_agx_camera_io_JpegEncoder_nativeEncodeRgba(
         return NULL;
     }
     while (cinfo.next_scanline < cinfo.image_height) {
-        unsigned char *src = rgba + cinfo.next_scanline * width * 4;
+        int sourceRow = flipRows
+                ? (height - 1 - (int)cinfo.next_scanline)
+                : (int)cinfo.next_scanline;
+        unsigned char *src = rgba + sourceRow * width * 4;
         for (int x = 0; x < width; x++) {
             row[x * 3 + 0] = src[x * 4 + 0];
             row[x * 3 + 1] = src[x * 4 + 1];
@@ -120,4 +122,18 @@ Java_com_agx_camera_io_JpegEncoder_nativeEncodeRgba(
     free(dest.data);
 
     return result;
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_agx_camera_io_JpegEncoder_nativeEncodeRgba(
+        JNIEnv *env, jclass clazz,
+        jobject rgbaBuffer, jint width, jint height, jint quality) {
+    return encode_rgba(env, rgbaBuffer, width, height, quality, 0);
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_agx_camera_io_JpegEncoder_nativeEncodeRgbaFlipped(
+        JNIEnv *env, jclass clazz,
+        jobject rgbaBuffer, jint width, jint height, jint quality) {
+    return encode_rgba(env, rgbaBuffer, width, height, quality, 1);
 }

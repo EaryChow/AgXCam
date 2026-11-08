@@ -890,7 +890,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         val agxVibrance: Float,
         // Output dither for the still write: one 8-bit step, 0 = bypass.
         val agxDither: Float,
-        val resultRef: AtomicReference<Bitmap?>,
+        val jpegQuality: Int,
+        val resultRef: AtomicReference<ByteArray?>,
         val latch: CountDownLatch
     )
 
@@ -900,7 +901,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         buffer: ByteBuffer, rawW: Int, rawH: Int, stridePixels: Int,
         targetW: Int, targetH: Int,
         session: com.agx.camera.MainActivity.CaptureSession,
-        resultRef: AtomicReference<Bitmap?>,
+        resultRef: AtomicReference<ByteArray?>,
         latch: CountDownLatch
     ) {
         pendingRawCaptureFrame = RawCaptureFrame(
@@ -910,7 +911,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             session.agxLogMin, session.agxLogMax,
             session.agxLogMidgray, session.agxDisplayMidgray,
             session.agxContrast, session.agxToe, session.agxShoulder,
-            session.agxVibrance, session.agxDither,
+            session.agxVibrance, session.agxDither, session.jpegQuality,
             resultRef, latch
         )
         hasNewFrame = true
@@ -3274,7 +3275,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                             winScale = capWinScale, epsBoost = capEpsBoost,
                             flagTex = if (captureFlagWanted) captureFlagTexId else 0,
                             flagAvailable = captureFlagWanted,
-                            probeForced = true,
+                            // The probe is a diagnostic readback; do not force
+                            // it on a normal capture when timing is off.
+                            probeForced = measurementActive,
                             timerPrefix = "capture."
                         )
                         logGlError("raw after Stage-5 outDenoise", bayerRenderCount)
@@ -3326,10 +3329,37 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     val captureRgba = PerfTimers.measure("capture.readback") {
                         JpegEncoder.readFboToRgbaBuffer(downscaleFboTextureId, outW, outH)
                     }
-                    val bitmap = PerfTimers.measure("capture.bitmap") {
-                        JpegEncoder.rgbaBufferToBitmapFlipped(captureRgba, outW, outH)
+                    // Keep the availability check and the actual encode in
+                    // separate measurements: a null native probe must not add
+                    // a sample to the fallback encoder histogram.
+                    val nativeStartNs = System.nanoTime()
+                    val directJpeg = JpegEncoder.encodeBottomUpRgbaToJpeg(
+                        captureRgba, outW, outH, rawCaptureReq.jpegQuality
+                    )
+                    if (directJpeg != null) {
+                        PerfTimers.record(
+                            "capture.encode_native",
+                            System.nanoTime() - nativeStartNs
+                        )
                     }
-                    rawCaptureReq.resultRef.set(bitmap)
+                    val jpeg = if (directJpeg != null) {
+                        directJpeg
+                    } else {
+                        // Native libjpeg-turbo unavailable: use the fast
+                        // direct-buffer Bitmap path instead of the per-pixel
+                        // IntArray path.
+                        val bitmap = PerfTimers.measure("capture.bitmap") {
+                            JpegEncoder.rgbaBufferToBitmapCopied(captureRgba, outW, outH)
+                        }
+                        try {
+                            PerfTimers.measure("capture.encode") {
+                                JpegEncoder.encodeToJpeg(bitmap, rawCaptureReq.jpegQuality)
+                            }
+                        } finally {
+                            bitmap.recycle()
+                        }
+                    }
+                    rawCaptureReq.resultRef.set(jpeg)
                 } else {
                     Log.e(TAG, "RAW render FBO not available")
                 }
