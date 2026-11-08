@@ -1686,9 +1686,6 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
         for (int dy = 0; dy < 4; dy++) {
             for (int dx = 0; dx < 4; dx++) {
                 ivec2 c = ivec2(base) + ivec2(dx, dy);
-                vec2 lsC = lsSensorUV + vec2(float(dx) + baseOff, float(dy) + baseOff);
-                int phase = safePhase(c.x, c.y);
-                float centerGain = texture(u_lens_shading_map, lsC / u_sensorSize)[phase];
 
                 int row = dy + 1;
                 int col = dx + 1;
@@ -1710,7 +1707,11 @@ vec3 demosaicBilinear(usampler2D tex, vec2 sensorUV, vec2 lsSensorUV) {
                     rawCache[iNE] * lsCache[iNE],
                     rawCache[iSW] * lsCache[iSW],
                     rawCache[iSE] * lsCache[iSE],
-                    rawCache[row * 6 + col] * centerGain
+                    // The centre now uses the same integer-snapped lens
+                    // sample as the eight neighbours. The old fractional
+                    // centre lookup differs only by sub-texel lens-map
+                    // interpolation.
+                    rawCache[row * 6 + col] * lsCache[row * 6 + col]
                 );
             }
         }
