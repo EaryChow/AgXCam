@@ -87,7 +87,8 @@ object JpegEncoder {
         return stream.toByteArray()
     }
 
-    fun readFboToBitmapFlipped(fboTextureId: Int, width: Int, height: Int): Bitmap {
+    /** Readback half of the old fused bitmap path, kept separate for timing. */
+    fun readFboToRgbaBuffer(fboTextureId: Int, width: Int, height: Int): ByteBuffer {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTextureId)
 
         val buffer = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder())
@@ -95,7 +96,12 @@ object JpegEncoder {
         GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer)
         GLES20.glPixelStorei(GLES20.GL_PACK_ALIGNMENT, 4)
         buffer.rewind()
+        return buffer
+    }
 
+    /** Kotlin flip/ARGB conversion half of the old fused bitmap path. */
+    fun rgbaBufferToBitmapFlipped(buffer: ByteBuffer, width: Int, height: Int): Bitmap {
+        buffer.rewind()
         val pixels = IntArray(width * height)
         for (y in 0 until height) {
             val flippedY = height - 1 - y
@@ -112,5 +118,10 @@ object JpegEncoder {
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
         return bitmap
+    }
+
+    fun readFboToBitmapFlipped(fboTextureId: Int, width: Int, height: Int): Bitmap {
+        val buffer = readFboToRgbaBuffer(fboTextureId, width, height)
+        return rgbaBufferToBitmapFlipped(buffer, width, height)
     }
 }

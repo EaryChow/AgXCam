@@ -1750,7 +1750,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         useIsoSigma: Boolean = false, isoModelA: Float = 0f, isoModelB: Float = 0f,
         winScale: Float = 1f, epsBoost: Float = 1f,
         flagTex: Int = 0, flagAvailable: Boolean = false,
-        probeForced: Boolean = false
+        probeForced: Boolean = false, timerPrefix: String = ""
     ): Int {
         if (!outNrShader.isReady()) return inputTex
         ensureOutNrBuffers(w, h)
@@ -1815,20 +1815,20 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
 
         // Round 1 (kappa1): demosaic output -> outNr1.
         val flagConsumeNs0 = System.nanoTime()
-        gpuTimers.begin("S5.statsH1")
+        gpuTimers.begin("${timerPrefix}S5.statsH1")
         bindTarget(statsHFboId, w, h)
         outNrShader.drawStatsH(
             inputTex, inputTex, beta, S5_LUMA_WEIGHTS, winScale,
             flagTex = flagTex, flagAvailable = flagAvailable
         )
         logGlError("stage5 statsH1", bayerRenderCount)
-        gpuTimers.end("S5.statsH1")
-        gpuTimers.begin("S5.statsV1")
+        gpuTimers.end("${timerPrefix}S5.statsH1")
+        gpuTimers.begin("${timerPrefix}S5.statsV1")
         bindTarget(statsVFboId, w, h)
         outNrShader.drawStatsV(statsHTexId, winScale, flagAvailable)
         logGlError("stage5 statsV1", bayerRenderCount)
-        gpuTimers.end("S5.statsV1")
-        gpuTimers.begin("S5.main1")
+        gpuTimers.end("${timerPrefix}S5.statsV1")
+        gpuTimers.begin("${timerPrefix}S5.main1")
         bindTarget(outNr1FboId, w, h)
         outNrShader.drawMain(
             inputTex, inputTex, statsVTexId, sigmaTex,
@@ -1840,7 +1840,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             flagTex = flagTex, flagAvailable = flagAvailable
         )
         logGlError("stage5 main1", bayerRenderCount)
-        gpuTimers.end("S5.main1")
+        gpuTimers.end("${timerPrefix}S5.main1")
 
         // Operating-point probe. Round 1 has just written its stats and main
         // planes, so the numbers below describe the same draw the frame
@@ -1848,6 +1848,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // measurement mode and rate-limited to one line per interval instead of
         // running per frame on the image path.
         val probeNow = System.nanoTime()
+        val probeWallNs0 = if (probeForced) probeNow else 0L
         // The capture asks for its line explicitly: preview frames run the probe
         // often enough to hold the rate limit, so a capture taken inside that
         // window would otherwise record nothing about the still that was kept.
@@ -1898,6 +1899,9 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     sigma2, mean, varY, epsY, aY, epsOverVar
                 )
             )
+            if (probeForced) {
+                PerfTimers.record("capture.s5_probe", System.nanoTime() - probeWallNs0)
+            }
         }
 
         if (iterations < 2) return outNr1TexId
@@ -1908,19 +1912,19 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // input before stats and the final strength mix, so the second pass
         // sees 0.7*r1 + 0.3*original instead of consolidating r1's correlated
         // residual (flat-region low-frequency residue cleanup).
-        gpuTimers.begin("S5.statsH2")
+        gpuTimers.begin("${timerPrefix}S5.statsH2")
         bindTarget(statsHFboId, w, h)
         outNrShader.drawStatsH(
             outNr1TexId, inputTex, beta, S5_LUMA_WEIGHTS, winScale,
             flagTex = flagTex, flagAvailable = flagAvailable
         )
         logGlError("stage5 statsH2", bayerRenderCount)
-        gpuTimers.end("S5.statsH2")
-        gpuTimers.begin("S5.statsV2")
+        gpuTimers.end("${timerPrefix}S5.statsH2")
+        gpuTimers.begin("${timerPrefix}S5.statsV2")
         bindTarget(statsVFboId, w, h)
         outNrShader.drawStatsV(statsHTexId, winScale, flagAvailable)
         logGlError("stage5 statsV2", bayerRenderCount)
-        gpuTimers.end("S5.statsV2")
+        gpuTimers.end("${timerPrefix}S5.statsV2")
         if (flagAvailable && (bayerRenderCount <= 8 || bayerRenderCount % 120 == 0)) {
             CrashLogger.log(
                 TAG, "S5 flag consume (stats h/v x2): " +
@@ -1928,7 +1932,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             )
         }
         // Round 2 mirrors round 1 with the raised epsilon multiplier.
-        gpuTimers.begin("S5.main2")
+        gpuTimers.begin("${timerPrefix}S5.main2")
         bindTarget(outNr2FboId, w, h)
         outNrShader.drawMain(
             outNr1TexId, inputTex, statsVTexId, sigmaTex,
@@ -1940,7 +1944,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             flagTex = flagTex, flagAvailable = flagAvailable
         )
         logGlError("stage5 main2", bayerRenderCount)
-        gpuTimers.end("S5.main2")
+        gpuTimers.end("${timerPrefix}S5.main2")
 
         // Grain gate: the film-grain part of the residual, returned on top of
         // the filtered luma. It is part of S5-L rather than a switch of its own,
@@ -1980,42 +1984,42 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             // this is the calibrated pair, unchanged.
             val law = outNrShader.grainLawFor(h)
             val cellF = cell.toFloat()
-            gpuTimers.begin("S5.grainDcH")
+            gpuTimers.begin("${timerPrefix}S5.grainDcH")
             bindTarget(grainDcHFboId, dcHW, dcHH)
             outNrShader.drawGrainDcH(inputTex, outNr2TexId, w, h, law[2], cellF)
             logGlError("stage5 grainDcH", bayerRenderCount)
-            gpuTimers.end("S5.grainDcH")
-            gpuTimers.begin("S5.grainDc")
+            gpuTimers.end("${timerPrefix}S5.grainDcH")
+            gpuTimers.begin("${timerPrefix}S5.grainDc")
             bindTarget(grainDcFboId, dcHW, dcHH)
             outNrShader.drawGrainDc(
                 grainDcHTexId, inputTex, dcHW.toFloat(), dcHH.toFloat(), w, h,
                 law[2], maxOf(1f, Math.round(law[2] / cellF).toFloat()), cellF
             )
             logGlError("stage5 grainDc", bayerRenderCount)
-            gpuTimers.end("S5.grainDc")
+            gpuTimers.end("${timerPrefix}S5.grainDc")
             val dcW = dcHW.toFloat()
             val dcH = dcHH.toFloat()
-            gpuTimers.begin("S5.grainStat")
+            gpuTimers.begin("${timerPrefix}S5.grainStat")
             bindTarget(grainStatFboId, 1, 1)
             outNrShader.drawGrainStat(dcTex, dcW, dcH)
             logGlError("stage5 grainStat", bayerRenderCount)
-            gpuTimers.end("S5.grainStat")
-            gpuTimers.begin("S5.grainSmooth")
+            gpuTimers.end("${timerPrefix}S5.grainStat")
+            gpuTimers.begin("${timerPrefix}S5.grainSmooth")
             bindTarget(grainFboId, w, h)
             outNrShader.drawGrainSmooth(
                 inputTex, outNr2TexId, dcTex, grainStatTexId, dcW, dcH,
                 w.toFloat(), h.toFloat(), law[0], law[1]
             )
             logGlError("stage5 grainSmooth", bayerRenderCount)
-            gpuTimers.end("S5.grainSmooth")
-            gpuTimers.begin("S5.grainApply")
+            gpuTimers.end("${timerPrefix}S5.grainSmooth")
+            gpuTimers.begin("${timerPrefix}S5.grainApply")
             bindTarget(grainOutFboId, w, h)
             outNrShader.drawGrainApply(
                 outNr2TexId, grainTexId, grainStatTexId, w.toFloat(), h.toFloat(),
                 S5_GRAIN_DOSE, S5_GRAIN_FIELD_DOSE
             )
             logGlError("stage5 grainApply", bayerRenderCount)
-            gpuTimers.end("S5.grainApply")
+            gpuTimers.end("${timerPrefix}S5.grainApply")
             return grainOutTexId
         }
         if (bayerRenderCount <= 2 && outNrShader.grainReady()) {
@@ -2037,7 +2041,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
      *  = width / 640; the mottle cell stays 8x8. */
     private fun runStage5C(
         w: Int, h: Int, chromaTex: Int, guideTex: Int,
-        whiteRange: Float, isoModelA: Float, isoModelB: Float
+        whiteRange: Float, isoModelA: Float, isoModelB: Float,
+        timerPrefix: String = ""
     ): Int {
         if (!s5cShader.isReady()) return guideTex
         val s = outNrChromaStrength.coerceIn(0f, 1f)
@@ -2056,28 +2061,28 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         ensureS5CBuffers(w, h)
         val inverseRange2 = 1f / (whiteRange * whiteRange)
 
-        gpuTimers.begin("S5C.sigma")
+        gpuTimers.begin("${timerPrefix}S5C.sigma")
         bindTarget(s5cSigmaFboId, w, h)
         s5cShader.drawSigma(chromaTex, w.toFloat(), h.toFloat(), isoModelA, isoModelB, inverseRange2)
-        gpuTimers.end("S5C.sigma")
+        gpuTimers.end("${timerPrefix}S5C.sigma")
 
-        gpuTimers.begin("S5C.main")
+        gpuTimers.begin("${timerPrefix}S5C.main")
         bindTarget(s5cStage1FboId, w, h)
         s5cShader.drawStage1(
             chromaTex, guideTex, s5cSigmaTexId, s,
             S5C_S, S5C_S_W, S5C_G_C, S5C_G_LUM, S5C_RETAIN, 0f, 0f, rSupport, rGuide
         )
-        gpuTimers.end("S5C.main")
+        gpuTimers.end("${timerPrefix}S5C.main")
 
-        gpuTimers.begin("S5C.cell")
+        gpuTimers.begin("${timerPrefix}S5C.cell")
         bindTarget(s5cCellFboId, s5cCellWidth, s5cCellHeight)
         s5cShader.drawCell(s5cStage1TexId, s5cSigmaTexId, s, S5C_S_M, S5C_K_GRAD)
-        gpuTimers.end("S5C.cell")
+        gpuTimers.end("${timerPrefix}S5C.cell")
 
-        gpuTimers.begin("S5C.blend")
+        gpuTimers.begin("${timerPrefix}S5C.blend")
         bindTarget(s5cBlendFboId, w, h)
         s5cShader.drawBlend(s5cStage1TexId, s5cCellTexId)
-        gpuTimers.end("S5C.blend")
+        gpuTimers.end("${timerPrefix}S5C.blend")
 
         return s5cBlendTexId
     }
@@ -2097,7 +2102,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
      *  sweep samples every 2nd tap (radii in sampled units ceil(r/2)),
      *  covering the same span at half tap density. Stills-oriented: a future
      *  video path would need a cadence or downsampled variant. */
-    private fun runStage5W(inputTex: Int, w: Int, h: Int): Int {
+    private fun runStage5W(inputTex: Int, w: Int, h: Int, timerPrefix: String = ""): Int {
         if (!s5wShader.isReady()) return inputTex
         val s = outNrChromaStrength.coerceIn(0f, 1f)
         if (s <= 0f) return inputTex
@@ -2117,20 +2122,20 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         // EV default, that runStage5 applies to its ISO model.
         val evGain2 = Math.pow(2.0, 2.0 * (exposureEv - 1.5)).toFloat().coerceIn(1f / 8f, 16f)
 
-        gpuTimers.begin("S5W.level")
+        gpuTimers.begin("${timerPrefix}S5W.level")
         bindTarget(s5wLevelFboId, w, h)
         s5wShader.drawLevel(inputTex, s5cSigmaTexId, w.toFloat(), h.toFloat(), r0, r1, r2, r3)
-        gpuTimers.end("S5W.level")
+        gpuTimers.end("${timerPrefix}S5W.level")
 
-        gpuTimers.begin("S5W.gain")
+        gpuTimers.begin("${timerPrefix}S5W.gain")
         bindTarget(s5wGainFboId, s5wCellWidth, s5wCellHeight)
         s5wShader.drawGain(inputTex, s5wLevel01TexId, s5wLevel23TexId, s5cSigmaTexId, evGain2)
-        gpuTimers.end("S5W.gain")
+        gpuTimers.end("${timerPrefix}S5W.gain")
 
-        gpuTimers.begin("S5W.blend")
+        gpuTimers.begin("${timerPrefix}S5W.blend")
         bindTarget(s5cStage1FboId, w, h)
         s5wShader.drawBlend(inputTex, s5wLevel01TexId, s5wLevel23TexId, s5wGainTexId, w.toFloat(), h.toFloat(), s)
-        gpuTimers.end("S5W.blend")
+        gpuTimers.end("${timerPrefix}S5W.blend")
 
         return s5cStage1TexId
     }
@@ -2994,7 +2999,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         readTexId = captureFboTextureId
                     }
 
-                    val bitmap = JpegEncoder.readFboToBitmapFlipped(readTexId, readW, readH)
+                    val captureRgba = PerfTimers.measure("capture.readback") {
+                        JpegEncoder.readFboToRgbaBuffer(readTexId, readW, readH)
+                    }
+                    val bitmap = PerfTimers.measure("capture.bitmap") {
+                        JpegEncoder.rgbaBufferToBitmapFlipped(captureRgba, readW, readH)
+                    }
                     captureReq.resultRef.set(bitmap)
                 } else {
                     Log.e(TAG, "Capture FBO not available")
@@ -3160,6 +3170,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     val captureFlagWanted =
                         outNrStrength > 0f && dpcStrength > 0f && captureFlagTexId != 0
                     val flagWriteNs0 = System.nanoTime()
+                    gpuTimers.begin("capture.demosaic")
                     bayerShader.drawDemosaic(
                         rawDemosaicFboWidth, rawDemosaicFboHeight,
                         captureMatrix,
@@ -3180,6 +3191,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         isoModelB = captureIsoModelB,
                         flagOutput = captureFlagWanted
                     )
+                    gpuTimers.end("capture.demosaic")
                     if (captureFlagWanted) {
                         CrashLogger.log(
                             TAG, "S5 flag write (inline DPC): " +
@@ -3227,6 +3239,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     if (outNrStrength > 0f && outNrShader.isReady() && sigmaHatShader.isReady() && captureSigmaFboId != 0) {
                         val capSigmaNs0 = System.nanoTime()
                         bindTarget(captureSigmaFboId, rawDemosaicFboWidth, rawDemosaicFboHeight)
+                        gpuTimers.begin("capture.s2_sigma")
                         sigmaHatShader.draw(
                             transformMatrix = captureMatrix,
                             cropOriginX = crop[0], cropOriginY = crop[1],
@@ -3241,6 +3254,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                             domainScale = captureWhiteRange,
                             rgbMode = true
                         )
+                        gpuTimers.end("capture.s2_sigma")
                         logGlError("capture stage2 sigma", bayerRenderCount)
                         CrashLogger.log(
                             TAG, "Stage2 MAD (capture): post-RAW=" +
@@ -3260,7 +3274,8 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                             winScale = capWinScale, epsBoost = capEpsBoost,
                             flagTex = if (captureFlagWanted) captureFlagTexId else 0,
                             flagAvailable = captureFlagWanted,
-                            probeForced = true
+                            probeForced = true,
+                            timerPrefix = "capture."
                         )
                         logGlError("raw after Stage-5 outDenoise", bayerRenderCount)
                     }
@@ -3268,14 +3283,16 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         captureIspInputTex = runStage5C(
                             rawDemosaicFboWidth, rawDemosaicFboHeight, rawDemosaicFboTextureId,
                             captureIspInputTex,
-                            captureWhiteRange, captureIsoModelA, captureIsoModelB
+                            captureWhiteRange, captureIsoModelA, captureIsoModelB,
+                            timerPrefix = "capture."
                         )
                         if (s5wShader.isReady()) {
                             // Same nesting as the preview chain: S5-W is the
                             // S5-C chain's noise-floor component and reads the
                             // sigma plane runStage5C wrote above.
                             captureIspInputTex = runStage5W(
-                                captureIspInputTex, rawDemosaicFboWidth, rawDemosaicFboHeight
+                                captureIspInputTex, rawDemosaicFboWidth, rawDemosaicFboHeight,
+                                timerPrefix = "capture."
                             )
                             logGlError("raw after Stage-5W floor", bayerRenderCount)
                         }
@@ -3287,6 +3304,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                     GLES20.glClearColor(0f, 0f, 0f, 1f)
                     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
+                    gpuTimers.begin("capture.agx")
                     nrShader.draw(
                         captureIspInputTex,
                         exposureEv,
@@ -3302,9 +3320,15 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
                         clipAttenFactor,
                         dither = rawCaptureReq.agxDither
                     )
+                    gpuTimers.end("capture.agx")
                     logGlError("raw after nrShader.draw", bayerRenderCount)
 
-                    val bitmap = JpegEncoder.readFboToBitmapFlipped(downscaleFboTextureId, outW, outH)
+                    val captureRgba = PerfTimers.measure("capture.readback") {
+                        JpegEncoder.readFboToRgbaBuffer(downscaleFboTextureId, outW, outH)
+                    }
+                    val bitmap = PerfTimers.measure("capture.bitmap") {
+                        JpegEncoder.rgbaBufferToBitmapFlipped(captureRgba, outW, outH)
+                    }
                     rawCaptureReq.resultRef.set(bitmap)
                 } else {
                     Log.e(TAG, "RAW render FBO not available")
