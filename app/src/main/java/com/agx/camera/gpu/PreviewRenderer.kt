@@ -50,7 +50,7 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     private var basePreviewWidth = 640
     private var basePreviewHeight = 480
 
-    @Volatile private var previewResCapDim = 0
+    @Volatile private var previewResCapPixels = 0
     @Volatile private var fboResizePending = false
 
     // When suppression is active (critical battery), the render loop paints
@@ -543,10 +543,10 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
         appThermalTier = name
     }
 
-    /** Thermal cap on the longest demosaic/output dimension (0 = no cap). */
-    fun setPreviewResolutionCap(maxDim: Int) {
-        if (previewResCapDim == maxDim) return
-        previewResCapDim = maxDim
+    /** Thermal cap on total preview pixels (0 = no cap), preserving aspect. */
+    fun setPreviewResolutionCapPixels(maxPixels: Int) {
+        if (previewResCapPixels == maxPixels) return
+        previewResCapPixels = maxPixels
         val (w, h) = cappedPreviewSize(basePreviewWidth, basePreviewHeight)
         if (w == fboWidth && h == fboHeight) return
         fboWidth = w
@@ -680,11 +680,19 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
     }
 
     private fun cappedPreviewSize(w: Int, h: Int): Pair<Int, Int> {
-        if (previewResCapDim <= 0 || w <= 0 || h <= 0) return Pair(w, h)
-        val longest = maxOf(w, h)
-        if (longest <= previewResCapDim) return Pair(w, h)
-        val scale = previewResCapDim.toFloat() / longest
-        return Pair(maxOf(1, (w * scale).toInt()), maxOf(1, (h * scale).toInt()))
+        if (previewResCapPixels <= 0 || w <= 0 || h <= 0) return Pair(w, h)
+        // The thermal cap is the same pixel-count budget as the resolution
+        // options. Scale both dimensions by sqrt(cap/area) so the active
+        // output aspect is preserved.
+        val area = w.toLong() * h.toLong()
+        if (area <= previewResCapPixels.toLong()) return Pair(w, h)
+        val scale = sqrt(previewResCapPixels.toDouble() / area.toDouble())
+        // Floor the width, then derive the height from the remaining pixel
+        // budget. This keeps the result at or below the budget instead of
+        // rounding 1280x720 up to 427x240 (102,480 > 102,240).
+        val cw = maxOf(1, (w * scale).toInt())
+        val ch = maxOf(1, previewResCapPixels / cw)
+        return Pair(cw, ch)
     }
 
     fun setCaptureSize(width: Int, height: Int) {

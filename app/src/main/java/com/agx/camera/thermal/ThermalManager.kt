@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
 import android.util.Log
+import com.agx.camera.camera.PreviewResolution
 import kotlin.math.exp
 
 /**
@@ -77,7 +78,9 @@ class ThermalManager(context: Context) {
     // semantics: when it gets hot the viewfinder gets laggy/blurry, but the
     // exposure always obeys the user.
     val throttledPreviewFps = 15
-    val maxPreviewResolutionDim = 480
+    // Thermal cap uses the same pixel-count semantics as the preview
+    // resolution options: 240p is the shared 426x240 target area.
+    val maxPreviewResolutionPixels = PreviewResolution.P240
     val warmTorchDurationLimitMs = 3 * 60 * 1000L
 
     // --- User-facing thermal protection gate ---

@@ -509,75 +509,75 @@ class LensManager(private val context: Context) {
     }
 
     /**
-     * Picks the largest size that fits the cap while keeping the aspect as close
-     * to [targetAspect] as the available sizes allow.
+     * Picks the available preview size closest to [targetPixels] while
+     * preserving [targetAspect].
      *
-     * Both bounds have to hold: the cap is applied to width *and* height, so a
-     * cap that fits no 4:3 size above the smallest one collapses to it (see
-     * MainActivity.getMaxPreviewDimensions, which folds the screen aspect into
-     * the height bound).
-     *
-     * The area-descending tie-break is load-bearing, not cosmetic. Sorting on
-     * aspect error alone leaves every size of the requested aspect tied at
-     * error zero, and a stable min-then-first then returns whichever size the
-     * HAL happened to list first. HALs commonly enumerate smallest-first, so
-     * the single-key rule reliably chose the *worst* size the bounds allowed -
-     * a halved linear resolution, and a correspondingly larger zoomK, which
-     * every downstream ratio then inherited.
+     * Aspect error is the primary key, because the preview output aspect must
+     * not be overridden just to hit an area target. Area distance is the
+     * secondary key: for the chosen aspect, the requested 240p-1080p pixel
+     * budget resolves to the nearest sensor mode. Descending area is
+     * only the final tie-break, for two modes at the same aspect error and
+     * the same pixel distance. That last key is still load-bearing: HALs often
+     * enumerate smallest-first, and a stable first-match would otherwise pick
+     * the smaller mode when two modes tie.
      */
     private fun bestPreviewSize(
         sizes: Array<Size>,
-        maxWidth: Int,
-        maxHeight: Int,
+        targetPixels: Long,
         targetAspect: Float
     ): Size? {
-        val withinBounds = sizes.filter { it.width <= maxWidth && it.height <= maxHeight }
-        val picked = withinBounds
-            // Primary: aspect error ascending. Secondary: area descending, so an
-            // exact tie resolves to the largest size rather than the first one
-            // the HAL listed.
+        // The resolution option is a target total pixel count. Pick the
+        // available preview size whose area is closest to the requested
+        // option, but only among sizes that preserve the selected output
+        // aspect. Aspect is the primary key; area is the secondary key.
+        val picked = sizes
             .sortedWith(
                 compareBy(
                     { kotlin.math.abs(it.width.toFloat() / it.height - targetAspect) },
+                    { kotlin.math.abs(it.width.toLong() * it.height.toLong() - targetPixels) },
                     { -(it.width.toLong() * it.height.toLong()) }
                 )
             )
             .firstOrNull()
 
-        // Decides the two ways this can go wrong: a 4:3 size the HAL never offers,
-        // versus one the bounds filtered out. Without this the smallest ladder
-        // entry looks like the picker "chose" it.
         val ladder = sizes.filter { it.width * 3 == it.height * 4 }
             .sortedBy { it.width }
             .joinToString { "${it.width}x${it.height}" }
         CrashLogger.log(
             TAG,
-            "preview pick bounds=${maxWidth}x$maxHeight target=${"%.4f".format(targetAspect)} " +
-                "hal=${sizes.size} inBounds=${withinBounds.size} " +
+            "preview pick targetPixels=$targetPixels " +
+                "aspect=${"%.4f".format(targetAspect)} hal=${sizes.size} " +
                 "picked=${picked?.width}x${picked?.height} sensor4:3ladder=[$ladder]"
         )
 
         return picked
     }
 
-    fun getBestPreviewSize(lens: LensInfo, maxWidth: Int = 1280, maxHeight: Int = 720): Size {
+    fun getBestPreviewSize(
+        lens: LensInfo,
+        targetPixels: Int = PreviewResolution.DEFAULT
+    ): Size {
         val sizes = getPreviewSizes(lens)
         if (sizes.isEmpty()) return Size(640, 480)
 
         val activeArray = getSensorActiveArraySize(lens)
         val sensorAspect = activeArray.width().toFloat() / activeArray.height()
 
-        return bestPreviewSize(sizes, maxWidth, maxHeight, sensorAspect)
+        return bestPreviewSize(sizes, targetPixels.toLong(), sensorAspect)
             ?: sizes.lastOrNull()
             ?: Size(640, 480)
     }
 
-    fun getPreviewSizeForAspectRatio(lens: LensInfo, targetAspect: Float, maxWidth: Int, maxHeight: Int): Size {
+    fun getPreviewSizeForAspectRatio(
+        lens: LensInfo,
+        targetAspect: Float,
+        targetPixels: Int
+    ): Size {
         val sizes = getPreviewSizes(lens)
         if (sizes.isEmpty()) return Size(640, 480)
 
-        return bestPreviewSize(sizes, maxWidth, maxHeight, targetAspect)
-            ?: getBestPreviewSize(lens, maxWidth, maxHeight)
+        return bestPreviewSize(sizes, targetPixels.toLong(), targetAspect)
+            ?: getBestPreviewSize(lens, targetPixels)
     }
 
     data class ResolutionOption(

@@ -376,11 +376,11 @@ class MainActivity : AppCompatActivity() {
     private var currentResolutionIndex = 0
 
     // Preview size cap
-    private lateinit var maxPreviewDimensions: Pair<Int, Int>
+
     private lateinit var previewResPrefs: android.content.SharedPreferences
     private lateinit var previewResSpinner: Spinner
     private lateinit var focusTimeoutSpinner: Spinner
-    private var previewResCapMaxDim = 1280 // default 720p
+    private var previewResTargetPixels = PreviewResolution.DEFAULT
     private var focusIndicatorTimeoutMs = 0L // 0 = never hide
 
     // Preset
@@ -623,9 +623,11 @@ class MainActivity : AppCompatActivity() {
 
         // Compute max preview dimensions based on screen resolution
         previewResPrefs = getSharedPreferences("agxcam_settings", Context.MODE_PRIVATE)
-        previewResCapMaxDim = previewResPrefs.getInt(PREF_PREVIEW_RES_CAP, 1280)
+        previewResTargetPixels = normalizePreviewTargetPixels(
+            previewResPrefs.getInt(PREF_PREVIEW_RES_CAP, PreviewResolution.DEFAULT)
+        )
         focusIndicatorTimeoutMs = previewResPrefs.getLong(PREF_FOCUS_TIMEOUT, 0L)
-        maxPreviewDimensions = getMaxPreviewDimensions()
+        CrashLogger.log(TAG, "preview target pixels=$previewResTargetPixels")
         thermalProtectionEnabled = previewResPrefs.getBoolean(PREF_THERMAL_PROTECTION_ENABLED, true)
         saveDngWithCapture = previewResPrefs.getBoolean(PREF_SAVE_DNG, false)
         outputDither = previewResPrefs.getBoolean(PREF_OUTPUT_DITHER, false)
@@ -700,7 +702,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             val lens = lensManager.activeLens ?: return@DeveloperSwitch
-            val previewSize = lensManager.getBestPreviewSize(lens, maxPreviewDimensions.first, maxPreviewDimensions.second)
+            val previewSize = lensManager.getBestPreviewSize(lens, previewResTargetPixels)
 
             // Stop render thread before recreating it (must be fully stopped before start
             // to avoid two threads sharing the same EGL display/context/surface).
@@ -1651,30 +1653,31 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Preview resolution cap spinner
-        val previewResOptions = listOf("480p", "720p", "1080p")
-        val previewResMaxDims = listOf(854, 1280, 1920)
+        val previewResOptions = listOf("240p", "360p", "480p", "720p", "1080p")
+        val previewResPixelOptions = PreviewResolution.OPTIONS
         previewResSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, previewResOptions).apply {
             setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         }
-        val savedCapIndex = previewResMaxDims.indexOf(previewResCapMaxDim).coerceIn(0, previewResOptions.size - 1)
+        val savedCapIndex = previewResPixelOptions
+            .indexOf(previewResTargetPixels)
+            .coerceIn(0, previewResOptions.size - 1)
         previewResSpinner.setSelection(savedCapIndex, false)
         previewResSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 if (!cameraReady) return
-                val newCap = previewResMaxDims[position]
-                if (newCap == previewResCapMaxDim) return
-                previewResCapMaxDim = newCap
-                previewResPrefs.edit().putInt(PREF_PREVIEW_RES_CAP, newCap).apply()
-                maxPreviewDimensions = getMaxPreviewDimensions()
+                val newPixels = previewResPixelOptions[position]
+                if (newPixels == previewResTargetPixels) return
+                previewResTargetPixels = newPixels
+                previewResPrefs.edit().putInt(PREF_PREVIEW_RES_CAP, newPixels).apply()
                 val lens = lensManager.activeLens ?: return
                 val option = currentResolutionOptions.getOrNull(currentResolutionIndex)
                 val targetAspect = if (option != null && option.aspectW > 0 && option.aspectH > 0) {
                     option.aspectW.toFloat() / option.aspectH
                 } else 0f
                 val previewSize = if (targetAspect > 0f) {
-                    lensManager.getPreviewSizeForAspectRatio(lens, targetAspect, maxPreviewDimensions.first, maxPreviewDimensions.second)
+                    lensManager.getPreviewSizeForAspectRatio(lens, targetAspect, previewResTargetPixels)
                 } else {
-                    lensManager.getBestPreviewSize(lens, maxPreviewDimensions.first, maxPreviewDimensions.second)
+                    lensManager.getBestPreviewSize(lens, previewResTargetPixels)
                 }
                 previewRenderer.stop()
                 camera2Manager.close()
@@ -2624,9 +2627,9 @@ class MainActivity : AppCompatActivity() {
         camera2Manager.close()
 
         val previewSize = if (targetAspect > 0f) {
-            lensManager.getPreviewSizeForAspectRatio(lens, targetAspect, maxPreviewDimensions.first, maxPreviewDimensions.second)
+            lensManager.getPreviewSizeForAspectRatio(lens, targetAspect, previewResTargetPixels)
         } else {
-            lensManager.getBestPreviewSize(lens, maxPreviewDimensions.first, maxPreviewDimensions.second)
+            lensManager.getBestPreviewSize(lens, previewResTargetPixels)
         }
 
         // Stop render thread to recreate FBO with new preview size
@@ -2704,7 +2707,7 @@ class MainActivity : AppCompatActivity() {
         }
         updateRawModeWarning()
 
-        val previewSize = lensManager.getBestPreviewSize(primary, maxPreviewDimensions.first, maxPreviewDimensions.second)
+        val previewSize = lensManager.getBestPreviewSize(primary, previewResTargetPixels)
         buildLensSelectorUI()
 
         previewRenderer.setPreviewSize(previewSize.width, previewSize.height)
@@ -4350,9 +4353,9 @@ class MainActivity : AppCompatActivity() {
         } else 0f
 
         val previewSize = if (targetAspect > 0f) {
-            lensManager.getPreviewSizeForAspectRatio(lens, targetAspect, maxPreviewDimensions.first, maxPreviewDimensions.second)
+            lensManager.getPreviewSizeForAspectRatio(lens, targetAspect, previewResTargetPixels)
         } else {
-            lensManager.getBestPreviewSize(lens, maxPreviewDimensions.first, maxPreviewDimensions.second)
+            lensManager.getBestPreviewSize(lens, previewResTargetPixels)
         }
 
         // Stop render thread to recreate FBO with new preview size
@@ -4437,9 +4440,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         val previewSize = if (targetAspect > 0f) {
-            lensManager.getPreviewSizeForAspectRatio(targetLens, targetAspect, maxPreviewDimensions.first, maxPreviewDimensions.second)
+            lensManager.getPreviewSizeForAspectRatio(targetLens, targetAspect, previewResTargetPixels)
         } else {
-            lensManager.getBestPreviewSize(targetLens, maxPreviewDimensions.first, maxPreviewDimensions.second)
+            lensManager.getBestPreviewSize(targetLens, previewResTargetPixels)
         }
 
         // Stop render thread to recreate FBO with new preview size
@@ -4534,7 +4537,7 @@ class MainActivity : AppCompatActivity() {
                 lensSelector.addView(createLensButton(lens, lens.cameraId == active.cameraId))
             }
             // Restart camera to ensure YUV pipeline
-            val previewSize = lensManager.getBestPreviewSize(active, maxPreviewDimensions.first, maxPreviewDimensions.second)
+            val previewSize = lensManager.getBestPreviewSize(active, previewResTargetPixels)
             camera2Manager.close()
             camera2Manager.stopBackgroundThread()
             previewRenderer.stop()
@@ -4684,9 +4687,9 @@ override fun onResume() {
                 } else 0f
 
                 val previewSize = if (targetAspect > 0f) {
-                    lensManager.getPreviewSizeForAspectRatio(lens, targetAspect, maxPreviewDimensions.first, maxPreviewDimensions.second)
+                    lensManager.getPreviewSizeForAspectRatio(lens, targetAspect, previewResTargetPixels)
                 } else {
-                    lensManager.getBestPreviewSize(lens, maxPreviewDimensions.first, maxPreviewDimensions.second)
+                    lensManager.getBestPreviewSize(lens, previewResTargetPixels)
                 }
 
                 // Stop render thread to recreate FBO with new preview size
@@ -4764,7 +4767,7 @@ override fun onResume() {
             // restore path used on the state step-down) and never blackout,
             // stop the stream, or block capture.
             previewRenderer.setPreviewSuppressed(false)
-            previewRenderer.setPreviewResolutionCap(0)
+            previewRenderer.setPreviewResolutionCapPixels(0)
             camera2Manager.setThermalFpsLimit(0)
             hideCriticalThermalOverlay()
             updateBlinkWarning(protectionEnabled = false, state)
@@ -4775,7 +4778,7 @@ override fun onResume() {
             ThermalManager.State.NORMAL -> {
                 hideCriticalThermalOverlay()
                 previewRenderer.setPreviewSuppressed(false)
-                previewRenderer.setPreviewResolutionCap(0)
+                previewRenderer.setPreviewResolutionCapPixels(0)
                 camera2Manager.setThermalFpsLimit(0)
             }
             ThermalManager.State.WARM -> {
@@ -4801,10 +4804,10 @@ override fun onResume() {
         updateBlinkWarning(protectionEnabled = true, state)
     }
 
-    /** WARM/HOT throttle: sensor fps cap + demosaic/output resolution cap <=480p. */
+    /** WARM/HOT throttle: sensor fps cap + demosaic/output resolution cap at 240p. */
     private fun applyThermalThrottle() {
         camera2Manager.setThermalFpsLimit(thermalManager.throttledPreviewFps)
-        previewRenderer.setPreviewResolutionCap(thermalManager.maxPreviewResolutionDim)
+        previewRenderer.setPreviewResolutionCapPixels(thermalManager.maxPreviewResolutionPixels)
     }
 
     private fun onThermalTempUpdate(displayC: Float) {
@@ -6075,25 +6078,20 @@ override fun onResume() {
         }
     }
 
-    private fun getMaxPreviewDimensions(): Pair<Int, Int> {
-        val display = windowManager.defaultDisplay
-        val metrics = android.util.DisplayMetrics()
-        display.getRealMetrics(metrics)
-        val screenWidth = metrics.widthPixels
-        val screenHeight = metrics.heightPixels
-        val maxDim = previewResCapMaxDim
-        val bounds = Pair(maxDim, maxDim * screenHeight / screenWidth)
-        // The height bound is cap * screenAspect. On a tall screen that lands
-        // below the sensor's own 4:3 ladder (cap 854 on 20:9 -> 854x384), which
-        // filters out every size except the smallest and pins the preview at
-        // 320x240 / zoomK 12.8. Log the resolved numbers so that failure mode is
-        // visible instead of having to be inferred from the chosen size.
-        CrashLogger.log(
-            TAG,
-            "preview cap=$maxDim screen=${screenWidth}x$screenHeight -> bounds=" +
-                "${bounds.first}x${bounds.second}; 4:3 needs maxHeight>=480 -> cap>=${(480 * screenWidth + screenHeight - 1) / screenHeight}"
-        )
-        return bounds
+    private fun normalizePreviewTargetPixels(saved: Int): Int {
+        // Migrate the old stored long-edge values to the unified pixel-count
+        // semantics. The new saved values are already areas.
+        return when (saved) {
+            426 -> PreviewResolution.P240
+            640 -> PreviewResolution.P360
+            854 -> PreviewResolution.P480
+            1280 -> PreviewResolution.P720
+            1920 -> PreviewResolution.P1080
+            PreviewResolution.P240, PreviewResolution.P360,
+            PreviewResolution.P480, PreviewResolution.P720,
+            PreviewResolution.P1080 -> saved
+            else -> PreviewResolution.DEFAULT
+        }
     }
 
     companion object {
