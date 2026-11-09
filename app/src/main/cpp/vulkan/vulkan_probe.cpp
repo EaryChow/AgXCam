@@ -111,6 +111,12 @@ struct State {
     VkFormat outputFlagFormat = VK_FORMAT_UNDEFINED;
     VkFormat outputSigmaFormat = VK_FORMAT_UNDEFINED;
     VkFormat outputAgxFormat = VK_FORMAT_UNDEFINED;
+    int demosaicOutputWidth = 4096;
+    int demosaicOutputHeight = 3072;
+    float cropOriginX = 0.0f;
+    float cropOriginY = 0.0f;
+    float cropSizeX = 4096.0f;
+    float cropSizeY = 3072.0f;
     uint64_t externalFormat = 0;
     uint32_t timestampValidBits = 0;
     float timestampPeriod = 0.0f;
@@ -652,10 +658,17 @@ bool createPipeline(State& s, std::vector<std::string>& log) {
         return false;
     }
 
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushRange.offset = 0;
+    pushRange.size = 24;
+
     VkPipelineLayoutCreateInfo pipelineLayout{};
     pipelineLayout.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayout.setLayoutCount = 1;
     pipelineLayout.pSetLayouts = &s.descriptorSetLayout;
+    pipelineLayout.pushConstantRangeCount = 1;
+    pipelineLayout.pPushConstantRanges = &pushRange;
     r = vkCreatePipelineLayout(s.device, &pipelineLayout, nullptr, &s.pipelineLayout);
     if (r != VK_SUCCESS) {
         log.push_back("vkCreatePipelineLayout failed: " + std::to_string(r));
@@ -1138,6 +1151,27 @@ bool createS5StatsPipeline(State& s, std::vector<std::string>& log) {
     return true;
 }
 
+void pushDemosaicConstants(State& s, VkCommandBuffer commandBuffer) {
+    struct Push {
+        float outputWidth;
+        float outputHeight;
+        float cropOriginX;
+        float cropOriginY;
+        float cropSizeX;
+        float cropSizeY;
+    } push{
+        static_cast<float>(s.demosaicOutputWidth),
+        static_cast<float>(s.demosaicOutputHeight),
+        s.cropOriginX,
+        s.cropOriginY,
+        s.cropSizeX,
+        s.cropSizeY,
+    };
+    vkCmdPushConstants(
+        commandBuffer, s.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+        0, sizeof(push), &push);
+}
+
 bool createCommands(State& s, int width, int height, std::vector<std::string>& log) {
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -1278,6 +1312,7 @@ bool createCommands(State& s, int width, int height, std::vector<std::string>& l
     vkCmdBindDescriptorSets(
         s.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, s.pipelineLayout,
         0, 1, &s.descriptorSet, 0, nullptr);
+    pushDemosaicConstants(s, s.commandBuffer);
     vkCmdResetQueryPool(s.commandBuffer, s.queryPool, 0, 4);
     if (s.timestampValidBits > 0) {
         vkCmdWriteTimestamp(s.commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s.queryPool, 0);
@@ -1328,7 +1363,7 @@ bool createCommands(State& s, int width, int height, std::vector<std::string>& l
 }
 
 bool runSwapBenchmark(State& s, int width, int height, int frames,
-                      std::vector<std::string>& log) {
+                      std::vector<std::string>& log, bool includeS2 = true) {
     const int warmup = 3;
     std::vector<double> cpuMs;
     std::vector<double> demosaicGpuMs;
@@ -1389,21 +1424,24 @@ bool runSwapBenchmark(State& s, int width, int height, int frames,
         vkCmdBindDescriptorSets(
             s.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, s.pipelineLayout,
             0, 1, &s.descriptorSet, 0, nullptr);
+        pushDemosaicConstants(s, s.commandBuffer);
         vkCmdDispatch(s.commandBuffer, (width + 7) / 8, (height + 7) / 8, 1);
         if (s.timestampValidBits > 0) {
             vkCmdWriteTimestamp(
                 s.commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s.queryPool, 1);
         }
 
-        vkCmdBindPipeline(s.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, s.s2Pipeline);
-        vkCmdBindDescriptorSets(
-            s.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, s.s2PipelineLayout,
-            0, 1, &s.s2DescriptorSet, 0, nullptr);
-        vkCmdDispatch(
-            s.commandBuffer,
-            (((width + 1) / 2) + 15) / 16,
-            (((height + 1) / 2) + 15) / 16,
-            1);
+        if (includeS2) {
+            vkCmdBindPipeline(s.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, s.s2Pipeline);
+            vkCmdBindDescriptorSets(
+                s.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, s.s2PipelineLayout,
+                0, 1, &s.s2DescriptorSet, 0, nullptr);
+            vkCmdDispatch(
+                s.commandBuffer,
+                (((width + 1) / 2) + 15) / 16,
+                (((height + 1) / 2) + 15) / 16,
+                1);
+        }
         if (s.timestampValidBits > 0) {
             vkCmdWriteTimestamp(
                 s.commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s.queryPool, 2);
@@ -2261,6 +2299,50 @@ std::string runEncoderProbe(JNIEnv* env, jobject surface, int width, int height,
     return out.str();
 }
 
+std::string runUhdProbe(JNIEnv* env, jobject surface, int frames,
+                        bool timestamps) {
+    ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
+    if (window == nullptr) {
+        return "UHD output path: ANativeWindow_fromSurface failed\n";
+    }
+
+    constexpr int rawWidth = 4096;
+    constexpr int rawHeight = 3072;
+    constexpr int outWidth = 3840;
+    constexpr int outHeight = 2160;
+
+    State s;
+    s.useSwapchain = true;
+    std::vector<std::string> log;
+    bool ok = createInstance(s, log, true);
+    if (ok) ok = createSurface(s, window, log);
+    if (ok) ok = createDevice(s, log, true);
+    if (ok && !timestamps) s.timestampValidBits = 0;
+    if (ok) ok = createSwapchain(s, log);
+    if (ok) ok = allocateAhb(s, rawWidth, rawHeight, log);
+    if (ok) ok = createImportedImage(s, rawWidth, rawHeight, log);
+    if (ok) ok = createOutputImages(s, outWidth, outHeight, log);
+    s.demosaicOutputWidth = outWidth;
+    s.demosaicOutputHeight = outHeight;
+    s.cropOriginX = 0.0f;
+    s.cropOriginY = 384.0f;
+    s.cropSizeX = 4096.0f;
+    s.cropSizeY = 2304.0f;
+    if (ok) ok = createPipeline(s, log);
+    if (ok) ok = createAgxPipeline(s, log);
+    if (ok) ok = createCommands(s, outWidth, outHeight, log);
+    if (ok) ok = runSwapBenchmark(s, outWidth, outHeight, frames, log, false);
+
+    std::ostringstream out;
+    out << "UHD output path " << rawWidth << "x" << rawHeight
+        << " -> " << outWidth << "x" << outHeight << "\n";
+    for (const auto& line : log) out << line << "\n";
+    if (!ok) out << "UHD output path failed\n";
+    destroy(s);
+    ANativeWindow_release(window);
+    return out.str();
+}
+
 std::string runProbe(int width, int height, int frames) {
     State s;
     std::vector<std::string> log;
@@ -2291,6 +2373,16 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_agx_camera_vulkan_VulkanProbe_runProbe(
     JNIEnv* env, jobject /*thiz*/, jint width, jint height, jint frames) {
     std::string result = runProbe(width, height, frames);
+    LOGI("%s", result.c_str());
+    return env->NewStringUTF(result.c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_agx_camera_vulkan_VulkanProbe_runUhdProbe(
+    JNIEnv* env, jobject /*thiz*/, jobject surface, jint frames,
+    jboolean timestamps) {
+    std::string result =
+        runUhdProbe(env, surface, frames, timestamps == JNI_TRUE);
     LOGI("%s", result.c_str());
     return env->NewStringUTF(result.c_str());
 }

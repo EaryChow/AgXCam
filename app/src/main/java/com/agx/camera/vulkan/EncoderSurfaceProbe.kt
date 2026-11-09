@@ -12,11 +12,17 @@ import java.util.concurrent.atomic.AtomicBoolean
 object EncoderSurfaceProbe {
     fun run(): String {
         val lines = StringBuilder()
-        probe(3840, 2160, lines)
+        probe(3840, 2160, lines, uhd = false)
         return lines.toString()
     }
 
-    private fun probe(width: Int, height: Int, lines: StringBuilder) {
+    fun runUhd(): String {
+        val lines = StringBuilder()
+        probe(3840, 2160, lines, uhd = true)
+        return lines.toString()
+    }
+
+    private fun probe(width: Int, height: Int, lines: StringBuilder, uhd: Boolean) {
         var codec: MediaCodec? = null
         var surface: android.view.Surface? = null
         try {
@@ -54,7 +60,10 @@ object EncoderSurfaceProbe {
             }, "vulkan-encoder-drain")
             drain.start()
             try {
-                lines.append(VulkanProbe.runEncoderProbe(input, 30, false))
+                lines.append(
+                    if (uhd) VulkanProbe.runUhdProbe(input, 30, true)
+                    else VulkanProbe.runEncoderProbe(input, 30, false)
+                )
             } finally {
                 stop.set(true)
                 drain.join(2000)

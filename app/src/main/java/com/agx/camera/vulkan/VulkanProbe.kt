@@ -13,6 +13,12 @@ object VulkanProbe {
 
     external fun runS5StatsProbe(width: Int, height: Int, frames: Int): String
 
+    external fun runUhdProbe(
+        surface: android.view.Surface,
+        frames: Int,
+        timestamps: Boolean
+    ): String
+
     external fun probeSurface(surface: android.view.Surface): String
 
     external fun runEncoderProbe(

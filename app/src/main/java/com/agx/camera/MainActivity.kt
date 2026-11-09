@@ -455,29 +455,17 @@ class MainActivity : AppCompatActivity() {
             CrashLogger.log(TAG, "slider logging active: release + 900ms settle fallback")
         }
         if (BuildConfig.AGX_VULKAN_PROBE) {
-            // Run the probes serially: both allocate 4K AHB/GPU work, so
-            // concurrent startup would contaminate the fixed-path timing.
+            // The UHD output-driven path is the only startup probe. The old
+            // full-sensor and S5 probes remain available from the native
+            // library but are not run here.
             Thread({
-                val vulkan = runCatching {
-                    VulkanProbe.runProbe(4096, 3072, 30)
+                val uhd = runCatching {
+                    EncoderSurfaceProbe.runUhd()
                 }.getOrElse {
-                    "vulkan probe exception: ${it.javaClass.simpleName}: ${it.message}"
-                }
-                CrashLogger.log("VulkanProbe", vulkan)
-                val s5 = runCatching {
-                    VulkanProbe.runS5StatsProbe(3840, 2160, 10)
-                }.getOrElse {
-                    "s5 stats probe exception: " +
+                    "UHD surface probe exception: " +
                         "${it.javaClass.simpleName}: ${it.message}"
                 }
-                CrashLogger.log("VulkanS5Stats", s5)
-                val encoder = runCatching {
-                    EncoderSurfaceProbe.run()
-                }.getOrElse {
-                    "encoder surface probe exception: " +
-                        "${it.javaClass.simpleName}: ${it.message}"
-                }
-                CrashLogger.log("VulkanEncoder", encoder)
+                CrashLogger.log("VulkanUhd", uhd)
             }, "vulkan-probes").start()
         }
         enableEdgeToEdge()
