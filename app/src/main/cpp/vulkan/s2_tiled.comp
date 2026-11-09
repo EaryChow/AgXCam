@@ -1,0 +1,99 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D u_bayerTex;
+layout(binding = 1, r32f) uniform image2D outSigma;
+
+const ivec4 u_black_level_pattern = ivec4(64);
+const int u_bit_depth = 12;
+const vec2 u_sensorSize = vec2(4096.0, 3072.0);
+const ivec2 u_sigmaSize = ivec2(2048, 1536);
+const int T = 16;
+const int TW = T + 2;
+
+// One halo-expanded sparse tile. Four phases per sparse cell.
+shared float tile[TW * TW * 4];
+
+float sampleBayerRaw(ivec2 coord) {
+    ivec2 clamped = clamp(coord, ivec2(0), ivec2(u_sensorSize) - ivec2(1));
+    vec4 packed = texelFetch(u_bayerTex, clamped, 0);
+    uint raw = uint(round(packed.r * 255.0)) | (uint(round(packed.g * 255.0)) << 8);
+    int phase = abs(clamped.x % 2) + abs(clamped.y % 2) * 2;
+    float val = float(raw & ((1u << u_bit_depth) - 1u));
+    val -= float(u_black_level_pattern[phase]);
+    return max(val, 0.0);
+}
+
+void cswap(inout float a, inout float b) {
+    float lo = min(a, b);
+    float hi = max(a, b);
+    a = lo;
+    b = hi;
+}
+
+void sort8(inout float v[8]) {
+    cswap(v[0], v[1]);
+    cswap(v[2], v[3]);
+    cswap(v[4], v[5]);
+    cswap(v[6], v[7]);
+    cswap(v[0], v[2]);
+    cswap(v[1], v[3]);
+    cswap(v[4], v[6]);
+    cswap(v[5], v[7]);
+    cswap(v[1], v[2]);
+    cswap(v[5], v[6]);
+    cswap(v[0], v[4]);
+    cswap(v[3], v[7]);
+    cswap(v[1], v[5]);
+    cswap(v[2], v[6]);
+    cswap(v[1], v[4]);
+    cswap(v[3], v[6]);
+    cswap(v[2], v[4]);
+    cswap(v[3], v[5]);
+    cswap(v[3], v[4]);
+}
+
+float sparseSigma(ivec2 local, int phase) {
+    const int NOX[8] = int[8](1, -1, 0, 0, 1, -1, 1, -1);
+    const int NOY[8] = int[8](0, 0, 1, -1, 1, 1, -1, -1);
+    float vals[8];
+    for (int k = 0; k < 8; k++) {
+        int sx = local.x + 1 + NOX[k];
+        int sy = local.y + 1 + NOY[k];
+        vals[k] = tile[(sy * TW + sx) * 4 + phase];
+    }
+    sort8(vals);
+    float med = (vals[3] + vals[4]) * 0.5;
+    float devs[8];
+    for (int k = 0; k < 8; k++) devs[k] = abs(vals[k] - med);
+    sort8(devs);
+    float mad = (devs[3] + devs[4]) * 0.5;
+    return 2.1981 * mad * mad;
+}
+
+void main() {
+    ivec2 groupBase = ivec2(gl_WorkGroupID.xy) * T;
+    ivec2 local = ivec2(gl_LocalInvocationID.xy);
+
+    for (int i = int(gl_LocalInvocationIndex); i < TW * TW; i += T * T) {
+        int sx = i % TW;
+        int sy = i / TW;
+        ivec2 cell = groupBase + ivec2(sx - 1, sy - 1);
+        for (int p = 0; p < 4; p++) {
+            ivec2 sensor = cell * 2 + ivec2(p & 1, p >> 1);
+            tile[i * 4 + p] = sampleBayerRaw(sensor);
+        }
+    }
+    barrier();
+
+    ivec2 cell = groupBase + local;
+    if (cell.x >= u_sigmaSize.x || cell.y >= u_sigmaSize.y) {
+        return;
+    }
+    float sig = 0.0;
+    for (int p = 0; p < 4; p++) {
+        sig += sparseSigma(local, p);
+    }
+    imageStore(outSigma, cell, vec4(sig * 0.25));
+}

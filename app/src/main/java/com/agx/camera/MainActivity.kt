@@ -34,6 +34,8 @@ import com.agx.camera.color.AgxParams
 import com.agx.camera.color.AgxPrecomputer
 import com.agx.camera.color.ColorMatrix
 import com.agx.camera.color.WhiteBalanceMath
+import com.agx.camera.vulkan.EncoderSurfaceProbe
+import com.agx.camera.vulkan.VulkanProbe
 import com.agx.camera.gpu.DegradedPreviewManager
 import com.agx.camera.gpu.PerfTimers
 import com.agx.camera.gpu.PreviewRenderer
@@ -451,6 +453,25 @@ class MainActivity : AppCompatActivity() {
         CrashLogger.log(TAG, "onCreate: begin")
         if (LOG_SLIDER_CHANGES) {
             CrashLogger.log(TAG, "slider logging active: release + 900ms settle fallback")
+        }
+        if (BuildConfig.AGX_VULKAN_PROBE) {
+            // Run the probes serially: both allocate 4K AHB/GPU work, so
+            // concurrent startup would contaminate the fixed-path timing.
+            Thread({
+                val vulkan = runCatching {
+                    VulkanProbe.runProbe(4096, 3072, 30)
+                }.getOrElse {
+                    "vulkan probe exception: ${it.javaClass.simpleName}: ${it.message}"
+                }
+                CrashLogger.log("VulkanProbe", vulkan)
+                val encoder = runCatching {
+                    EncoderSurfaceProbe.run()
+                }.getOrElse {
+                    "encoder surface probe exception: " +
+                        "${it.javaClass.simpleName}: ${it.message}"
+                }
+                CrashLogger.log("VulkanEncoder", encoder)
+            }, "vulkan-probes").start()
         }
         enableEdgeToEdge()
         window.addFlags(

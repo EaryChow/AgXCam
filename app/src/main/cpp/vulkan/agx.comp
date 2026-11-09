@@ -1,0 +1,143 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D inDemosaic;
+layout(binding = 1, rgba8) uniform image2D outDisplay;
+
+const mat3 u_scene_linear_to_709 = mat3(1.0);
+const mat3 u_insetmat = mat3(1.0);
+const mat3 u_outsetmat = mat3(1.0);
+const mat3 u_709_to_2020 = mat3(1.0);
+const float u_exposure = 0.0;
+const float u_log_min = -10.0;
+const float u_log_max = 6.5;
+const float u_log_midgray = 0.5;
+const float u_display_midgray = 0.48;
+const float u_contrast = 2.4;
+const float u_toe = 1.5;
+const float u_shoulder = 1.5;
+const float u_vibrance = 0.5;
+const vec2 u_size = vec2(4096.0, 3072.0);
+float spowf(float a, float b) {
+    return sign(a) * pow(abs(a), b);
+}
+
+vec3 spowf3(vec3 x, float p) {
+    return sign(x) * pow(abs(x), vec3(p));
+}
+
+vec3 lin2log(vec3 rgb, float logMin, float logMax) {
+    float logFloor = 0.18 * pow(2.0, logMin);
+    rgb = max(rgb, vec3(logFloor));
+    rgb = log2(rgb / 0.18);
+    rgb = clamp(rgb, logMin, logMax);
+    return (rgb + abs(logMin)) / (abs(logMin) + abs(logMax));
+}
+
+float sigmoid(float x, float sp, float tp, float slope, float px, float py) {
+    float s0 = 1.0;
+    float t0 = 0.0;
+    float ss = spowf(
+        ((spowf((slope * ((s0 - px) / (1.0 - py))), sp) - 1.0) * (spowf(slope * (s0 - px), -sp))),
+        -1.0 / sp);
+    float ms = slope * (x - px) / ss;
+    float fs = ms / spowf(1.0 + spowf(ms, sp), 1.0 / sp);
+    float ts = spowf(
+        ((spowf((slope * ((px - t0) / py)), tp) - 1.0) * (spowf(slope * (px - t0), -tp))),
+        -1.0 / tp);
+    float mr = (slope * (x - px)) / -ts;
+    float ft = mr / spowf(1.0 + spowf(mr, tp), 1.0 / tp);
+    return x >= px ? ss * fs + py : (-ts * ft) + py;
+}
+
+vec3 compensateLowSide(vec3 rgb) {
+    const vec3 lumCoeffs = vec3(0.2589235355689848, 0.6104985346066525, 0.13057792982436284);
+    vec3 rgb2020 = u_709_to_2020 * rgb;
+    float Y = dot(rgb2020, lumCoeffs);
+    float maxRGB = max(rgb.r, max(rgb.g, rgb.b));
+    vec3 inverseRGB = vec3(maxRGB - rgb.r, maxRGB - rgb.g, maxRGB - rgb.b);
+    float maxInvRGB = max(inverseRGB.r, max(inverseRGB.g, inverseRGB.b));
+    vec3 inv2020 = u_709_to_2020 * inverseRGB;
+    float Yinv = dot(inv2020, lumCoeffs);
+    float yCompensate = (maxInvRGB - Yinv + Y);
+    float minRGB = min(rgb.r, min(rgb.g, rgb.b));
+    float offset = max(-minRGB, 0.0);
+    vec3 rgbOffset = rgb + offset;
+    float maxOffset = max(rgbOffset.r, max(rgbOffset.g, rgbOffset.b));
+    vec3 invOffset = vec3(maxOffset - rgbOffset.r, maxOffset - rgbOffset.g, maxOffset - rgbOffset.b);
+    float maxInvOff = max(invOffset.r, max(invOffset.g, invOffset.b));
+    vec3 invOff2020 = u_709_to_2020 * invOffset;
+    float YinvOff = dot(invOff2020, lumCoeffs);
+    vec3 off2020 = u_709_to_2020 * rgbOffset;
+    float Ynew = dot(off2020, lumCoeffs);
+    float yNewCompensate = (maxInvOff - YinvOff + Ynew);
+    float ratio = (yNewCompensate > yCompensate) ? (yCompensate / yNewCompensate) : 1.0;
+    return max(rgbOffset * ratio, vec3(0.0));
+}
+
+vec3 srgbOETF(vec3 linear) {
+    vec3 result;
+    for (int i = 0; i < 3; i++) {
+        float c = linear[i];
+        if (c <= 0.0031308) {
+            result[i] = c * 12.92;
+        } else {
+            result[i] = 1.055 * pow(c, 1.0/2.4) - 0.055;
+        }
+    }
+    return result;
+}
+
+vec3 srgbEOTF(vec3 srgb) {
+    vec3 result;
+    for (int i = 0; i < 3; i++) {
+        float c = srgb[i];
+        if (c <= 0.04045) {
+            result[i] = c / 12.92;
+        } else {
+            result[i] = pow((c + 0.055) / 1.055, 2.4);
+        }
+    }
+    return result;
+}
+
+vec3 vibrance(vec3 rgb, float strength) {
+    const vec3 coeffs = vec3(0.2126, 0.7152, 0.0722);
+    float luminance = dot(rgb, coeffs);
+    float chrominance = max(rgb.r, max(rgb.g, rgb.b)) - luminance;
+    // Both terms fade out at the top of the range by construction. pow() is
+    // undefined on a negative base, and luminance passes 1.0 at the top of the
+    // sigmoid - more often as contrast or exposure rises - so an unguarded
+    // base yields a NaN that the following clamp renders as zero.
+    float lumClamped = clamp(luminance, 0.0, 1.0);
+    float topEndFade = pow(max(1.0 - pow(lumClamped, 1.5), 0.0), 100.0);
+    float mask = (1.0 - pow(max(chrominance, 0.0), 0.5)) * 1.0 - topEndFade;
+    float t = 1.0 + strength * mask;
+    return luminance + (rgb - luminance) * t;
+}
+vec3 agxFormationNorm(vec3 capacityLinear) {
+    vec3 rgb = capacityLinear;
+    rgb = u_scene_linear_to_709 * rgb * exp2(u_exposure);
+    rgb = compensateLowSide(rgb);
+    rgb = u_insetmat * rgb;
+    rgb = lin2log(rgb, u_log_min, u_log_max);
+    rgb.r = sigmoid(rgb.r, u_shoulder, u_toe, u_contrast, u_log_midgray, u_display_midgray);
+    rgb.g = sigmoid(rgb.g, u_shoulder, u_toe, u_contrast, u_log_midgray, u_display_midgray);
+    rgb.b = sigmoid(rgb.b, u_shoulder, u_toe, u_contrast, u_log_midgray, u_display_midgray);
+    rgb = spowf3(rgb, 2.4);
+    rgb = u_outsetmat * rgb;
+    rgb = vibrance(rgb, u_vibrance);
+    rgb = clamp(rgb, 0.0, 1.0);
+    rgb = srgbOETF(rgb);
+    return rgb;
+}
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(u_size.x) || p.y >= int(u_size.y)) {
+        return;
+    }
+    vec3 linearRGB = texelFetch(inDemosaic, p, 0).rgb;
+    vec3 formed = agxFormationNorm(linearRGB);
+    imageStore(outDisplay, p, vec4(formed, 1.0));
+}

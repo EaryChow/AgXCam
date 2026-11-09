@@ -4,6 +4,13 @@ plugins {
     alias(libs.plugins.android.application)
 }
 
+val localProperties = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+val vulkanProbeEnabled = project.hasProperty("enableVulkanProbe")
+val vulkanProbeNdkPath = localProperties.getProperty("vulkanProbe.ndkPath")
+
 android {
     namespace = "com.agx.camera"
     compileSdk {
@@ -25,6 +32,13 @@ android {
         // Permanent synthetic-Bayer harness (DIFF oracle). Off for normal builds;
         // flip to "true" to run SYNTH/DIFF on the 192x160 fixed-seed sensor.
         buildConfigField("boolean", "AGX_SYNTHETIC_BAYER", "false")
+        // Vulkan probe. Build with -PenableVulkanProbe; off by default.
+        buildConfigField("boolean", "AGX_VULKAN_PROBE", vulkanProbeEnabled.toString())
+        if (vulkanProbeEnabled) {
+            ndk {
+                abiFilters += "arm64-v8a"
+            }
+        }
     }
 
     signingConfigs {
@@ -62,6 +76,21 @@ android {
     }
     buildFeatures {
         buildConfig = true
+    }
+
+    if (vulkanProbeEnabled) {
+        require(!project.hasProperty("enableNativeJpeg")) {
+            "enableVulkanProbe and enableNativeJpeg both request externalNativeBuild"
+        }
+        ndkPath = requireNotNull(vulkanProbeNdkPath) {
+            "vulkanProbe.ndkPath is missing from local.properties"
+        }
+        ndkVersion = "30.0.16248370"
+        externalNativeBuild {
+            ndkBuild {
+                path = file("src/main/cpp/vulkan/Android.mk")
+            }
+        }
     }
 
     if (project.hasProperty("enableNativeJpeg")) {
