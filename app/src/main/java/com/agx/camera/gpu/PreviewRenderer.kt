@@ -1714,8 +1714,12 @@ class PreviewRenderer(private val textureView: TextureView) : TextureView.Surfac
             if (pipelineStateLog.shouldLog(gates)) {
                 CrashLogger.log(TAG, gates.reportText().replace('\n', ' '))
             }
-            logFrameRateIfDue()
         }
+        // The production frame rate must be visible without turning on the
+        // measurement consumer. This heartbeat reads existing wall-clock state
+        // only; it does not force sigma, the grid chain, buckets or the
+        // structure map. Pass timings remain a separate measurement run.
+        logFrameRateIfDue()
     }
 
     private fun applyBayerCrop() {
