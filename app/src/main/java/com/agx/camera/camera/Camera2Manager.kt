@@ -703,7 +703,9 @@ class Camera2Manager(private val context: Context) {
 
         CrashLogger.log(TAG, "setManualExposure iso=$iso exposureTimeNs=$exposureTimeNs frozenLens=${frozenLens ?: "no"} af=$afMode")
 
-        val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+        val request = buildCaptureRequest(
+            camera, CameraDevice.TEMPLATE_PREVIEW, "setManualExposure"
+        ) {
             addPreviewTargets()
             set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
@@ -720,12 +722,15 @@ class Camera2Manager(private val context: Context) {
             applyFlashForManualExposure()
             applyPreviewCrop()
             applyLensShadingMapMode()
-        }
+        } ?: return
 
         try {
-            session.setRepeatingRequest(request.build(), aeReadoutCallback, backgroundHandler)
+            session.setRepeatingRequest(request, aeReadoutCallback, backgroundHandler)
         } catch (e: CameraAccessException) {
             Log.e(TAG, "setManualExposure setRepeatingRequest failed: ${e.message}", e)
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "setManualExposure setRepeatingRequest failed: session closed", e)
+            CrashLogger.log(TAG, "setManualExposure failed: session closed (${e.message})")
         }
     }
 
@@ -1071,6 +1076,31 @@ class Camera2Manager(private val context: Context) {
         applyPreviewRequest()
     }
 
+    /**
+     * Builds a capture request, returning null if the camera closed while a
+     * UI callback was still running. Every request-building path goes through
+     * here: createCaptureRequest throws IllegalStateException once the device
+     * is closed, and that race is not limited to the repeating preview path.
+     */
+    private fun buildCaptureRequest(
+        camera: CameraDevice,
+        template: Int,
+        label: String,
+        configure: CaptureRequest.Builder.() -> Unit
+    ): CaptureRequest? {
+        return try {
+            camera.createCaptureRequest(template).apply(configure).build()
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "$label request skipped: ${e.message}", e)
+            CrashLogger.log(TAG, "$label request skipped: ${e.message}")
+            null
+        } catch (e: CameraAccessException) {
+            Log.e(TAG, "$label request create failed: ${e.message}", e)
+            CrashLogger.logException(TAG, e)
+            null
+        }
+    }
+
     private fun applyPreviewRequest(log: Boolean = true) {
         if (isManualExposure) {
             setManualExposure(currentManualIso, currentManualExposureNs)
@@ -1109,7 +1139,9 @@ class Camera2Manager(private val context: Context) {
             CaptureRequest.CONTROL_AF_MODE_OFF
         }
 
-        val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+        val request = buildCaptureRequest(
+            camera, CameraDevice.TEMPLATE_PREVIEW, "applyPreviewRequest"
+        ) {
             addPreviewTargets()
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
             if (useManualHold) {
@@ -1158,17 +1190,20 @@ class Camera2Manager(private val context: Context) {
             applyThermalFpsLimit(manual = false)
             applyPreviewCrop()
             applyLensShadingMapMode()
-        }
+        } ?: return
 
         if (scanning) scanTriggerFired = true
 
         if (log) CrashLogger.log(TAG, "applyPreviewRequest: awb=${awbModeName(effectiveAwbMode())} af=$afMode locked=$focusLocked tapHold=$useTapHold scan=$scanning frozenLens=${frozenLens ?: "no"} awbLocked=$isAwbLocked manual=$isManualExposure iso=$currentManualIso shutter=${currentManualExposureNs} aeTrigger=$aeTriggerSent aeRegions=${aeRegions?.contentToString() ?: "no"}")
 
         try {
-            session.setRepeatingRequest(request.build(), aeReadoutCallback, backgroundHandler)
+            session.setRepeatingRequest(request, aeReadoutCallback, backgroundHandler)
         } catch (e: CameraAccessException) {
             Log.e(TAG, "applyPreviewRequest failed: ${e.message}", e)
             CrashLogger.logException(TAG, e)
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "applyPreviewRequest failed: session closed", e)
+            CrashLogger.log(TAG, "applyPreviewRequest failed: session closed (${e.message})")
         }
     }
 
@@ -1230,7 +1265,9 @@ class Camera2Manager(private val context: Context) {
         val afMode = if (deviceMaxAfRegions > 0) safeAfMode(CaptureRequest.CONTROL_AF_MODE_AUTO) else CaptureRequest.CONTROL_AF_MODE_OFF
         CrashLogger.log(TAG, "startAfAeLock afMode=$afMode rect=(${meteringRect.x},${meteringRect.y},${meteringRect.width},${meteringRect.height})")
 
-        val triggerRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+        val triggerRequest = buildCaptureRequest(
+            camera, CameraDevice.TEMPLATE_PREVIEW, "startAfAeLock trigger"
+        ) {
             addPreviewTargets()
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
             applyAwb()
@@ -1249,19 +1286,16 @@ class Camera2Manager(private val context: Context) {
             }
             applyPreviewCrop()
             applyLensShadingMapMode()
-        }
+        } ?: return
 
         try {
-            session.setRepeatingRequest(triggerRequest.build(), object : CameraCaptureSession.CaptureCallback() {
+            session.setRepeatingRequest(triggerRequest, object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
                     val afState = result.get(CaptureResult.CONTROL_AF_STATE)
                     if (afState != null && afState != CaptureResult.CONTROL_AF_STATE_ACTIVE_SCAN) {
-                        try {
-                            session.stopRepeating()
-                        } catch (e: CameraAccessException) {
-                            Log.e(TAG, "stopRepeating failed: ${e.message}", e)
-                        }
-                        val lockRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                        val lockRequest = buildCaptureRequest(
+                            camera, CameraDevice.TEMPLATE_PREVIEW, "startAfAeLock lock"
+                        ) {
                             addPreviewTargets()
                             set(CaptureRequest.CONTROL_AF_MODE, afMode)
                             applyAwb()
@@ -1280,21 +1314,35 @@ class Camera2Manager(private val context: Context) {
                                 currentFlashMode.applyToRequest(this, availableAeModes)
                             }
                             applyPreviewCrop()
+                        } ?: return
+                        try {
+                            session.stopRepeating()
+                        } catch (e: CameraAccessException) {
+                            Log.e(TAG, "stopRepeating failed: ${e.message}", e)
+                        } catch (e: IllegalStateException) {
+                            Log.e(TAG, "stopRepeating failed: session closed", e)
                         }
                         try {
-                            session.setRepeatingRequest(lockRequest.build(), null, backgroundHandler)
+                            session.setRepeatingRequest(lockRequest, null, backgroundHandler)
                         } catch (e: CameraAccessException) {
                             Log.e(TAG, "lock setRepeatingRequest failed: ${e.message}", e)
+                        } catch (e: IllegalStateException) {
+                            Log.e(TAG, "lock setRepeatingRequest failed: session closed", e)
                         }
                         onCaptureCompleted(result)
                     }
                 }
             }, handler)
-            onCaptureStarted()
         } catch (e: CameraAccessException) {
             Log.e(TAG, "startAfAeLock setRepeatingRequest failed: ${e.message}", e)
             CrashLogger.logException(TAG, e)
+            return
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "startAfAeLock setRepeatingRequest failed: session closed", e)
+            CrashLogger.log(TAG, "startAfAeLock failed: session closed (${e.message})")
+            return
         }
+        onCaptureStarted()
     }
 
     fun lockAeAf(meteringRect: MeteringRectangle, handler: Handler, onLocked: () -> Unit) {
@@ -1304,7 +1352,9 @@ class Camera2Manager(private val context: Context) {
         val afMode = if (deviceMaxAfRegions > 0) safeAfMode(CaptureRequest.CONTROL_AF_MODE_AUTO) else CaptureRequest.CONTROL_AF_MODE_OFF
         CrashLogger.log(TAG, "lockAeAf afMode=$afMode rect=(${meteringRect.x},${meteringRect.y},${meteringRect.width},${meteringRect.height})")
 
-        val triggerRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+        val triggerRequest = buildCaptureRequest(
+            camera, CameraDevice.TEMPLATE_PREVIEW, "lockAeAf trigger"
+        ) {
             addPreviewTargets()
             set(CaptureRequest.CONTROL_AF_MODE, afMode)
             applyAwb()
@@ -1323,21 +1373,18 @@ class Camera2Manager(private val context: Context) {
             }
             applyPreviewCrop()
             applyLensShadingMapMode()
-        }
+        } ?: return
 
         try {
-            session.setRepeatingRequest(triggerRequest.build(), object : CameraCaptureSession.CaptureCallback() {
+            session.setRepeatingRequest(triggerRequest, object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
                     val afState = result.get(CaptureResult.CONTROL_AF_STATE)
                     val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
                     if (afState != null && afState != CaptureResult.CONTROL_AF_STATE_ACTIVE_SCAN &&
                         aeState != null && aeState != CaptureResult.CONTROL_AE_STATE_SEARCHING) {
-                        try {
-                            session.stopRepeating()
-                        } catch (e: CameraAccessException) {
-                            Log.e(TAG, "stopRepeating failed: ${e.message}", e)
-                        }
-                        val lockRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                        val lockRequest = buildCaptureRequest(
+                            camera, CameraDevice.TEMPLATE_PREVIEW, "lockAeAf lock"
+                        ) {
                             addPreviewTargets()
                             set(CaptureRequest.CONTROL_AF_MODE, afMode)
                             applyAwb()
@@ -1356,19 +1403,33 @@ class Camera2Manager(private val context: Context) {
                                 currentFlashMode.applyToRequest(this, availableAeModes)
                             }
                             applyPreviewCrop()
+                        } ?: return
+                        try {
+                            session.stopRepeating()
+                        } catch (e: CameraAccessException) {
+                            Log.e(TAG, "stopRepeating failed: ${e.message}", e)
+                        } catch (e: IllegalStateException) {
+                            Log.e(TAG, "stopRepeating failed: session closed", e)
                         }
                         try {
-                            session.setRepeatingRequest(lockRequest.build(), null, backgroundHandler)
-                            onLocked()
+                            session.setRepeatingRequest(lockRequest, null, backgroundHandler)
                         } catch (e: CameraAccessException) {
                             Log.e(TAG, "lock setRepeatingRequest failed: ${e.message}", e)
+                            return
+                        } catch (e: IllegalStateException) {
+                            Log.e(TAG, "lock setRepeatingRequest failed: session closed", e)
+                            return
                         }
+                        onLocked()
                     }
                 }
             }, handler)
         } catch (e: CameraAccessException) {
             Log.e(TAG, "lockAeAf setRepeatingRequest failed: ${e.message}", e)
             CrashLogger.logException(TAG, e)
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "lockAeAf setRepeatingRequest failed: session closed", e)
+            CrashLogger.log(TAG, "lockAeAf failed: session closed (${e.message})")
         }
     }
 
@@ -1415,7 +1476,9 @@ class Camera2Manager(private val context: Context) {
         }, backgroundHandler)
 
         val preview = previewReader?.surface
-        val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+        val request = buildCaptureRequest(
+            camera, CameraDevice.TEMPLATE_STILL_CAPTURE, "captureStill"
+        ) {
             addTarget(reader.surface)
             if (wantDng) rawReader?.let { addTarget(it.surface) }
             if (preview != null) addTarget(preview)
@@ -1439,9 +1502,15 @@ class Camera2Manager(private val context: Context) {
             applyCropRegion()
             applyLensShadingMapMode()
         }
+        if (request == null) {
+            reader.setOnImageAvailableListener(null, null)
+            if (wantDng) rawReader?.setOnImageAvailableListener(rawListener, backgroundHandler)
+            onCaptureFailed()
+            return
+        }
 
         try {
-            session.capture(request.build(), object : CameraCaptureSession.CaptureCallback() {
+            session.capture(request, object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureStarted(session: CameraCaptureSession, request: CaptureRequest, timestamp: Long, frameNumber: Long) {
                     CrashLogger.log(TAG, "stillCapture onCaptureStarted frame=$frameNumber")
                 }
@@ -1489,6 +1558,11 @@ class Camera2Manager(private val context: Context) {
             reader.setOnImageAvailableListener(null, null)
             Log.e(TAG, "captureStill failed: ${e.message}", e)
             CrashLogger.logException(TAG, e)
+            onCaptureFailed()
+        } catch (e: IllegalStateException) {
+            CrashLogger.log(TAG, "stillCapture failed: session closed (${e.message})")
+            reader.setOnImageAvailableListener(null, null)
+            Log.e(TAG, "captureStill failed: session closed", e)
             onCaptureFailed()
         }
     }

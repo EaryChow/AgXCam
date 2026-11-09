@@ -512,33 +512,22 @@ class LensManager(private val context: Context) {
      * Picks the available preview size closest to [targetPixels] while
      * preserving [targetAspect].
      *
-     * Aspect error is the primary key, because the preview output aspect must
-     * not be overridden just to hit an area target. Area distance is the
-     * secondary key: for the chosen aspect, the requested 240p-1080p pixel
-     * budget resolves to the nearest sensor mode. Descending area is
-     * only the final tie-break, for two modes at the same aspect error and
-     * the same pixel distance. That last key is still load-bearing: HALs often
-     * enumerate smallest-first, and a stable first-match would otherwise pick
-     * the smaller mode when two modes tie.
+     * Aspect is a tolerance bucket, not a strict primary key. Exact-aspect
+     * sorting allowed a lens with a 4080x3072 sensor mode to select that full
+     * 12.5 MP mode for a 240p preview merely because its aspect was closer to
+     * the inherited 85:64 resolution option than 320x240's 4:3 aspect. Inside
+     * the tolerance, area distance is the primary key; descending area remains
+     * the tie-break. If no size is near the requested aspect, the old
+     * aspect-then-area ordering is retained.
      */
     private fun bestPreviewSize(
         sizes: Array<Size>,
         targetPixels: Long,
         targetAspect: Float
     ): Size? {
-        // The resolution option is a target total pixel count. Pick the
-        // available preview size whose area is closest to the requested
-        // option, but only among sizes that preserve the selected output
-        // aspect. Aspect is the primary key; area is the secondary key.
-        val picked = sizes
-            .sortedWith(
-                compareBy(
-                    { kotlin.math.abs(it.width.toFloat() / it.height - targetAspect) },
-                    { kotlin.math.abs(it.width.toLong() * it.height.toLong() - targetPixels) },
-                    { -(it.width.toLong() * it.height.toLong()) }
-                )
-            )
-            .firstOrNull()
+        val picked = choosePreviewSize(
+            sizes.map { it.width to it.height }, targetPixels, targetAspect
+        )?.let { Size(it.first, it.second) }
 
         val ladder = sizes.filter { it.width * 3 == it.height * 4 }
             .sortedBy { it.width }
@@ -675,4 +664,37 @@ class LensManager(private val context: Context) {
     companion object {
         private const val TAG = "LensManager"
     }
+}
+
+/**
+ * Aspect tolerance for preview-size selection. Sensor modes and inherited
+ * resolution options can differ by a few thousandths while denoting the same
+ * 4:3 family; an absolute 0.02 aspect difference keeps 16:9/3:2 separate
+ * while treating 85:64 and 4:3 as the same preview family.
+ */
+private const val PREVIEW_ASPECT_TOLERANCE = 0.02f
+
+internal fun choosePreviewSize(
+    sizes: List<Pair<Int, Int>>,
+    targetPixels: Long,
+    targetAspect: Float
+): Pair<Int, Int>? {
+    val matching = sizes.filter { (w, h) ->
+        kotlin.math.abs(w.toFloat() / h - targetAspect) <= PREVIEW_ASPECT_TOLERANCE
+    }
+    if (matching.isNotEmpty()) {
+        return matching.sortedWith(
+            compareBy(
+                { (w, h) -> kotlin.math.abs(w.toLong() * h.toLong() - targetPixels) },
+                { (w, h) -> -(w.toLong() * h.toLong()) }
+            )
+        ).firstOrNull()
+    }
+    return sizes.sortedWith(
+        compareBy(
+            { (w, h) -> kotlin.math.abs(w.toFloat() / h - targetAspect) },
+            { (w, h) -> kotlin.math.abs(w.toLong() * h.toLong() - targetPixels) },
+            { (w, h) -> -(w.toLong() * h.toLong()) }
+        )
+    ).firstOrNull()
 }
