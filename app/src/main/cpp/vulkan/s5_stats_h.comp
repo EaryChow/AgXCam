@@ -1,0 +1,38 @@
+#version 450
+
+// S5-L horizontal box statistics. The blocked per-thread running sum was
+// slower on this GPU because a warp's threads own 32-pixel blocks in the same
+// row, so their loads and stores are strided rather than coalesced. This is
+// the original 27-tap gather, which measured faster; the vertical pass keeps
+// the blocked running form.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba16f) uniform image2D u_inTex;
+layout(binding = 1, rg16f) uniform image2D u_statsTex;
+
+layout(push_constant) uniform Push {
+    int width;
+    int height;
+    int radius;
+    int pad;
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.width || p.y >= pc.height) return;
+
+    int R = pc.radius;
+    float sum = 0.0;
+    float sumSq = 0.0;
+    for (int dx = -R; dx <= R; ++dx) {
+        ivec2 q = clamp(p + ivec2(dx, 0),
+                        ivec2(0), ivec2(pc.width - 1, pc.height - 1));
+        vec3 c = imageLoad(u_inTex, q).rgb;
+        float y = 0.25 * c.r + 0.5 * c.g + 0.25 * c.b;
+        sum += y;
+        sumSq += y * y;
+    }
+    float n = float(2 * R + 1);
+    imageStore(u_statsTex, p, vec4(sum / n, sumSq / n, 0.0, 0.0));
+}

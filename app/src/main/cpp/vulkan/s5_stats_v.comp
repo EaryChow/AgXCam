@@ -1,0 +1,50 @@
+#version 450
+
+// S5-L vertical box statistics with a per-thread running sum. Each thread
+// owns one output column and a 32-row block; the 27-row box sum is carried
+// forward with one add and one subtract per output. No shared memory, no
+// barriers, no scan.
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0, rg16f) uniform image2D u_statsHTex;
+layout(binding = 1, rg16f) uniform image2D u_statsVTex;
+
+layout(push_constant) uniform Push {
+    int width;
+    int height;
+    int radius;
+    int pad;
+} pc;
+
+const int BLOCK = 32;
+
+vec2 statAt(int x, int y) {
+    return imageLoad(u_statsHTex,
+                      ivec2(x, clamp(y, 0, pc.height - 1))).rg;
+}
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int blocksPerCol = (pc.height + BLOCK - 1) / BLOCK;
+    int x = id % pc.width;
+    int by = id / pc.width;
+    if (by >= blocksPerCol) return;
+    int y0 = by * BLOCK;
+    int y1 = min(y0 + BLOCK, pc.height);
+    int R = pc.radius;
+
+    vec2 acc = vec2(0.0);
+    for (int dy = -R; dy <= R; ++dy) {
+        acc += statAt(x, y0 + dy);
+    }
+    float n = float(2 * R + 1);
+    imageStore(u_statsVTex, ivec2(x, y0), vec4(acc / n, 0.0, 0.0));
+
+    for (int y = y0 + 1; y < y1; ++y) {
+        vec2 add = statAt(x, y + R);
+        vec2 sub = statAt(x, y - R - 1);
+        acc += add - sub;
+        imageStore(u_statsVTex, ivec2(x, y), vec4(acc / n, 0.0, 0.0));
+    }
+}

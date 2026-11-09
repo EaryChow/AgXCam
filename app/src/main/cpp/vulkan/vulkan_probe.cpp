@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
@@ -19,6 +20,9 @@
 #include "s2_tiled_spv.h"
 #include "agx_spv.h"
 #include "agx_encoder_spv.h"
+#include "s5_stats_h_spv.h"
+#include "s5_stats_v_spv.h"
+#include "s5_main_spv.h"
 
 #define LOG_TAG "VulkanProbe"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -55,6 +59,28 @@ struct State {
     std::vector<VkDescriptorSet> agxSets;
     VkShaderModule agxShader = VK_NULL_HANDLE;
     VkPipeline agxPipeline = VK_NULL_HANDLE;
+    VkDescriptorSetLayout s5StatsDescriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout s5StatsPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorPool s5StatsDescriptorPool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> s5StatsSets;
+    VkShaderModule s5StatsHShader = VK_NULL_HANDLE;
+    VkShaderModule s5StatsVShader = VK_NULL_HANDLE;
+    VkShaderModule s5MainShader = VK_NULL_HANDLE;
+    VkPipeline s5StatsHPipeline = VK_NULL_HANDLE;
+    VkPipeline s5StatsVPipeline = VK_NULL_HANDLE;
+    VkPipeline s5MainPipeline = VK_NULL_HANDLE;
+    VkImage s5StatsHImage = VK_NULL_HANDLE;
+    VkDeviceMemory s5StatsHMemory = VK_NULL_HANDLE;
+    VkImageView s5StatsHView = VK_NULL_HANDLE;
+    VkImage s5StatsVImage = VK_NULL_HANDLE;
+    VkDeviceMemory s5StatsVMemory = VK_NULL_HANDLE;
+    VkImageView s5StatsVView = VK_NULL_HANDLE;
+    VkImage s5InputImage = VK_NULL_HANDLE;
+    VkDeviceMemory s5InputMemory = VK_NULL_HANDLE;
+    VkImageView s5InputView = VK_NULL_HANDLE;
+    VkImage s5OutputImage = VK_NULL_HANDLE;
+    VkDeviceMemory s5OutputMemory = VK_NULL_HANDLE;
+    VkImageView s5OutputView = VK_NULL_HANDLE;
     VkImage inputImage = VK_NULL_HANDLE;
     VkDeviceMemory inputMemory = VK_NULL_HANDLE;
     VkImageView inputView = VK_NULL_HANDLE;
@@ -89,6 +115,8 @@ struct State {
     uint32_t timestampValidBits = 0;
     float timestampPeriod = 0.0f;
 };
+
+void destroy(State& s);
 
 bool hasExtension(const std::vector<VkExtensionProperties>& props, const char* name) {
     for (const auto& p : props) {
@@ -241,7 +269,10 @@ bool createDevice(State& s, std::vector<std::string>& log, bool useSurface = fal
                 << VK_API_VERSION_MINOR(props.apiVersion)
                 << " queueFamily=" << qf
                 << " timestampBits=" << s.timestampValidBits
-                << " timestampPeriod=" << s.timestampPeriod;
+                << " timestampPeriod=" << s.timestampPeriod
+                << " maxShared=" << props.limits.maxComputeSharedMemorySize
+                << " maxInvocations="
+                << props.limits.maxComputeWorkGroupInvocations;
         log.push_back(devLine.str());
         return true;
     }
@@ -415,7 +446,8 @@ bool createStorageImage(State& s, VkFormat format, int width, int height,
     image.arrayLayers = 1;
     image.samples = VK_SAMPLE_COUNT_1_BIT;
     image.tiling = VK_IMAGE_TILING_OPTIMAL;
-    image.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    image.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                  VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     image.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     image.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -961,6 +993,151 @@ bool createAgxPipeline(State& s, std::vector<std::string>& log) {
     return true;
 }
 
+bool createS5StatsPipeline(State& s, std::vector<std::string>& log) {
+    VkDescriptorSetLayoutBinding bindings[3]{};
+    for (uint32_t i = 0; i < 3; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+
+    VkDescriptorSetLayoutCreateInfo layout{};
+    layout.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layout.bindingCount = 3;
+    layout.pBindings = bindings;
+    VkResult r = vkCreateDescriptorSetLayout(
+        s.device, &layout, nullptr, &s.s5StatsDescriptorSetLayout);
+    if (r != VK_SUCCESS) {
+        log.push_back("vkCreateDescriptorSetLayout(S5 stats) failed: " +
+                      std::to_string(r));
+        return false;
+    }
+
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushRange.offset = 0;
+    pushRange.size = 16;
+
+    VkPipelineLayoutCreateInfo pipelineLayout{};
+    pipelineLayout.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayout.setLayoutCount = 1;
+    pipelineLayout.pSetLayouts = &s.s5StatsDescriptorSetLayout;
+    pipelineLayout.pushConstantRangeCount = 1;
+    pipelineLayout.pPushConstantRanges = &pushRange;
+    r = vkCreatePipelineLayout(
+        s.device, &pipelineLayout, nullptr, &s.s5StatsPipelineLayout);
+    if (r != VK_SUCCESS) {
+        log.push_back("vkCreatePipelineLayout(S5 stats) failed: " +
+                      std::to_string(r));
+        return false;
+    }
+
+    struct ShaderDesc {
+        const uint32_t* code;
+        uint32_t words;
+        VkShaderModule* module;
+        VkPipeline* pipeline;
+        const char* name;
+    };
+    ShaderDesc shaders[3] = {
+        {s5_stats_h_spv, s5_stats_h_spv_count, &s.s5StatsHShader,
+         &s.s5StatsHPipeline, "statsH"},
+        {s5_stats_v_spv, s5_stats_v_spv_count, &s.s5StatsVShader,
+         &s.s5StatsVPipeline, "statsV"},
+        {s5_main_spv, s5_main_spv_count, &s.s5MainShader,
+         &s.s5MainPipeline, "main"},
+    };
+
+    for (const auto& desc : shaders) {
+        VkShaderModuleCreateInfo shaderInfo{};
+        shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        shaderInfo.codeSize = desc.words * sizeof(uint32_t);
+        shaderInfo.pCode = desc.code;
+        r = vkCreateShaderModule(s.device, &shaderInfo, nullptr, desc.module);
+        if (r != VK_SUCCESS) {
+            log.push_back("vkCreateShaderModule(S5 " + std::string(desc.name) +
+                          ") failed: " + std::to_string(r));
+            return false;
+        }
+
+        VkPipelineShaderStageCreateInfo stage{};
+        stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        stage.module = *desc.module;
+        stage.pName = "main";
+
+        VkComputePipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipelineInfo.stage = stage;
+        pipelineInfo.layout = s.s5StatsPipelineLayout;
+        r = vkCreateComputePipelines(
+            s.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, desc.pipeline);
+        if (r != VK_SUCCESS) {
+            log.push_back("vkCreateComputePipelines(S5 " +
+                          std::string(desc.name) + ") failed: " +
+                          std::to_string(r));
+            return false;
+        }
+    }
+
+    VkDescriptorPoolSize size{};
+    size.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    size.descriptorCount = 9;
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.maxSets = 3;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &size;
+    r = vkCreateDescriptorPool(
+        s.device, &poolInfo, nullptr, &s.s5StatsDescriptorPool);
+    if (r != VK_SUCCESS) {
+        log.push_back("vkCreateDescriptorPool(S5 stats) failed: " +
+                      std::to_string(r));
+        return false;
+    }
+
+    VkDescriptorSetLayout setLayouts[3] = {
+        s.s5StatsDescriptorSetLayout,
+        s.s5StatsDescriptorSetLayout,
+        s.s5StatsDescriptorSetLayout,
+    };
+    VkDescriptorSetAllocateInfo alloc{};
+    alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    alloc.descriptorPool = s.s5StatsDescriptorPool;
+    alloc.descriptorSetCount = 3;
+    alloc.pSetLayouts = setLayouts;
+    s.s5StatsSets.resize(3);
+    r = vkAllocateDescriptorSets(s.device, &alloc, s.s5StatsSets.data());
+    if (r != VK_SUCCESS) {
+        log.push_back("vkAllocateDescriptorSets(S5 stats) failed: " +
+                      std::to_string(r));
+        return false;
+    }
+
+    VkImageView views[3][3] = {
+        {s.s5InputView, s.s5StatsHView, s.s5StatsHView},
+        {s.s5StatsHView, s.s5StatsVView, s.s5StatsVView},
+        {s.s5InputView, s.s5StatsVView, s.s5OutputView},
+    };
+    for (uint32_t set = 0; set < 3; ++set) {
+        VkDescriptorImageInfo infos[3]{};
+        VkWriteDescriptorSet writes[3]{};
+        for (uint32_t i = 0; i < 3; ++i) {
+            infos[i].imageView = views[set][i];
+            infos[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet = s.s5StatsSets[set];
+            writes[i].dstBinding = i;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            writes[i].pImageInfo = &infos[i];
+        }
+        vkUpdateDescriptorSets(s.device, 3, writes, 0, nullptr);
+    }
+    return true;
+}
+
 bool createCommands(State& s, int width, int height, std::vector<std::string>& log) {
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -1491,6 +1668,375 @@ bool runBenchmark(State& s, int width, int height, int frames,
     return true;
 }
 
+bool createS5StatsCommands(State& s, int width, int height,
+                           std::vector<std::string>& log) {
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolInfo.queueFamilyIndex = s.queueFamily;
+    VkResult r = vkCreateCommandPool(s.device, &poolInfo, nullptr, &s.commandPool);
+    if (r != VK_SUCCESS) {
+        log.push_back("vkCreateCommandPool(S5 stats) failed: " +
+                      std::to_string(r));
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo alloc{};
+    alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    alloc.commandPool = s.commandPool;
+    alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    alloc.commandBufferCount = 1;
+    r = vkAllocateCommandBuffers(s.device, &alloc, &s.commandBuffer);
+    if (r != VK_SUCCESS) {
+        log.push_back("vkAllocateCommandBuffers(S5 stats) failed: " +
+                      std::to_string(r));
+        return false;
+    }
+
+    VkQueryPoolCreateInfo queryInfo{};
+    queryInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    queryInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    queryInfo.queryCount = 4;
+    r = vkCreateQueryPool(s.device, &queryInfo, nullptr, &s.queryPool);
+    if (r != VK_SUCCESS) {
+        log.push_back("vkCreateQueryPool(S5 stats) failed: " +
+                      std::to_string(r));
+        return false;
+    }
+
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    r = vkCreateFence(s.device, &fenceInfo, nullptr, &s.fence);
+    if (r != VK_SUCCESS) {
+        log.push_back("vkCreateFence(S5 stats) failed: " +
+                      std::to_string(r));
+        return false;
+    }
+
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    r = vkBeginCommandBuffer(s.commandBuffer, &begin);
+    if (r != VK_SUCCESS) {
+        log.push_back("vkBeginCommandBuffer(S5 stats setup) failed: " +
+                      std::to_string(r));
+        return false;
+    }
+
+    VkImageMemoryBarrier uploadBarriers[4]{};
+    VkImage images[4] = {
+        s.s5InputImage, s.s5StatsHImage, s.s5StatsVImage, s.s5OutputImage,
+    };
+    for (int i = 0; i < 4; ++i) {
+        uploadBarriers[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        uploadBarriers[i].srcAccessMask = 0;
+        uploadBarriers[i].dstAccessMask =
+            i == 0 ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_SHADER_WRITE_BIT;
+        uploadBarriers[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        uploadBarriers[i].newLayout =
+            i == 0 ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+                   : VK_IMAGE_LAYOUT_GENERAL;
+        uploadBarriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        uploadBarriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        uploadBarriers[i].image = images[i];
+        uploadBarriers[i].subresourceRange =
+            {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    }
+    vkCmdPipelineBarrier(
+        s.commandBuffer, VK_PIPELINE_STAGE_HOST_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 4, uploadBarriers);
+
+    VkClearColorValue clear{};
+    clear.float32[0] = 0.18f;
+    clear.float32[1] = 0.18f;
+    clear.float32[2] = 0.18f;
+    clear.float32[3] = 1.0f;
+    VkImageSubresourceRange clearRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(
+        s.commandBuffer, s.s5InputImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        &clear, 1, &clearRange);
+
+    VkImageMemoryBarrier inputRead{};
+    inputRead.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    inputRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    inputRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    inputRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    inputRead.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    inputRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    inputRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    inputRead.image = s.s5InputImage;
+    inputRead.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(
+        s.commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &inputRead);
+
+    vkEndCommandBuffer(s.commandBuffer);
+
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &s.commandBuffer;
+    r = vkQueueSubmit(s.queue, 1, &submit, s.fence);
+    if (r != VK_SUCCESS) {
+        log.push_back("vkQueueSubmit(S5 stats setup) failed: " +
+                      std::to_string(r));
+        return false;
+    }
+    vkWaitForFences(s.device, 1, &s.fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(s.device, 1, &s.fence);
+
+    begin.flags = 0;
+    r = vkBeginCommandBuffer(s.commandBuffer, &begin);
+    if (r != VK_SUCCESS) {
+        log.push_back("vkBeginCommandBuffer(S5 stats) failed: " +
+                      std::to_string(r));
+        return false;
+    }
+
+    const int32_t radius = std::max(
+        1, static_cast<int>(std::lround(
+               2.0 * static_cast<double>(width) / 640.0)));
+    struct StatsPush {
+        int32_t width;
+        int32_t height;
+        int32_t radius;
+        int32_t pad;
+    } statsPush{width, height, radius, 0};
+    struct MainPush {
+        int32_t width;
+        int32_t height;
+        float winScale;
+        float epsY;
+    } mainPush{width, height, static_cast<float>(width) / 640.0f, 1.0e-4f};
+
+    vkCmdResetQueryPool(s.commandBuffer, s.queryPool, 0, 4);
+    if (s.timestampValidBits > 0) {
+        vkCmdWriteTimestamp(
+            s.commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            s.queryPool, 0);
+    }
+
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    vkCmdBindPipeline(
+        s.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, s.s5StatsHPipeline);
+    vkCmdBindDescriptorSets(
+        s.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, s.s5StatsPipelineLayout,
+        0, 1, &s.s5StatsSets[0], 0, nullptr);
+    vkCmdPushConstants(
+        s.commandBuffer, s.s5StatsPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+        0, sizeof(statsPush), &statsPush);
+    vkCmdDispatch(s.commandBuffer, (width + 15) / 16, (height + 15) / 16, 1);
+    if (s.timestampValidBits > 0) {
+        vkCmdWriteTimestamp(
+            s.commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            s.queryPool, 1);
+    }
+
+    barrier.image = s.s5StatsHImage;
+    vkCmdPipelineBarrier(
+        s.commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    vkCmdBindPipeline(
+        s.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, s.s5StatsVPipeline);
+    vkCmdBindDescriptorSets(
+        s.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, s.s5StatsPipelineLayout,
+        0, 1, &s.s5StatsSets[1], 0, nullptr);
+    vkCmdPushConstants(
+        s.commandBuffer, s.s5StatsPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+        0, sizeof(statsPush), &statsPush);
+    const int vThreads = width * ((height + 31) / 32);
+    vkCmdDispatch(s.commandBuffer, (vThreads + 255) / 256, 1, 1);
+    if (s.timestampValidBits > 0) {
+        vkCmdWriteTimestamp(
+            s.commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            s.queryPool, 2);
+    }
+
+    barrier.image = s.s5StatsVImage;
+    vkCmdPipelineBarrier(
+        s.commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    vkCmdBindPipeline(
+        s.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, s.s5MainPipeline);
+    vkCmdBindDescriptorSets(
+        s.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, s.s5StatsPipelineLayout,
+        0, 1, &s.s5StatsSets[2], 0, nullptr);
+    vkCmdPushConstants(
+        s.commandBuffer, s.s5StatsPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+        0, sizeof(mainPush), &mainPush);
+    vkCmdDispatch(s.commandBuffer, (width + 15) / 16, (height + 15) / 16, 1);
+    if (s.timestampValidBits > 0) {
+        vkCmdWriteTimestamp(
+            s.commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            s.queryPool, 3);
+    }
+
+    vkEndCommandBuffer(s.commandBuffer);
+    return true;
+}
+
+bool runS5StatsProbe(int width, int height, int frames,
+                     std::vector<std::string>& log) {
+    State s;
+    bool ok = true;
+
+    if (!createInstance(s, log)) ok = false;
+    if (ok && !createDevice(s, log)) ok = false;
+    if (ok && !createStorageImage(
+            s, VK_FORMAT_R16G16B16A16_SFLOAT, width, height,
+            s.s5InputImage, s.s5InputMemory, s.s5InputView, "s5 input", log)) {
+        ok = false;
+    }
+    if (ok && !createStorageImage(
+            s, VK_FORMAT_R16G16B16A16_SFLOAT, width, height,
+            s.s5OutputImage, s.s5OutputMemory, s.s5OutputView, "s5 output", log)) {
+        ok = false;
+    }
+    if (ok && !createStorageImage(
+            s, VK_FORMAT_R16G16_SFLOAT, width, height,
+            s.s5StatsHImage, s.s5StatsHMemory, s.s5StatsHView,
+            "s5 statsH", log)) {
+        ok = false;
+    }
+    if (ok && !createStorageImage(
+            s, VK_FORMAT_R16G16_SFLOAT, width, height,
+            s.s5StatsVImage, s.s5StatsVMemory, s.s5StatsVView,
+            "s5 statsV", log)) {
+        ok = false;
+    }
+    if (ok && !createS5StatsPipeline(s, log)) ok = false;
+    if (ok && !createS5StatsCommands(s, width, height, log)) ok = false;
+
+    if (ok) {
+        const int warmup = 3;
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &s.commandBuffer;
+        for (int i = 0; i < warmup; ++i) {
+            VkResult r = vkQueueSubmit(s.queue, 1, &submit, s.fence);
+            if (r != VK_SUCCESS) {
+                log.push_back("S5 stats warmup submit failed: " +
+                              std::to_string(r));
+                ok = false;
+                break;
+            }
+            vkWaitForFences(s.device, 1, &s.fence, VK_TRUE, UINT64_MAX);
+            vkResetFences(s.device, 1, &s.fence);
+        }
+
+        std::vector<double> cpuMs;
+        std::vector<double> statsH;
+        std::vector<double> statsV;
+        std::vector<double> mainMs;
+        std::vector<double> totalMs;
+        cpuMs.reserve(frames);
+        statsH.reserve(frames);
+        statsV.reserve(frames);
+        mainMs.reserve(frames);
+        totalMs.reserve(frames);
+
+        if (ok) {
+            for (int i = 0; i < frames; ++i) {
+                auto t0 = std::chrono::steady_clock::now();
+                VkResult r = vkQueueSubmit(s.queue, 1, &submit, s.fence);
+                if (r != VK_SUCCESS) {
+                    log.push_back("S5 stats submit failed: " +
+                                  std::to_string(r));
+                    ok = false;
+                    break;
+                }
+                vkWaitForFences(s.device, 1, &s.fence, VK_TRUE, UINT64_MAX);
+                auto t1 = std::chrono::steady_clock::now();
+                vkResetFences(s.device, 1, &s.fence);
+                cpuMs.push_back(
+                    std::chrono::duration<double, std::milli>(t1 - t0).count());
+
+                if (s.timestampValidBits > 0) {
+                    uint64_t ts[4] = {0, 0, 0, 0};
+                    r = vkGetQueryPoolResults(
+                        s.device, s.queryPool, 0, 4, sizeof(ts), ts,
+                        sizeof(uint64_t),
+                        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+                    if (r == VK_SUCCESS) {
+                        double h = static_cast<double>(ts[1] - ts[0]) *
+                                   s.timestampPeriod / 1.0e6;
+                        double v = static_cast<double>(ts[2] - ts[1]) *
+                                   s.timestampPeriod / 1.0e6;
+                        double m = static_cast<double>(ts[3] - ts[2]) *
+                                   s.timestampPeriod / 1.0e6;
+                        statsH.push_back(h);
+                        statsV.push_back(v);
+                        mainMs.push_back(m);
+                        totalMs.push_back(h + v + m);
+                    }
+                }
+            }
+        }
+
+        auto stats = [](const std::vector<double>& v, double& mean,
+                        double& mn, double& mx) {
+            mean = mn = mx = 0.0;
+            if (v.empty()) return;
+            double sum = 0.0;
+            mn = mx = v[0];
+            for (double x : v) {
+                sum += x;
+                mn = std::min(mn, x);
+                mx = std::max(mx, x);
+            }
+            mean = sum / static_cast<double>(v.size());
+        };
+
+        double cpuMean = 0.0, cpuMin = 0.0, cpuMax = 0.0;
+        double hMean = 0.0, hMin = 0.0, hMax = 0.0;
+        double vMean = 0.0, vMin = 0.0, vMax = 0.0;
+        double mMean = 0.0, mMin = 0.0, mMax = 0.0;
+        double totalMean = 0.0, totalMin = 0.0, totalMax = 0.0;
+        stats(cpuMs, cpuMean, cpuMin, cpuMax);
+        stats(statsH, hMean, hMin, hMax);
+        stats(statsV, vMean, vMin, vMax);
+        stats(mainMs, mMean, mMin, mMax);
+        stats(totalMs, totalMean, totalMin, totalMax);
+
+        std::ostringstream line;
+        line << std::fixed << std::setprecision(3)
+             << "s5 stats " << width << "x" << height
+             << " frames=" << frames
+             << " cpuMean=" << cpuMean << "ms";
+        if (!totalMs.empty()) {
+            line << " statsHGpuMean=" << hMean << "ms"
+                 << " statsVGpuMean=" << vMean << "ms"
+                 << " mainGpuMean=" << mMean << "ms"
+                 << " gpuMean=" << totalMean << "ms"
+                 << " gpuMin=" << totalMin << "ms"
+                 << " gpuMax=" << totalMax << "ms";
+        } else {
+            line << " gpu=unavailable";
+        }
+        log.push_back(line.str());
+    }
+
+    if (!ok) log.push_back("s5 stats probe failed");
+    destroy(s);
+    return ok;
+}
+
 void destroy(State& s) {
     if (s.device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(s.device);
@@ -1509,6 +2055,27 @@ void destroy(State& s) {
         if (s.fence != VK_NULL_HANDLE) vkDestroyFence(s.device, s.fence, nullptr);
         if (s.queryPool != VK_NULL_HANDLE) vkDestroyQueryPool(s.device, s.queryPool, nullptr);
         if (s.commandPool != VK_NULL_HANDLE) vkDestroyCommandPool(s.device, s.commandPool, nullptr);
+        if (s.s5StatsHPipeline != VK_NULL_HANDLE) vkDestroyPipeline(s.device, s.s5StatsHPipeline, nullptr);
+        if (s.s5StatsVPipeline != VK_NULL_HANDLE) vkDestroyPipeline(s.device, s.s5StatsVPipeline, nullptr);
+        if (s.s5MainPipeline != VK_NULL_HANDLE) vkDestroyPipeline(s.device, s.s5MainPipeline, nullptr);
+        if (s.s5StatsHShader != VK_NULL_HANDLE) vkDestroyShaderModule(s.device, s.s5StatsHShader, nullptr);
+        if (s.s5StatsVShader != VK_NULL_HANDLE) vkDestroyShaderModule(s.device, s.s5StatsVShader, nullptr);
+        if (s.s5MainShader != VK_NULL_HANDLE) vkDestroyShaderModule(s.device, s.s5MainShader, nullptr);
+        if (s.s5StatsPipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(s.device, s.s5StatsPipelineLayout, nullptr);
+        if (s.s5StatsDescriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(s.device, s.s5StatsDescriptorPool, nullptr);
+        if (s.s5StatsDescriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(s.device, s.s5StatsDescriptorSetLayout, nullptr);
+        if (s.s5StatsHView != VK_NULL_HANDLE) vkDestroyImageView(s.device, s.s5StatsHView, nullptr);
+        if (s.s5StatsHImage != VK_NULL_HANDLE) vkDestroyImage(s.device, s.s5StatsHImage, nullptr);
+        if (s.s5StatsHMemory != VK_NULL_HANDLE) vkFreeMemory(s.device, s.s5StatsHMemory, nullptr);
+        if (s.s5StatsVView != VK_NULL_HANDLE) vkDestroyImageView(s.device, s.s5StatsVView, nullptr);
+        if (s.s5StatsVImage != VK_NULL_HANDLE) vkDestroyImage(s.device, s.s5StatsVImage, nullptr);
+        if (s.s5StatsVMemory != VK_NULL_HANDLE) vkFreeMemory(s.device, s.s5StatsVMemory, nullptr);
+        if (s.s5OutputView != VK_NULL_HANDLE) vkDestroyImageView(s.device, s.s5OutputView, nullptr);
+        if (s.s5OutputImage != VK_NULL_HANDLE) vkDestroyImage(s.device, s.s5OutputImage, nullptr);
+        if (s.s5OutputMemory != VK_NULL_HANDLE) vkFreeMemory(s.device, s.s5OutputMemory, nullptr);
+        if (s.s5InputView != VK_NULL_HANDLE) vkDestroyImageView(s.device, s.s5InputView, nullptr);
+        if (s.s5InputImage != VK_NULL_HANDLE) vkDestroyImage(s.device, s.s5InputImage, nullptr);
+        if (s.s5InputMemory != VK_NULL_HANDLE) vkFreeMemory(s.device, s.s5InputMemory, nullptr);
         if (s.agxPipeline != VK_NULL_HANDLE) vkDestroyPipeline(s.device, s.agxPipeline, nullptr);
         if (s.agxShader != VK_NULL_HANDLE) vkDestroyShaderModule(s.device, s.agxShader, nullptr);
         if (s.agxPipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(s.device, s.agxPipelineLayout, nullptr);
@@ -1724,6 +2291,19 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_agx_camera_vulkan_VulkanProbe_runProbe(
     JNIEnv* env, jobject /*thiz*/, jint width, jint height, jint frames) {
     std::string result = runProbe(width, height, frames);
+    LOGI("%s", result.c_str());
+    return env->NewStringUTF(result.c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_agx_camera_vulkan_VulkanProbe_runS5StatsProbe(
+    JNIEnv* env, jobject /*thiz*/, jint width, jint height, jint frames) {
+    std::vector<std::string> log;
+    runS5StatsProbe(width, height, frames, log);
+    std::ostringstream out;
+    out << "s5 stats probe " << width << "x" << height << "\n";
+    for (const auto& line : log) out << line << "\n";
+    std::string result = out.str();
     LOGI("%s", result.c_str());
     return env->NewStringUTF(result.c_str());
 }

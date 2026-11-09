@@ -1,0 +1,115 @@
+#version 450
+
+// S5-L main pass over the separable statistics. One round of the 8-window
+// SWGF selection plus the shrink fallback, reading precomputed mean/variance
+// planes instead of rebuilding a shared-memory prefix per tile.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba16f) uniform image2D u_inTex;
+layout(binding = 1, rg16f) uniform image2D u_statsTex;
+layout(binding = 2, rgba16f) uniform image2D u_outTex;
+
+layout(push_constant) uniform Push {
+    int width;
+    int height;
+    float winScale;
+    float epsY;
+} pc;
+
+const ivec2 SW_WIN[8] = ivec2[8](
+    ivec2(-2, 0), ivec2(2, 0), ivec2(0, -2), ivec2(0, 2),
+    ivec2(-2, -2), ivec2(2, -2), ivec2(-2, 2), ivec2(2, 2)
+);
+
+vec3 yccOf(vec3 rgb) {
+    float y = 0.25 * rgb.r + 0.5 * rgb.g + 0.25 * rgb.b;
+    float c1 = rgb.r - rgb.b;
+    float c2 = 0.5 * (rgb.r + rgb.b) - rgb.g;
+    return vec3(y, c1, c2);
+}
+
+vec3 rgbOf(vec3 ycc) {
+    float y = ycc.x;
+    float c1 = ycc.y;
+    float c2 = ycc.z;
+    return vec3(y + 0.5 * c1 + 0.5 * c2, y - 0.5 * c2, y - 0.5 * c1 + 0.5 * c2);
+}
+
+vec2 statsAt(ivec2 p) {
+    ivec2 q = clamp(p, ivec2(0), ivec2(pc.width - 1, pc.height - 1));
+    return imageLoad(u_statsTex, q).rg;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.width || p.y >= pc.height) return;
+
+    vec3 rgbIn = imageLoad(u_inTex, p).rgb;
+    vec3 yccIn = yccOf(rgbIn);
+
+    int R = max(1, int(round(2.0 * pc.winScale)));
+    float count = float((2 * R + 1) * (2 * R + 1));
+
+    float bestScore = 1.0e30;
+    float sndScore = 1.0e30;
+    float bestMean = 0.0;
+    float sndMean = 0.0;
+    float bestVar = 0.0;
+    float sndVar = 0.0;
+
+    for (int k = 0; k < 8; ++k) {
+        ivec2 c = ivec2(float(SW_WIN[k].x) * pc.winScale,
+                        float(SW_WIN[k].y) * pc.winScale);
+        vec2 st = statsAt(p + c);
+        float v = max(st.y - st.x * st.x, 0.0);
+        float score = abs(st.x - yccIn.x) / (v + pc.epsY);
+        if (score < bestScore) {
+            sndScore = bestScore;
+            sndMean = bestMean;
+            sndVar = bestVar;
+            bestScore = score;
+            bestMean = st.x;
+            bestVar = v;
+        } else if (score < sndScore) {
+            sndScore = score;
+            sndMean = st.x;
+            sndVar = v;
+        }
+    }
+
+    float wBest = 1.0 / (bestScore * bestScore + 1.0e-12);
+    float wSnd = 1.0 / (sndScore * sndScore + 1.0e-12);
+    float wTot = wBest + wSnd;
+    float pBest = wBest / wTot;
+    float pSnd = wSnd / wTot;
+    float meanY = pBest * bestMean + pSnd * sndMean;
+    float varY = pBest * bestVar + pSnd * sndVar;
+
+    float aY = varY / (varY + pc.epsY);
+    float outY = aY * yccIn.x + (1.0 - aY) * meanY;
+    float gateW = 1.0;
+
+    if (R > 2) {
+        vec2 stc = statsAt(p);
+        float varC = max(stc.y - stc.x * stc.x, 0.0);
+        float ref2 = max(0.105 * pc.epsY, 1.0e-30);
+        float coh = clamp(1.0 - (varC - ref2) / (2.0 * ref2), 0.0, 1.0);
+        coh = min(coh, 0.5);
+        gateW = clamp(2.0 * coh, 0.0, 1.0);
+
+        float smallY = 0.0;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                ivec2 q = clamp(p + ivec2(dx, dy),
+                                ivec2(0), ivec2(pc.width - 1, pc.height - 1));
+                vec3 c = imageLoad(u_inTex, q).rgb;
+                smallY += 0.25 * c.r + 0.5 * c.g + 0.25 * c.b;
+            }
+        }
+        outY = mix(smallY / 9.0, outY, coh);
+    }
+
+    vec3 outRgb = rgbOf(vec3(outY, yccIn.y, yccIn.z));
+    imageStore(u_outTex, p, vec4(mix(rgbIn, outRgb, 1.0), gateW));
+}

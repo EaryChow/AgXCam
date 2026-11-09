@@ -464,6 +464,13 @@ class MainActivity : AppCompatActivity() {
                     "vulkan probe exception: ${it.javaClass.simpleName}: ${it.message}"
                 }
                 CrashLogger.log("VulkanProbe", vulkan)
+                val s5 = runCatching {
+                    VulkanProbe.runS5StatsProbe(3840, 2160, 10)
+                }.getOrElse {
+                    "s5 stats probe exception: " +
+                        "${it.javaClass.simpleName}: ${it.message}"
+                }
+                CrashLogger.log("VulkanS5Stats", s5)
                 val encoder = runCatching {
                     EncoderSurfaceProbe.run()
                 }.getOrElse {
