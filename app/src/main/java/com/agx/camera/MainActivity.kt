@@ -6130,10 +6130,10 @@ override fun onResume() {
         // from the color gains. Deliberately independent of the illuminant
         // stage's dual-rate alpha.
         private const val ESTIMATOR_NEUTRAL_SMOOTHING = 0.4f
-        // Diagnostic only: slider releases/settles are unrelated to the image
-        // pipeline. Set false for a production build that does not need the
-        // performance-segmentation markers.
-        private const val LOG_SLIDER_CHANGES = false
+        // Diagnostic slider trace: one line per release/settle, including the
+        // denoise sliders. Keep enabled so exported logs identify the settings
+        // that produced a measured segment.
+        private const val LOG_SLIDER_CHANGES = true
         // Multi-stage denoise strengths, 0..1 each.
         // Renamed when S1's default moved from 0 to 1; PREF_S1_DPC_LEGACY is
         // read while the new key is absent, to carry a deliberate non-zero
