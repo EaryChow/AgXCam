@@ -34,8 +34,6 @@ import com.agx.camera.color.AgxParams
 import com.agx.camera.color.AgxPrecomputer
 import com.agx.camera.color.ColorMatrix
 import com.agx.camera.color.WhiteBalanceMath
-import com.agx.camera.vulkan.EncoderSurfaceProbe
-import com.agx.camera.vulkan.VulkanProbe
 import com.agx.camera.gpu.DegradedPreviewManager
 import com.agx.camera.gpu.PerfTimers
 import com.agx.camera.gpu.PreviewRenderer
@@ -45,6 +43,7 @@ import com.agx.camera.io.JpegEncoder
 import com.agx.camera.io.MediaStoreSaver
 import com.agx.camera.thermal.CriticalBlinkController
 import com.agx.camera.thermal.ThermalManager
+import com.agx.camera.thermal.ThermalRunGuard
 import com.agx.camera.ui.ScrollingIndexBar
 import com.agx.camera.CrashLogger
 import java.nio.ByteBuffer
@@ -75,6 +74,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var mediaStoreSaver: MediaStoreSaver
     private lateinit var developerSwitch: DeveloperSwitch
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var minimalLifecycle = false
 
     private var currentFlashMode = FlashMode.OFF
     private var currentWbMode = WhiteBalanceMode.AUTO
@@ -279,6 +279,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var criticalBlinkController: CriticalBlinkController
     @Volatile private var lastThermalTempC = 0f
     @Volatile private var lastThermalState = ThermalManager.State.NORMAL
+    @Volatile private var lastThermalLogElapsedMs = 0L
     @Volatile private var thermalProtectionEnabled = true
     @Volatile private var saveDngWithCapture = false
     // True while the confirm-disable dialog is alive. During that window the
@@ -451,22 +452,37 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         CrashLogger.log(TAG, "onCreate: begin")
+        if (ThermalRunGuard.active) {
+            CrashLogger.log(TAG, "onCreate blocked: thermal probe active")
+            minimalLifecycle = true
+            finish()
+            return
+        }
+        if (BuildConfig.AGX_VULKAN_PROBE && !intent.getBooleanExtra("normal_app", false)) {
+            CrashLogger.log(TAG, "probe APK: opening thermal probe instead of camera")
+            minimalLifecycle = true
+            startActivity(
+                Intent().setClassName(
+                    this,
+                    "com.agx.camera.thermal.ThermalProbeActivity"
+                )
+            )
+            finish()
+            return
+        }
+        ThermalRunGuard.onActivated = {
+            mainHandler.post {
+                CrashLogger.log(TAG, "thermal probe active: stopping camera pipeline")
+                if (::camera2Manager.isInitialized) {
+                    camera2Manager.close()
+                    camera2Manager.stopBackgroundThread()
+                }
+                if (::previewRenderer.isInitialized) previewRenderer.stop()
+                finish()
+            }
+        }
         if (LOG_SLIDER_CHANGES) {
             CrashLogger.log(TAG, "slider logging active: release + 900ms settle fallback")
-        }
-        if (BuildConfig.AGX_VULKAN_PROBE) {
-            // The UHD output-driven path is the only startup probe. The old
-            // full-sensor and S5 probes remain available from the native
-            // library but are not run here.
-            Thread({
-                val uhd = runCatching {
-                    EncoderSurfaceProbe.runUhd()
-                }.getOrElse {
-                    "UHD surface probe exception: " +
-                        "${it.javaClass.simpleName}: ${it.message}"
-                }
-                CrashLogger.log("VulkanUhd", uhd)
-            }, "vulkan-probes").start()
         }
         enableEdgeToEdge()
         window.addFlags(
@@ -4678,7 +4694,13 @@ class MainActivity : AppCompatActivity() {
 
 override fun onResume() {
         super.onResume()
+        if (minimalLifecycle) return
         CrashLogger.log(TAG, "onResume: cameraReady=$cameraReady openingCamera=$openingCamera")
+        if (ThermalRunGuard.active) {
+            CrashLogger.log(TAG, "onResume blocked: thermal probe active")
+            finish()
+            return
+        }
         orientationListener.enable()
         thermalManager.reset()
         disconnectBanner.visibility = View.GONE
@@ -4724,6 +4746,7 @@ override fun onResume() {
 
     override fun onPause() {
         super.onPause()
+        if (minimalLifecycle) return
         orientationListener.disable()
         CrashLogger.log(TAG, "onPause: isCapturing=$isCapturing cameraReady=$cameraReady")
         if (isCapturing) {
@@ -4737,18 +4760,26 @@ override fun onResume() {
     private fun performCleanup() {
         mainHandler.removeCallbacks(stallWatchdogRunnable)
         mainHandler.removeCallbacks(lensShadingGraceRunnable)
-        camera2Manager.close()
-        camera2Manager.stopBackgroundThread()
+        if (::camera2Manager.isInitialized) {
+            camera2Manager.close()
+            camera2Manager.stopBackgroundThread()
+        }
         cameraReady = false
-        previewRenderer.stop()
+        if (::previewRenderer.isInitialized) previewRenderer.stop()
     }
 
     override fun onDestroy() {
+        if (minimalLifecycle) {
+            ThermalRunGuard.onActivated = null
+            super.onDestroy()
+            return
+        }
         focusIndicatorHandler.removeCallbacks(focusIndicatorHideRunnable)
         // Stop the blink chain first: its tick runnable lives on the main
         // handler and would keep posting while holding this Activity (and the
         // whole GL/preview reference chain) alive after destroy.
         criticalBlinkController.stop()
+        ThermalRunGuard.onActivated = null
         super.onDestroy()
         thermalManager.stop()
         performCleanup()
@@ -4770,6 +4801,13 @@ override fun onResume() {
      * protection toggle, and cold start alike.
      */
     private fun handleThermalTier(state: ThermalManager.State) {
+        CrashLogger.log(
+            "Thermal",
+            String.format(
+                "tier=%s battery=%.1fC protection=%b",
+                state.name, lastThermalTempC, thermalProtectionEnabled
+            )
+        )
         updateThermalIndicatorFor(state)
         // Recorded before the early return, so the report names the tier even
         // when protection is off and nothing was actually throttled. A timing
@@ -4827,6 +4865,17 @@ override fun onResume() {
     }
 
     private fun onThermalTempUpdate(displayC: Float) {
+        val nowMs = SystemClock.elapsedRealtime()
+        if (lastThermalLogElapsedMs == 0L || nowMs - lastThermalLogElapsedMs >= 10_000L) {
+            lastThermalLogElapsedMs = nowMs
+            CrashLogger.log(
+                "Thermal",
+                String.format(
+                    "battery=%.1fC state=%s protection=%b",
+                    displayC, lastThermalState.name, thermalProtectionEnabled
+                )
+            )
+        }
         // Debounce: temperature backs the on-screen label/overlay numbers, so only
         // repaint when the reading actually moved or a label still needs showing.
         val changed = kotlin.math.abs(displayC - lastThermalTempC) >= 0.05f

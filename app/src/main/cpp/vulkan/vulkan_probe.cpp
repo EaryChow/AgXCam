@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "demosaic_spv.h"
@@ -1363,7 +1364,8 @@ bool createCommands(State& s, int width, int height, std::vector<std::string>& l
 }
 
 bool runSwapBenchmark(State& s, int width, int height, int frames,
-                      std::vector<std::string>& log, bool includeS2 = true) {
+                      std::vector<std::string>& log, bool includeS2 = true,
+                      int frameIntervalUs = 0, int maxSeconds = 0) {
     const int warmup = 3;
     std::vector<double> cpuMs;
     std::vector<double> demosaicGpuMs;
@@ -1371,6 +1373,7 @@ bool runSwapBenchmark(State& s, int width, int height, int frames,
     std::vector<double> agxGpuMs;
     std::vector<double> totalGpuMs;
     bool firstFrame = true;
+    const auto runStart = std::chrono::steady_clock::now();
 
     for (int i = 0; i < warmup + frames; ++i) {
         auto t0 = std::chrono::steady_clock::now();
@@ -1549,6 +1552,20 @@ bool runSwapBenchmark(State& s, int width, int height, int frames,
                 std::chrono::duration<double, std::milli>(t1 - t0).count());
         }
         firstFrame = false;
+
+        if (maxSeconds > 0 &&
+            std::chrono::duration<double>(t1 - runStart).count() >=
+                static_cast<double>(maxSeconds)) {
+            break;
+        }
+        if (frameIntervalUs > 0) {
+            const auto next = runStart +
+                std::chrono::microseconds(
+                    static_cast<long long>(i + 1) * frameIntervalUs);
+            if (std::chrono::steady_clock::now() < next) {
+                std::this_thread::sleep_until(next);
+            }
+        }
     }
 
     auto stats = [](const std::vector<double>& v, double& mean, double& mn, double& mx) {
@@ -2343,6 +2360,55 @@ std::string runUhdProbe(JNIEnv* env, jobject surface, int frames,
     return out.str();
 }
 
+std::string runBaselineThermalProbe(JNIEnv* env, jobject surface, int seconds) {
+    ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
+    if (window == nullptr) {
+        return "fixed-path baseline: ANativeWindow_fromSurface failed\n";
+    }
+
+    constexpr int rawWidth = 4096;
+    constexpr int rawHeight = 3072;
+    constexpr int outWidth = 3840;
+    constexpr int outHeight = 2160;
+    constexpr int targetFps = 30;
+
+    State s;
+    s.useSwapchain = true;
+    std::vector<std::string> log;
+    bool ok = createInstance(s, log, true);
+    if (ok) ok = createSurface(s, window, log);
+    if (ok) ok = createDevice(s, log, true);
+    if (ok) s.timestampValidBits = 0;
+    if (ok) ok = createSwapchain(s, log);
+    if (ok) ok = allocateAhb(s, rawWidth, rawHeight, log);
+    if (ok) ok = createImportedImage(s, rawWidth, rawHeight, log);
+    if (ok) ok = createOutputImages(s, outWidth, outHeight, log);
+    s.demosaicOutputWidth = outWidth;
+    s.demosaicOutputHeight = outHeight;
+    s.cropOriginX = 0.0f;
+    s.cropOriginY = 384.0f;
+    s.cropSizeX = 4096.0f;
+    s.cropSizeY = 2304.0f;
+    if (ok) ok = createPipeline(s, log);
+    if (ok) ok = createAgxPipeline(s, log);
+    if (ok) ok = createCommands(s, outWidth, outHeight, log);
+    if (ok) {
+        const int frames = std::max(1, seconds * targetFps + targetFps);
+        ok = runSwapBenchmark(
+            s, outWidth, outHeight, frames, log, false,
+            1000000 / targetFps, seconds);
+    }
+
+    std::ostringstream out;
+    out << "fixed-path baseline " << outWidth << "x" << outHeight
+        << " targetFps=" << targetFps << " seconds=" << seconds << "\n";
+    for (const auto& line : log) out << line << "\n";
+    if (!ok) out << "fixed-path baseline failed\n";
+    destroy(s);
+    ANativeWindow_release(window);
+    return out.str();
+}
+
 std::string runProbe(int width, int height, int frames) {
     State s;
     std::vector<std::string> log;
@@ -2383,6 +2449,14 @@ Java_com_agx_camera_vulkan_VulkanProbe_runUhdProbe(
     jboolean timestamps) {
     std::string result =
         runUhdProbe(env, surface, frames, timestamps == JNI_TRUE);
+    LOGI("%s", result.c_str());
+    return env->NewStringUTF(result.c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_agx_camera_vulkan_VulkanProbe_runBaselineThermalProbe(
+    JNIEnv* env, jobject /*thiz*/, jobject surface, jint seconds) {
+    std::string result = runBaselineThermalProbe(env, surface, seconds);
     LOGI("%s", result.c_str());
     return env->NewStringUTF(result.c_str());
 }

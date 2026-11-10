@@ -13,6 +13,8 @@ object VulkanProbe {
 
     external fun runS5StatsProbe(width: Int, height: Int, frames: Int): String
 
+    external fun runBaselineThermalProbe(surface: android.view.Surface, seconds: Int): String
+
     external fun runUhdProbe(
         surface: android.view.Surface,
         frames: Int,

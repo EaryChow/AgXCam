@@ -22,7 +22,19 @@ object EncoderSurfaceProbe {
         return lines.toString()
     }
 
-    private fun probe(width: Int, height: Int, lines: StringBuilder, uhd: Boolean) {
+    fun runBaselineThermal(seconds: Int): String {
+        val lines = StringBuilder()
+        probe(3840, 2160, lines, uhd = true, thermalSeconds = seconds)
+        return lines.toString()
+    }
+
+    private fun probe(
+        width: Int,
+        height: Int,
+        lines: StringBuilder,
+        uhd: Boolean,
+        thermalSeconds: Int = 0
+    ) {
         var codec: MediaCodec? = null
         var surface: android.view.Surface? = null
         try {
@@ -61,8 +73,13 @@ object EncoderSurfaceProbe {
             drain.start()
             try {
                 lines.append(
-                    if (uhd) VulkanProbe.runUhdProbe(input, 30, true)
-                    else VulkanProbe.runEncoderProbe(input, 30, false)
+                    if (thermalSeconds > 0) {
+                        VulkanProbe.runBaselineThermalProbe(input, thermalSeconds)
+                    } else if (uhd) {
+                        VulkanProbe.runUhdProbe(input, 30, true)
+                    } else {
+                        VulkanProbe.runEncoderProbe(input, 30, false)
+                    }
                 )
             } finally {
                 stop.set(true)

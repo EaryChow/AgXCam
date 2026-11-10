@@ -34,6 +34,9 @@ android {
         buildConfigField("boolean", "AGX_SYNTHETIC_BAYER", "false")
         // Vulkan probe. Build with -PenableVulkanProbe; off by default.
         buildConfigField("boolean", "AGX_VULKAN_PROBE", vulkanProbeEnabled.toString())
+        // The probe-only thermal launcher exists only in probe APKs; normal
+        // builds keep the activity installed but disabled and without an icon.
+        manifestPlaceholders["thermalProbeEnabled"] = vulkanProbeEnabled.toString()
         if (vulkanProbeEnabled) {
             ndk {
                 abiFilters += "arm64-v8a"
@@ -82,6 +85,7 @@ android {
         require(!project.hasProperty("enableNativeJpeg")) {
             "enableVulkanProbe and enableNativeJpeg both request externalNativeBuild"
         }
+        sourceSets.getByName("main").java.srcDir("src/vulkanProbe/java")
         ndkPath = requireNotNull(vulkanProbeNdkPath) {
             "vulkanProbe.ndkPath is missing from local.properties"
         }
